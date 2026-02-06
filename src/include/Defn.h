@@ -1549,15 +1549,43 @@ LibExtern SEXP*	R_PPStack;	    /* The pointer protection stack */
 void R_ReleaseMSet(SEXP mset, int keepSize);
 
 /* Evaluation Environment */
-extern0 SEXP	R_CurrentExpr;	    /* Currently evaluating expression */
-extern0 SEXP	R_ReturnedValue;    /* Slot for return-ing values */
 extern0 SEXP*	R_SymbolTable;	    /* The symbol table */
+
+/*
+ * Interpreter state.
+ *
+ * This is currently a thin wrapper around a subset of interpreter globals.
+ * The long-term goal is to allow multiple interpreter states within a process,
+ * e.g. for subinterpreters managed by threads.
+ */
+typedef struct {
+    SEXP currentExpr;        /* Currently evaluating expression */
+    SEXP returnedValue;      /* Slot for return-ing values */
+    SEXP handlerStack;       /* Condition handler stack */
+    SEXP restartStack;       /* Stack of available restarts */
+#ifdef R_USE_SIGNALS
+    RCNTXT* toplevelContext; /* The toplevel context */
+    RCNTXT* sessionContext;  /* The session toplevel context */
+    RCNTXT* exitContext;     /* The active context for on.exit processing */
+#endif
+} R_InterpreterState;
+
+extern0 R_InterpreterState R_Interpreter0;
+extern0 R_InterpreterState *R_Interpreter INI_as(&R_Interpreter0);
+
+#define R_CurrentExpr   (R_Interpreter->currentExpr)
+#define R_ReturnedValue (R_Interpreter->returnedValue)
+#define R_HandlerStack  (R_Interpreter->handlerStack)
+#define R_RestartStack  (R_Interpreter->restartStack)
+#ifdef R_USE_SIGNALS
+#define R_ToplevelContext (R_Interpreter->toplevelContext)
+#define R_SessionContext  (R_Interpreter->sessionContext)
+#define R_ExitContext     (R_Interpreter->exitContext)
+#endif
+
 #ifdef R_USE_SIGNALS
 extern0 RCNTXT R_Toplevel;	      /* Storage for the toplevel context */
-extern0 RCNTXT* R_ToplevelContext;  /* The toplevel context */
 LibExtern RCNTXT* R_GlobalContext;    /* The global context */
-extern0 RCNTXT* R_SessionContext;   /* The session toplevel context */
-extern0 RCNTXT* R_ExitContext;      /* The active context for on.exit processing */
 #endif
 extern Rboolean R_Visible;	    /* Value visibility flag */
 extern0 int	R_EvalDepth	INI_as(0);	/* Evaluation recursion depth */
@@ -1626,8 +1654,6 @@ extern void 	R_setupHistory(void);
 extern0 int	R_CollectWarnings INI_as(0);	/* the number of warnings */
 extern0 SEXP	R_Warnings;	    /* the warnings and their calls */
 extern0 int	R_ShowErrorMessages INI_as(1);	/* show error messages? */
-extern0 SEXP	R_HandlerStack;	/* Condition handler stack */
-extern0 SEXP	R_RestartStack;	/* Stack of available restarts */
 extern0 Rboolean R_warn_partial_match_args   INI_as(FALSE);
 extern0 Rboolean R_warn_partial_match_dollar INI_as(FALSE);
 extern0 Rboolean R_warn_partial_match_attr INI_as(FALSE);
