@@ -21,14 +21,136 @@
 #include <config.h>
 #endif
 
+#define R_USE_SIGNALS 1
+
 #include <Defn.h>
 #include <Internal.h>
+
+#ifdef HAVE_PTHREAD
+# include <pthread.h>
+#endif
 
 static SEXP checkArgIsSymbol(SEXP x) {
     if (TYPEOF(x) != SYMSXP)
 	error("argument must be a symbol");
     return x;
 }
+
+#ifdef HAVE_PTHREAD
+typedef struct {
+    SEXP XX;
+    R_xlen_t n;
+    SEXP *results;
+    R_xlen_t next;
+    pthread_mutex_t next_mutex;
+    int error;
+    char errmsg[1024];
+    pthread_mutex_t err_mutex;
+    uintptr_t main_CStackStart;
+    uintptr_t main_CStackLimit;
+    uintptr_t main_OldCStackLimit;
+} mtl_shared_t;
+
+typedef struct {
+    mtl_shared_t *sh;
+    SEXP argcell;
+    SEXP fcall;
+} mtl_worker_t;
+
+static pthread_mutex_t mtl_gil = PTHREAD_MUTEX_INITIALIZER;
+
+static SEXP mtl_try_eval(SEXP expr, SEXP env, int *pError)
+{
+    RCNTXT thiscontext;
+    RCNTXT * volatile saveToplevelContext;
+    volatile int savestack;
+    volatile SEXP topExp, oldHStack, oldRStack, oldRVal;
+    volatile Rboolean oldvis;
+    SEXP val = NULL;
+
+    PROTECT(oldHStack = R_HandlerStack);
+    PROTECT(oldRStack = R_RestartStack);
+    PROTECT(oldRVal = R_ReturnedValue);
+    PROTECT(topExp = R_CurrentExpr);
+    oldvis = R_Visible;
+    savestack = R_PPStackTop;
+    R_HandlerStack = R_NilValue;
+    R_RestartStack = R_NilValue;
+
+    begincontext(&thiscontext, CTXT_TOPLEVEL, R_NilValue, R_GlobalEnv,
+		 R_BaseEnv, R_NilValue, R_NilValue);
+    saveToplevelContext = R_ToplevelContext;
+    if (SETJMP(thiscontext.cjmpbuf)) {
+	if (pError) *pError = 1;
+	val = NULL;
+    } else {
+	if (pError) *pError = 0;
+	R_GlobalContext = R_ToplevelContext = &thiscontext;
+	val = eval(expr, env);
+    }
+    endcontext(&thiscontext);
+    R_ToplevelContext = saveToplevelContext;
+    R_PPStackTop = savestack;
+    R_CurrentExpr = topExp;
+    R_HandlerStack = oldHStack;
+    R_RestartStack = oldRStack;
+    R_ReturnedValue = oldRVal;
+    R_Visible = oldvis;
+    UNPROTECT(4);
+
+    return val;
+}
+
+static void *mtl_worker_main(void *vp)
+{
+    mtl_worker_t *w = (mtl_worker_t *) vp;
+    mtl_shared_t *s = w->sh;
+
+    for (;;) {
+	pthread_mutex_lock(&s->next_mutex);
+	if (s->error || s->next >= s->n) {
+	    pthread_mutex_unlock(&s->next_mutex);
+	    break;
+	}
+	R_xlen_t i = s->next++;
+	pthread_mutex_unlock(&s->next_mutex);
+
+	pthread_mutex_lock(&mtl_gil);
+
+	/* Disable stack checks in this thread; our saved start is for main. */
+	R_CStackStart = (uintptr_t) -1;
+	R_CStackLimit = (uintptr_t) -1;
+	R_OldCStackLimit = (uintptr_t) 0;
+
+	SETCAR(w->argcell, VECTOR_ELT(s->XX, i));
+	int err = 0;
+	SEXP val = mtl_try_eval(w->fcall, R_GlobalEnv, &err);
+	if (err || val == NULL) {
+	    pthread_mutex_lock(&s->err_mutex);
+	    if (!s->error) {
+		s->error = 1;
+		const char *msg = R_curErrorBuf();
+		if (msg == NULL) msg = "error";
+		snprintf(s->errmsg, sizeof(s->errmsg), "%s", msg);
+	    }
+	    pthread_mutex_unlock(&s->err_mutex);
+	    pthread_mutex_unlock(&mtl_gil);
+	    break;
+	}
+
+	PROTECT(val);
+	if (MAYBE_REFERENCED(val))
+	    val = lazy_duplicate(val);
+	R_PreserveObject(val);
+	UNPROTECT(1);
+
+	s->results[i] = val;
+	pthread_mutex_unlock(&mtl_gil);
+    }
+
+    return NULL;
+}
+#endif /* HAVE_PTHREAD */
 
 /* .Internal(lapply(X, FUN)) */
 
@@ -87,6 +209,121 @@ attribute_hidden SEXP do_lapply(SEXP call, SEXP op, SEXP args, SEXP rho)
 
     UNPROTECT(6);
     return ans;
+}
+
+/* .Internal(mtlapply(X, FUN, DOTS, THREADS)) */
+attribute_hidden SEXP do_mtlapply(SEXP call, SEXP op, SEXP args, SEXP rho)
+{
+    checkArity(op, args);
+
+    SEXP XX = CAR(args);
+    SEXP FUN = CADR(args);
+    SEXP dots = CADDR(args);
+    int nthreads = asInteger(CADDDR(args));
+
+    if (nthreads == NA_INTEGER || nthreads < 1)
+	error(_("invalid '%s' value"), "threads");
+
+    if (TYPEOF(XX) != VECSXP)
+	error(_("'%s' must be a list"), "X");
+    if (!isFunction(FUN))
+	error(_("'%s' must be a function"), "FUN");
+    if (TYPEOF(dots) != VECSXP)
+	error(_("'%s' must be a list"), "DOTS");
+
+#ifndef HAVE_PTHREAD
+    error("mtlapply() requires pthreads support");
+#else
+    R_xlen_t n = xlength(XX);
+    if (n == NA_INTEGER)
+	error(_("invalid length"));
+
+    if (nthreads > n) nthreads = (int) n;
+
+    SEXP names = getAttrib(XX, R_NamesSymbol);
+
+    /* Convert DOTS list to a pairlist once, then share it across threads. */
+    int nprotect = 0;
+    PROTECT(XX); nprotect++;
+    PROTECT(FUN); nprotect++;
+    PROTECT(dots); nprotect++;
+    SEXP tail0 = PROTECT(VectorToPairList(dots)); nprotect++;
+
+    /* Results are preserved while threads are running to keep them GC-safe. */
+    SEXP *results = (SEXP *) calloc((size_t) n, sizeof(SEXP));
+    if (results == NULL)
+	error(_("cannot allocate memory"));
+
+    /* Save main thread's stack checks; worker threads will disable them. */
+    mtl_shared_t sh;
+    sh.XX = XX;
+    sh.n = n;
+    sh.results = results;
+    sh.next = 0;
+    sh.error = 0;
+    sh.errmsg[0] = '\0';
+    sh.main_CStackStart = R_CStackStart;
+    sh.main_CStackLimit = R_CStackLimit;
+    sh.main_OldCStackLimit = R_OldCStackLimit;
+
+    pthread_mutex_init(&sh.next_mutex, NULL);
+    pthread_mutex_init(&sh.err_mutex, NULL);
+
+    pthread_t *threads = (pthread_t *) calloc((size_t) nthreads, sizeof(pthread_t));
+    mtl_worker_t *workers = (mtl_worker_t *) calloc((size_t) nthreads, sizeof(mtl_worker_t));
+    if (threads == NULL || workers == NULL)
+	error(_("cannot allocate memory"));
+
+    /* Per-thread call objects (each thread gets its own DOTS pairlist). */
+    for (int t = 0; t < nthreads; t++) {
+	workers[t].sh = &sh;
+	SEXP tail = PROTECT(duplicate(tail0)); nprotect++;
+	workers[t].argcell = PROTECT(CONS(R_NilValue, tail)); nprotect++;
+	workers[t].fcall = PROTECT(LCONS(FUN, workers[t].argcell)); nprotect++;
+    }
+
+    for (int t = 0; t < nthreads; t++) {
+	int rc = pthread_create(&threads[t], NULL, mtl_worker_main, &workers[t]);
+	if (rc != 0)
+	    error("pthread_create failed");
+    }
+    for (int t = 0; t < nthreads; t++)
+	pthread_join(threads[t], NULL);
+
+    /* Restore main thread stack check globals. */
+    R_CStackStart = sh.main_CStackStart;
+    R_CStackLimit = sh.main_CStackLimit;
+    R_OldCStackLimit = sh.main_OldCStackLimit;
+
+    pthread_mutex_destroy(&sh.next_mutex);
+    pthread_mutex_destroy(&sh.err_mutex);
+    free(threads);
+    free(workers);
+
+    if (sh.error) {
+	for (R_xlen_t i = 0; i < n; i++)
+	    if (results[i] != NULL)
+		R_ReleaseObject(results[i]);
+	free(results);
+	UNPROTECT(nprotect);
+	error("%s", sh.errmsg[0] ? sh.errmsg : "mtlapply error");
+    }
+
+    SEXP ans = PROTECT(allocVector(VECSXP, n)); nprotect++;
+    if (!isNull(names)) setAttrib(ans, R_NamesSymbol, names);
+    for (R_xlen_t i = 0; i < n; i++) {
+	SEXP val = results[i];
+	if (val == NULL)
+	    val = R_NilValue;
+	SET_VECTOR_ELT(ans, i, val);
+	if (results[i] != NULL)
+	    R_ReleaseObject(results[i]);
+    }
+
+    free(results);
+    UNPROTECT(nprotect);
+    return ans;
+#endif
 }
 
 /* .Internal(vapply(X, FUN, FUN.VALUE, USE.NAMES)) */
