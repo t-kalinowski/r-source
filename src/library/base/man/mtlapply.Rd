@@ -30,6 +30,11 @@ mtlapply(X, FUN, \dots, threads = 2L)
   (as in \code{\link[parallel]{mclapply}} on Unix-alikes), and the worker
   threads serialize entry to the interpreter via a global lock.  This means
   \code{mtlapply} is not expected to speed up CPU-bound computations.
+
+  The worker function must not attempt to mutate process-global state.
+  In particular, \code{options()} can be used to query options, but
+  setting options from worker threads is not supported and results in an
+  error.
 }
 \value{
   A list of the same length as \code{X}.
@@ -41,4 +46,3 @@ mtlapply(X, FUN, \dots, threads = 2L)
 x <- as.list(1:5)
 mtlapply(x, function(z) z * 2, threads = 2L)
 }
-

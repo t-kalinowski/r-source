@@ -14,7 +14,8 @@ test-src-gct = \
 	ok-errors.R \
 	method-dispatch.R \
 	any-all.R \
-	structure.R
+	structure.R \
+	mtlapply.R
 test-src-strict-1 = \
 	$(test-src-gct) \
 	d-p-q-r-tests.R

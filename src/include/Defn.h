@@ -1574,6 +1574,7 @@ typedef struct {
     SEXP restartStack;       /* Stack of available restarts */
     Rboolean visible;        /* Value visibility flag */
     int showErrorMessages;   /* show error messages? */
+    int allowOptionsSet;     /* can this interpreter mutate global options? */
     int collectWarnings;     /* number of collected warnings (0 means none) */
     SEXP warnings;           /* collected warnings + calls */
     int evalDepth;           /* Evaluation recursion depth */
@@ -1608,6 +1609,7 @@ extern R_THREAD_LOCAL R_InterpreterState *R_Interpreter INI_as(&R_Interpreter0);
 #define R_RestartStack  (R_Interpreter->restartStack)
 #define R_Visible       (R_Interpreter->visible)
 #define R_ShowErrorMessages (R_Interpreter->showErrorMessages)
+#define R_AllowOptionsSet (R_Interpreter->allowOptionsSet)
 #define R_CollectWarnings (R_Interpreter->collectWarnings)
 #define R_Warnings      (R_Interpreter->warnings)
 #define R_EvalDepth     (R_Interpreter->evalDepth)

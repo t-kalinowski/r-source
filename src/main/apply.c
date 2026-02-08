@@ -70,6 +70,7 @@ static void mtl_interp_init_from_main(R_InterpreterState *st)
     st->restartStack = R_NilValue;
     st->visible = TRUE;
     st->showErrorMessages = 1;
+    st->allowOptionsSet = 0;
     st->collectWarnings = 0;
     st->warnings = R_NilValue;
     st->evalDepth = 0;

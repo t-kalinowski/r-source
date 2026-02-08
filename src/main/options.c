@@ -230,6 +230,8 @@ static SEXP SetOption(SEXP tag, SEXP value)
 {
     SEXP opt, old, t;
     PROTECT(value);
+    if (!R_AllowOptionsSet)
+	error(_("setting options is not supported in worker threads"));
     t = opt = SYMVALUE(Options());
     if (!isList(opt))
 	error(_("corrupted options list"));

@@ -59,6 +59,7 @@ attribute_hidden void nl_Rdummy(void)
 attribute_hidden R_InterpreterState R_Interpreter0 = {
     .visible = TRUE,
     .showErrorMessages = 1,
+    .allowOptionsSet = 1,
     .collectWarnings = 0,
     .warnings = NULL,
     .evalDepth = 0,
