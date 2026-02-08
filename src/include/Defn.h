@@ -1578,6 +1578,7 @@ typedef struct {
     SEXP handlerStack;       /* Condition handler stack */
     SEXP restartStack;       /* Stack of available restarts */
     Rboolean visible;        /* Value visibility flag */
+    int showErrorMessages;   /* show error messages? */
 #ifdef R_USE_SIGNALS
     RCNTXT* toplevelContext; /* The toplevel context */
     RCNTXT* globalContext;   /* The global (top) context */
@@ -1586,7 +1587,7 @@ typedef struct {
 #endif
 } R_InterpreterState;
 
-extern0 R_InterpreterState R_Interpreter0;
+extern R_InterpreterState R_Interpreter0;
 /*
  * Must be visible for internal shared objects (e.g. grDevices.so) that are
  * built against Defn.h and use macros like R_Visible.
@@ -1598,6 +1599,7 @@ extern R_THREAD_LOCAL R_InterpreterState *R_Interpreter INI_as(&R_Interpreter0);
 #define R_HandlerStack  (R_Interpreter->handlerStack)
 #define R_RestartStack  (R_Interpreter->restartStack)
 #define R_Visible       (R_Interpreter->visible)
+#define R_ShowErrorMessages (R_Interpreter->showErrorMessages)
 #ifdef R_USE_SIGNALS
 #define R_ToplevelContext (R_Interpreter->toplevelContext)
 #define R_SessionContext  (R_Interpreter->sessionContext)
@@ -1673,7 +1675,6 @@ extern void 	R_setupHistory(void);
 /* Warnings/Errors */
 extern0 int	R_CollectWarnings INI_as(0);	/* the number of warnings */
 extern0 SEXP	R_Warnings;	    /* the warnings and their calls */
-extern0 int	R_ShowErrorMessages INI_as(1);	/* show error messages? */
 extern0 Rboolean R_warn_partial_match_args   INI_as(FALSE);
 extern0 Rboolean R_warn_partial_match_dollar INI_as(FALSE);
 extern0 Rboolean R_warn_partial_match_attr INI_as(FALSE);

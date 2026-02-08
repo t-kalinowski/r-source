@@ -50,6 +50,17 @@ attribute_hidden void nl_Rdummy(void)
 }
 #endif
 
+/*
+ * Default interpreter state instance.
+ *
+ * This is the "main" interpreter state used by the primary thread. Worker
+ * interpreters (e.g. from mtlapply()) install a different R_Interpreter pointer.
+ */
+attribute_hidden R_InterpreterState R_Interpreter0 = {
+    .visible = TRUE,
+    .showErrorMessages = 1
+};
+
 
 /* The 'real' main() program is in Rmain.c on Unix-alikes, and
    src/gnuwin/front-ends/graphappmain.c on Windows, unless of course
