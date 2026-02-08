@@ -57,6 +57,7 @@ attribute_hidden void nl_Rdummy(void)
  * interpreters (e.g. from mtlapply()) install a different R_Interpreter pointer.
  */
 attribute_hidden R_InterpreterState R_Interpreter0 = {
+    .heap = NULL,
     .visible = TRUE,
     .showErrorMessages = 1,
     .allowOptionsSet = 1,

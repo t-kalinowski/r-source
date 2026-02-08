@@ -1575,6 +1575,7 @@ extern0 SEXP*	R_SymbolTable;	    /* The symbol table */
  * e.g. for subinterpreters managed by threads.
  */
 typedef struct R_InterpreterState_ {
+    struct R_mtl_heap_state_ *heap; /* per-interpreter heap/GC state (memory.c) */
     SEXP currentExpr;        /* Currently evaluating expression */
     SEXP returnedValue;      /* Slot for return-ing values */
     SEXP handlerStack;       /* Condition handler stack */
