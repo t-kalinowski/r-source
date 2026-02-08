@@ -1644,6 +1644,8 @@ attribute_hidden void R_mtl_global_lock(void);
 attribute_hidden void R_mtl_global_unlock(void);
 attribute_hidden void R_mtl_global_unlock_all(void);
 
+attribute_hidden void R_mtl_adopt_worker_heap(R_InterpreterState *st);
+
 /* Thread-local storage (TLS) support for internal multi-threading work. */
 #ifndef R_THREAD_LOCAL
 # ifdef __cplusplus
