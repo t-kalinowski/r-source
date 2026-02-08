@@ -63,7 +63,10 @@ attribute_hidden R_InterpreterState R_Interpreter0 = {
     .bcintactive = 0,
     .bcpc = NULL,
     .bcbody = NULL,
-    .bcframe = NULL
+    .bcframe = NULL,
+#ifdef R_USE_SIGNALS
+    .pendingPromises = NULL,
+#endif
 };
 
 

@@ -1580,6 +1580,7 @@ typedef struct {
     SEXP bcbody;             /* current byte code object */
     R_bcFrame_type *bcframe; /* bcEval() frame */
 #ifdef R_USE_SIGNALS
+    struct RPRSTACK *pendingPromises; /* pending promise stack */
     RCNTXT* toplevelContext; /* The toplevel context */
     RCNTXT* globalContext;   /* The global (top) context */
     RCNTXT* sessionContext;  /* The session toplevel context */
@@ -1606,6 +1607,7 @@ extern R_THREAD_LOCAL R_InterpreterState *R_Interpreter INI_as(&R_Interpreter0);
 #define R_BCbody        (R_Interpreter->bcbody)
 #define R_BCFrame       (R_Interpreter->bcframe)
 #ifdef R_USE_SIGNALS
+#define R_PendingPromises (R_Interpreter->pendingPromises)
 #define R_ToplevelContext (R_Interpreter->toplevelContext)
 #define R_SessionContext  (R_Interpreter->sessionContext)
 #define R_ExitContext     (R_Interpreter->exitContext)
@@ -1632,10 +1634,6 @@ extern uintptr_t R_OldCStackLimit INI_as((uintptr_t)0); /* Old value while
 extern uintptr_t R_CStackStart	INI_as((uintptr_t)-1);	/* Initial stack address */
 /* Default here is for Windows: set from configure in src/unix/system.c */
 extern int	R_CStackDir	INI_as(1);	/* C stack direction */
-
-#ifdef R_USE_SIGNALS
-extern0 struct RPRSTACK *R_PendingPromises INI_as(NULL); /* Pending promise stack */
-#endif
 
 /* File Input/Output */
 extern0 bool R_Quiet	INI_as(false);	/* Be as quiet as possible */
