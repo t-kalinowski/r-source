@@ -162,10 +162,6 @@ static void *mtl_worker_main(void *vp)
 
 	/* Reset per-interpreter stacks/slots for this evaluation. */
 	mtl_interp_reset_for_eval(&w->interp, s);
-#ifdef R_USE_SIGNALS
-	RCNTXT *saved_global_context = R_GlobalContext;
-	R_GlobalContext = w->interp.globalContext;
-#endif
 
 	SETCAR(w->argcell, VECTOR_ELT(s->XX, i));
 	int err = 0;
@@ -180,10 +176,6 @@ static void *mtl_worker_main(void *vp)
 		    }
 		    pthread_mutex_unlock(&s->err_mutex);
 	    R_Interpreter = saved_interp;
-#ifdef R_USE_SIGNALS
-	    w->interp.globalContext = R_GlobalContext;
-	    R_GlobalContext = saved_global_context;
-#endif
 	    pthread_mutex_unlock(&mtl_gil);
 	    break;
 	}
@@ -196,10 +188,6 @@ static void *mtl_worker_main(void *vp)
 
 	s->results[i] = val;
 	R_Interpreter = saved_interp;
-#ifdef R_USE_SIGNALS
-	w->interp.globalContext = R_GlobalContext;
-	R_GlobalContext = saved_global_context;
-#endif
 	pthread_mutex_unlock(&mtl_gil);
     }
 

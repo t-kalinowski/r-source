@@ -1637,13 +1637,11 @@ extern R_THREAD_LOCAL R_InterpreterState *R_Interpreter INI_as(&R_Interpreter0);
 #define R_Toplevel      (R_Interpreter->toplevel)
 #define R_PendingPromises (R_Interpreter->pendingPromises)
 #define R_ToplevelContext (R_Interpreter->toplevelContext)
+#define R_GlobalContext   (R_Interpreter->globalContext)
 #define R_SessionContext  (R_Interpreter->sessionContext)
 #define R_ExitContext     (R_Interpreter->exitContext)
 #endif
 
-#ifdef R_USE_SIGNALS
-LibExtern RCNTXT* R_GlobalContext;    /* The global context */
-#endif
 extern0 int	R_BrowseLines	INI_as(0);	/* lines/per call in browser :
 						 * options(deparse.max.lines) */
 extern0 int	R_Expressions	INI_as(5000);	/* options(expressions) */
