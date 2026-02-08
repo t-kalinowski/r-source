@@ -19,7 +19,6 @@
 mtlapply <- function(X, FUN, ..., threads = 2L)
 {
     FUN <- match.fun(FUN)
-    if(!is.vector(X) || is.object(X)) X <- as.list(X)
+    X <- as.list(X)
     .Internal(mtlapply(X, FUN, list(...), as.integer(threads)))
 }
-
