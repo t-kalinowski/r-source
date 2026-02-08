@@ -40,6 +40,7 @@
 
 #ifdef HAVE_PTHREAD
 # include <pthread.h>
+# include <stdatomic.h>
 #endif
 
 #include <R_ext/RS.h> /* for S4 allocation */
@@ -865,6 +866,96 @@ static R_INLINE PAGE_HEADER *mtl_page_header_from_ptr(const void *p)
     return (PAGE_HEADER *) (a & ~R_mtl_pagesize_mask);
 }
 
+/* Owner map for "large" nodes allocated via malloc/custom allocator
+ * (i.e. not within a PAGE_HEADER-managed node page). */
+#define MTL_LARGE_OWNER_SIZE (1u << 20) /* must be power of two */
+static _Atomic(uintptr_t) *mtl_large_owner_keys = NULL;
+static _Atomic(uintptr_t) *mtl_large_owner_vals = NULL;
+static size_t mtl_large_owner_mask = 0;
+
+static void mtl_large_owner_init(void)
+{
+    if (mtl_large_owner_keys != NULL)
+	return;
+    mtl_large_owner_keys =
+	(_Atomic(uintptr_t) *) calloc(MTL_LARGE_OWNER_SIZE, sizeof(_Atomic(uintptr_t)));
+    mtl_large_owner_vals =
+	(_Atomic(uintptr_t) *) calloc(MTL_LARGE_OWNER_SIZE, sizeof(_Atomic(uintptr_t)));
+    if (mtl_large_owner_keys == NULL || mtl_large_owner_vals == NULL)
+	R_Suicide("InitMemory: failed to allocate mtl large owner map");
+    mtl_large_owner_mask = MTL_LARGE_OWNER_SIZE - 1;
+}
+
+static R_INLINE size_t mtl_large_owner_hash(uintptr_t k)
+{
+    /* 64-bit mix; on 32-bit this still does something reasonable. */
+    k ^= k >> 33;
+    k *= UINT64_C(0xff51afd7ed558ccd);
+    k ^= k >> 33;
+    return (size_t) k;
+}
+
+static void mtl_large_owner_set(SEXP s, R_mtl_heap_state *owner)
+{
+    if (mtl_large_owner_keys == NULL)
+	mtl_large_owner_init();
+
+    uintptr_t k = (uintptr_t) s;
+    uintptr_t v = (uintptr_t) owner;
+    size_t idx = mtl_large_owner_hash(k) & mtl_large_owner_mask;
+
+    for (size_t probes = 0; probes <= mtl_large_owner_mask; probes++) {
+	uintptr_t cur = atomic_load_explicit(&mtl_large_owner_keys[idx], memory_order_acquire);
+	if (cur == k || cur == ~k) {
+	    atomic_store_explicit(&mtl_large_owner_vals[idx], v, memory_order_release);
+	    atomic_store_explicit(&mtl_large_owner_keys[idx], k, memory_order_release);
+	    return;
+	}
+	if (cur == 0) {
+	    uintptr_t expected = 0;
+	    if (atomic_compare_exchange_weak_explicit(&mtl_large_owner_keys[idx],
+						      &expected, ~k,
+						      memory_order_acq_rel,
+						      memory_order_acquire)) {
+		atomic_store_explicit(&mtl_large_owner_vals[idx], v, memory_order_release);
+		atomic_store_explicit(&mtl_large_owner_keys[idx], k, memory_order_release);
+		return;
+	    }
+	}
+	idx = (idx + 1) & mtl_large_owner_mask;
+    }
+    R_Suicide("mtl large owner map full");
+}
+
+static R_INLINE R_mtl_heap_state *mtl_large_owner_get(SEXP s)
+{
+    if (mtl_large_owner_keys == NULL)
+	return NULL;
+    uintptr_t k = (uintptr_t) s;
+    size_t idx = mtl_large_owner_hash(k) & mtl_large_owner_mask;
+    for (size_t probes = 0; probes <= mtl_large_owner_mask; probes++) {
+	uintptr_t cur = atomic_load_explicit(&mtl_large_owner_keys[idx], memory_order_acquire);
+	if (cur == 0)
+	    return NULL;
+	if (cur == k) {
+	    uintptr_t v = atomic_load_explicit(&mtl_large_owner_vals[idx], memory_order_acquire);
+	    return (R_mtl_heap_state *) v;
+	}
+	idx = (idx + 1) & mtl_large_owner_mask;
+    }
+    return NULL;
+}
+
+static R_INLINE R_mtl_heap_state *mtl_sexp_owner(SEXP s)
+{
+    if (s == NULL)
+	return NULL;
+    PAGE_HEADER *page = mtl_page_header_from_ptr((const void *) s);
+    if (page->magic == R_MTL_PAGE_MAGIC)
+	return page->owner;
+    return mtl_large_owner_get(s);
+}
+
 /* The Heap Structure.  Nodes for each class/generation combination
    are arranged in circular doubly-linked lists.  The double linking
    allows nodes to be removed in constant time; this is used by the
@@ -1495,6 +1586,7 @@ static void ReleaseLargeFreeVectors(void)
 #endif
 		UNSNAP_NODE(s);
 		R_GenHeap[node_class].AllocCount--;
+		mtl_large_owner_set(s, NULL);
 		if (node_class == LARGE_NODE_CLASS) {
 		    R_LargeVallocSize -= size;
 		    free(s);
@@ -2629,6 +2721,7 @@ attribute_hidden void InitMemory(void)
 	    R_Suicide("InitMemory: page size is not a power of two");
 	R_mtl_pagesize_mask = (uintptr_t) (R_mtl_pagesize - 1);
     }
+    mtl_large_owner_init();
 
     init_gctorture();
     init_gc_grow_settings();
@@ -3412,6 +3505,7 @@ SEXP allocVector3(SEXPTYPE type, R_xlen_t length, R_allocator_t *allocator)
 	    SNAP_NODE(s, R_GenHeap[node_class].New);
 	    R_mtl_heap_unlock();
 	    heap_alloc_resume();
+	    mtl_large_owner_set(s, R_HEAP);
 	}
 	ATTRIB(s) = R_NilValue;
 	SET_TYPEOF(s, type);
