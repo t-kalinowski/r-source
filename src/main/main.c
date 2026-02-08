@@ -81,6 +81,7 @@ attribute_hidden R_InterpreterState R_Interpreter0 = {
     .inPrintWarnings = 0,
     .immediateWarning = 0,
     .noBreakWarning = 0,
+    .next = NULL,
 #ifdef R_USE_SIGNALS
     .pendingPromises = NULL,
 #endif

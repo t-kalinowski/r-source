@@ -100,6 +100,7 @@ static void mtl_interp_init_from_main(R_InterpreterState *st)
     st->inPrintWarnings = 0;
     st->immediateWarning = 0;
     st->noBreakWarning = 0;
+    st->next = NULL;
 #ifdef R_USE_SIGNALS
     st->pendingPromises = NULL;
     st->toplevelContext = R_ToplevelContext;
@@ -156,6 +157,8 @@ static void *mtl_worker_main(void *vp)
     mtl_worker_t *w = (mtl_worker_t *) vp;
     mtl_shared_t *s = w->sh;
 
+    R_RegisterInterpreterState(&w->interp);
+
     for (;;) {
 	pthread_mutex_lock(&s->next_mutex);
 	if (s->error || s->next >= s->n) {
@@ -207,6 +210,7 @@ static void *mtl_worker_main(void *vp)
     }
 
     /* Worker interpreter stacks are not reused; free its protection stack. */
+    R_UnregisterInterpreterState(&w->interp);
     free(w->interp.ppStack);
     w->interp.ppStack = NULL;
     w->interp.ppStackTop = 0;

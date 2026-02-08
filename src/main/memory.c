@@ -36,6 +36,10 @@
 
 #include <stdarg.h>
 
+#ifdef HAVE_PTHREAD
+# include <pthread.h>
+#endif
+
 #include <R_ext/RS.h> /* for S4 allocation */
 #include <R_ext/Print.h>
 
@@ -84,6 +88,20 @@
 #include <Defn.h>
 #include <Internal.h>
 #include <R_ext/GraphicsEngine.h> /* GEDevDesc, GEgetDevice */
+
+/* Registry of interpreter states (main + worker subinterpreters).
+ *
+ * Needed so the global GC can scan all protection stacks and per-interpreter
+ * roots even when GC is triggered from a different interpreter/thread. */
+static R_InterpreterState *R_InterpreterRegistry = NULL;
+#ifdef HAVE_PTHREAD
+static pthread_mutex_t R_InterpreterRegistryMutex = PTHREAD_MUTEX_INITIALIZER;
+# define LOCK_INTERP_REGISTRY() pthread_mutex_lock(&R_InterpreterRegistryMutex)
+# define UNLOCK_INTERP_REGISTRY() pthread_mutex_unlock(&R_InterpreterRegistryMutex)
+#else
+# define LOCK_INTERP_REGISTRY() ((void) 0)
+# define UNLOCK_INTERP_REGISTRY() ((void) 0)
+#endif
 #include <R_ext/Rdynload.h>
 #include <R_ext/Rallocators.h> /* for R_allocator_t structure */
 #include <Rmath.h> // R_pow_di
@@ -1766,22 +1784,14 @@ static int RunGenCollect(R_size_t size_needed)
     FORWARD_NODE(R_MissingArg);
     FORWARD_NODE(R_InBCInterpreter);
 
-    FORWARD_NODE(R_GlobalEnv);	           /* Global environment */
-    FORWARD_NODE(R_BaseEnv);
-    FORWARD_NODE(R_EmptyEnv);
-    FORWARD_NODE(R_Warnings);	           /* Warnings, if any */
-    FORWARD_NODE(R_ReturnedValue);
+	    FORWARD_NODE(R_GlobalEnv);	           /* Global environment */
+	    FORWARD_NODE(R_BaseEnv);
+	    FORWARD_NODE(R_EmptyEnv);
+	    FORWARD_NODE(R_Srcref);                /* Current source reference */
 
-    FORWARD_NODE(R_HandlerStack);          /* Condition handler stack */
-    FORWARD_NODE(R_RestartStack);          /* Available restarts stack */
-
-    FORWARD_NODE(R_BCbody);                /* Current byte code object */
-    FORWARD_NODE(R_Srcref);                /* Current source reference */
-    FORWARD_NODE(R_ParseErrorFile);        /* Parse error source file (may be NULL) */
-
-    FORWARD_NODE(R_TrueValue);
-    FORWARD_NODE(R_FalseValue);
-    FORWARD_NODE(R_LogicalNAValue);
+	    FORWARD_NODE(R_TrueValue);
+	    FORWARD_NODE(R_FalseValue);
+	    FORWARD_NODE(R_LogicalNAValue);
 
     FORWARD_NODE(R_print.na_string);
     FORWARD_NODE(R_print.na_string_noquote);
@@ -1795,50 +1805,75 @@ static int RunGenCollect(R_size_t size_needed)
 		    gc_error("****found a symbol with attributes\n");
 	}
 
-    if (R_CurrentExpr != NULL)	           /* Current expression */
-	FORWARD_NODE(R_CurrentExpr);
+	    /* Per-interpreter roots (main + workers). */
+	    LOCK_INTERP_REGISTRY();
+	    for (R_InterpreterState *ist = R_InterpreterRegistry;
+		 ist != NULL;
+		 ist = ist->next) {
+		FORWARD_NODE(ist->warnings);          /* Warnings, if any */
+		FORWARD_NODE(ist->returnedValue);
+		FORWARD_NODE(ist->handlerStack);      /* Condition handler stack */
+		FORWARD_NODE(ist->restartStack);      /* Available restarts stack */
+		FORWARD_NODE(ist->bcbody);            /* Current byte code object */
+		FORWARD_NODE(ist->parseErrorFile);    /* Parse error source file (may be NULL) */
+		if (ist->currentExpr)                 /* Current expression */
+		    FORWARD_NODE(ist->currentExpr);
+	    }
+	    UNLOCK_INTERP_REGISTRY();
 
-    for (i = 0; i < R_MaxDevices; i++) {   /* Device display lists */
-	pGEDevDesc gdd = GEgetDevice(i);
-	if (gdd) {
-	    FORWARD_NODE(gdd->displayList);
+	    for (i = 0; i < R_MaxDevices; i++) {   /* Device display lists */
+		pGEDevDesc gdd = GEgetDevice(i);
+		if (gdd) {
+		    FORWARD_NODE(gdd->displayList);
 	    FORWARD_NODE(gdd->savedSnapshot);
 	    if (gdd->dev)
 		FORWARD_NODE(gdd->dev->eventEnv);
 	}
     }
 
-    for (ctxt = R_GlobalContext ; ctxt != NULL ; ctxt = ctxt->nextcontext) {
-	FORWARD_NODE(ctxt->conexit);       /* on.exit expressions */
-	FORWARD_NODE(ctxt->promargs);	   /* promises supplied to closure */
-	FORWARD_NODE(ctxt->callfun);       /* the closure called */
-	FORWARD_NODE(ctxt->sysparent);     /* calling environment */
-	FORWARD_NODE(ctxt->call);          /* the call */
-	FORWARD_NODE(ctxt->cloenv);        /* the closure environment */
-	FORWARD_NODE(ctxt->bcbody);        /* the current byte code object */
-	FORWARD_NODE(ctxt->handlerstack);  /* the condition handler stack */
-	FORWARD_NODE(ctxt->restartstack);  /* the available restarts stack */
-	FORWARD_NODE(ctxt->srcref);	   /* the current source reference */
-	if (ctxt->returnValue.tag == 0)    /* For on.exit calls */
-	    FORWARD_NODE(ctxt->returnValue.u.sxpval);
-    }
+	    FORWARD_NODE(R_PreciousList);
 
-    FORWARD_NODE(R_PreciousList);
+	    FORWARD_NODE(R_VStack);		   /* R_alloc stack */
+	    /* Per-interpreter stacks/contexts that can hold live references. */
+	    LOCK_INTERP_REGISTRY();
+	    for (R_InterpreterState *ist = R_InterpreterRegistry;
+		 ist != NULL;
+		 ist = ist->next) {
+#ifdef R_USE_SIGNALS
+		for (ctxt = ist->globalContext; ctxt != NULL; ctxt = ctxt->nextcontext) {
+		    FORWARD_NODE(ctxt->conexit);       /* on.exit expressions */
+		    FORWARD_NODE(ctxt->promargs);	   /* promises supplied to closure */
+		    FORWARD_NODE(ctxt->callfun);       /* the closure called */
+		    FORWARD_NODE(ctxt->sysparent);     /* calling environment */
+		    FORWARD_NODE(ctxt->call);          /* the call */
+		    FORWARD_NODE(ctxt->cloenv);        /* the closure environment */
+		    FORWARD_NODE(ctxt->bcbody);        /* the current byte code object */
+		    FORWARD_NODE(ctxt->handlerstack);  /* the condition handler stack */
+		    FORWARD_NODE(ctxt->restartstack);  /* the available restarts stack */
+		    FORWARD_NODE(ctxt->srcref);	   /* the current source reference */
+		    if (ctxt->returnValue.tag == 0)    /* For on.exit calls */
+			FORWARD_NODE(ctxt->returnValue.u.sxpval);
+		}
+#endif
 
-    for (i = 0; i < R_PPStackTop; i++)	   /* Protected pointers */
-	FORWARD_NODE(R_PPStack[i]);
+		for (int j = 0; j < ist->ppStackTop; j++) /* Protected pointers */
+		    FORWARD_NODE(ist->ppStack[j]);
 
-    FORWARD_NODE(R_VStack);		   /* R_alloc stack */
+		if (ist->bcNodeStackBase && ist->bcNodeStackTop) {
+		    for (R_bcstack_t *sp = ist->bcNodeStackBase;
+			 sp < ist->bcNodeStackTop;
+			 sp++) {
+			if (sp->tag == RAWMEM_TAG)
+			    sp += sp->u.ival;
+			else if (sp->tag == 0 || IS_PARTIAL_SXP_TAG(sp->tag))
+			    FORWARD_NODE(sp->u.sxpval);
+		    }
+		}
+	    }
+	    UNLOCK_INTERP_REGISTRY();
 
-    for (R_bcstack_t *sp = R_BCNodeStackBase; sp < R_BCNodeStackTop; sp++) {
-	if (sp->tag == RAWMEM_TAG)
-	    sp += sp->u.ival;
-	else if (sp->tag == 0 || IS_PARTIAL_SXP_TAG(sp->tag))
-	    FORWARD_NODE(sp->u.sxpval);
-    }
-
-    /* main processing loop */
-    PROCESS_NODES();
+	    /* main processing loop */
+	    PROCESS_NODES();
 
     /* identify weakly reachable nodes */
     {
@@ -2203,6 +2238,29 @@ NORET static void mem_err_malloc(R_size_t size)
 #define PP_REDZONE_SIZE 1000L
 static int R_StandardPPStackSize, R_RealPPStackSize;
 
+attribute_hidden void R_RegisterInterpreterState(R_InterpreterState *st)
+{
+    LOCK_INTERP_REGISTRY();
+    st->next = R_InterpreterRegistry;
+    R_InterpreterRegistry = st;
+    UNLOCK_INTERP_REGISTRY();
+}
+
+attribute_hidden void R_UnregisterInterpreterState(R_InterpreterState *st)
+{
+    LOCK_INTERP_REGISTRY();
+    R_InterpreterState **p = &R_InterpreterRegistry;
+    while (*p && *p != st)
+	p = &(*p)->next;
+    if (*p == NULL) {
+	UNLOCK_INTERP_REGISTRY();
+	R_Suicide("R_UnregisterInterpreterState: interpreter not registered");
+    }
+    *p = st->next;
+    st->next = NULL;
+    UNLOCK_INTERP_REGISTRY();
+}
+
 attribute_hidden void R_InitInterpreterProtectStack(R_InterpreterState *st)
 {
     if (st->ppStack != NULL)
@@ -2236,6 +2294,7 @@ attribute_hidden void InitMemory(void)
     R_StandardPPStackSize = R_PPStackSize;
     R_RealPPStackSize = R_PPStackSize + PP_REDZONE_SIZE;
     R_InitInterpreterProtectStack(R_Interpreter);
+    R_RegisterInterpreterState(R_Interpreter);
     vsfac = sizeof(VECREC);
     R_VSize = (R_VSize + 1)/vsfac;
     if (R_MaxVSize < R_SIZE_T_MAX) R_MaxVSize = (R_MaxVSize + 1)/vsfac;

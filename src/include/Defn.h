@@ -1574,7 +1574,7 @@ extern0 SEXP*	R_SymbolTable;	    /* The symbol table */
  * The long-term goal is to allow multiple interpreter states within a process,
  * e.g. for subinterpreters managed by threads.
  */
-typedef struct {
+typedef struct R_InterpreterState_ {
     SEXP currentExpr;        /* Currently evaluating expression */
     SEXP returnedValue;      /* Slot for return-ing values */
     SEXP handlerStack;       /* Condition handler stack */
@@ -1610,6 +1610,7 @@ typedef struct {
     int inPrintWarnings;     /* printing warnings state (errors.c) */
     int immediateWarning;    /* options(warn=1) scoped state (errors.c) */
     int noBreakWarning;      /* warning->error break suppression (errors.c) */
+    struct R_InterpreterState_ *next; /* link in interpreter registry */
 #ifdef R_USE_SIGNALS
     RCNTXT toplevel;         /* Storage for the toplevel context */
     struct RPRSTACK *pendingPromises; /* pending promise stack */
@@ -1621,6 +1622,8 @@ typedef struct {
 } R_InterpreterState;
 
 attribute_hidden void R_InitInterpreterProtectStack(R_InterpreterState *st);
+attribute_hidden void R_RegisterInterpreterState(R_InterpreterState *st);
+attribute_hidden void R_UnregisterInterpreterState(R_InterpreterState *st);
 
 /* Thread-local storage (TLS) support for internal multi-threading work. */
 #ifndef R_THREAD_LOCAL
