@@ -31,6 +31,9 @@
 #include <R_ext/Print.h>
 #include <errno.h>
 #include <math.h>
+#ifdef HAVE_SCHED_H
+# include <sched.h>
+#endif
 
 static SEXP bcEval(SEXP, SEXP);
 static void bcEval_init(void);
@@ -956,9 +959,35 @@ static void forcePromise(SEXP e)
     if (! PROMISE_IS_EVALUATED(e)) {
 	PROTECT(e);
 	if(PRSEEN(e)) {
-	    if (PRSEEN(e) == 1)
-		errorcall(R_GlobalContext->call,
-			  _("promise already under evaluation: recursive default argument reference or earlier problems?"));
+	    if (PRSEEN(e) == 1) {
+		/*
+		 * In a multi-threaded setting, promises can be shared (e.g. lazy-load
+		 * bindings in a namespace env). In that case PRSEEN(e)==1 may indicate
+		 * concurrent forcing by another thread, not recursion in this thread.
+		 *
+		 * Distinguish the cases by checking the current thread's pending-promise
+		 * stack: if we are already forcing this promise, it's recursion and we
+		 * must error; otherwise wait for the other thread to finish.
+		 */
+		RPRSTACK *pp;
+		for (pp = R_PendingPromises; pp; pp = pp->next)
+		    if (pp->promise == e)
+			break;
+		if (pp != NULL)
+		    errorcall(R_GlobalContext->call,
+			      _("promise already under evaluation: recursive default argument reference or earlier problems?"));
+
+		/* Wait for concurrent forcing to complete. */
+		while (!PROMISE_IS_EVALUATED(e) && PRSEEN(e) == 1) {
+#ifdef HAVE_SCHED_H
+		    sched_yield();
+#endif
+		}
+		if (PROMISE_IS_EVALUATED(e)) {
+		    UNPROTECT(1); /* e */
+		    return;
+		}
+	    }
 	    else {
 		/* set PRSEEN to 1 to avoid infinite recursion */
 		SET_PRSEEN(e, 1);

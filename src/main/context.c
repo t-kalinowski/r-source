@@ -809,6 +809,11 @@ Rboolean R_ToplevelExec(void (*fun)(void *), void *data)
     }
     endcontext(&thiscontext);
 
+    /* If an error longjmp occurred while holding the heap lock, release it to
+       avoid deadlocks. */
+    if (!result)
+	R_mtl_heap_unlock_all();
+
     R_ToplevelContext = saveToplevelContext;
     R_CurrentExpr = topExp;
     R_HandlerStack = oldHStack;

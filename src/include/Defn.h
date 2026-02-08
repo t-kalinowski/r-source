@@ -1594,6 +1594,11 @@ typedef struct R_InterpreterState_ {
     char parseContext[PARSE_CONTEXT_SIZE]; /* recent parse context */
     int parseContextLast;    /* last character in context buffer */
     int parseContextLine;    /* line in file of the above */
+    uintptr_t cStackLimit;   /* C stack limit */
+    uintptr_t oldCStackLimit;/* saved limit while in error handler */
+    uintptr_t cStackStart;   /* initial stack address */
+    SEXP vStack;             /* R_alloc stack pointer */
+    SEXP preciousList;       /* preserved objects list (R_PreserveObject) */
     int expressions;         /* options(expressions) active value */
     int expressions_keep;    /* options(expressions) base value */
     R_bcstack_t *bcNodeStackBase;
@@ -1622,8 +1627,13 @@ typedef struct R_InterpreterState_ {
 } R_InterpreterState;
 
 attribute_hidden void R_InitInterpreterProtectStack(R_InterpreterState *st);
+attribute_hidden void R_InitInterpreterBCNodeStack(R_InterpreterState *st);
 attribute_hidden void R_RegisterInterpreterState(R_InterpreterState *st);
 attribute_hidden void R_UnregisterInterpreterState(R_InterpreterState *st);
+
+attribute_hidden void R_mtl_heap_lock(void);
+attribute_hidden void R_mtl_heap_unlock(void);
+attribute_hidden void R_mtl_heap_unlock_all(void);
 
 /* Thread-local storage (TLS) support for internal multi-threading work. */
 #ifndef R_THREAD_LOCAL
@@ -1666,6 +1676,11 @@ extern R_THREAD_LOCAL R_InterpreterState *R_Interpreter INI_as(&R_Interpreter0);
 #define R_ParseContext  (R_Interpreter->parseContext)
 #define R_ParseContextLast (R_Interpreter->parseContextLast)
 #define R_ParseContextLine (R_Interpreter->parseContextLine)
+#define R_CStackLimit   (R_Interpreter->cStackLimit)
+#define R_OldCStackLimit (R_Interpreter->oldCStackLimit)
+#define R_CStackStart   (R_Interpreter->cStackStart)
+#define R_VStack        (R_Interpreter->vStack)
+#define R_PreciousList  (R_Interpreter->preciousList)
 #define R_Expressions   (R_Interpreter->expressions)
 #define R_Expressions_keep (R_Interpreter->expressions_keep)
 #define R_BCNodeStackBase (R_Interpreter->bcNodeStackBase)
@@ -1691,12 +1706,7 @@ extern R_THREAD_LOCAL R_InterpreterState *R_Interpreter INI_as(&R_Interpreter0);
 #define R_ExitContext     (R_Interpreter->exitContext)
 #endif
 
-/* Experimental: mtlapply() parallel regions.
- *
- * The interpreter runs under a coarse lock, but selected "pure compute"
- * loops can temporarily release it to allow parallel execution. */
-attribute_hidden int R_mtl_parallel_region_begin(void);
-attribute_hidden void R_mtl_parallel_region_end(int token);
+/* mtlapply() is experimental and may use additional internal interfaces. */
 
 extern0 int	R_BrowseLines	INI_as(0);	/* lines/per call in browser :
 						 * options(deparse.max.lines) */
@@ -1706,12 +1716,9 @@ extern0 MATPROD_TYPE R_Matprod	INI_as(MATPROD_DEFAULT);  /* options(matprod) */
 extern0 int	R_WarnLength	INI_as(1000);	/* Error/warning max length */
 extern0 int	R_nwarnings	INI_as(50);
 
-/* C stack checking */
-extern uintptr_t R_CStackLimit	INI_as((uintptr_t)-1);	/* C stack limit */
-extern uintptr_t R_OldCStackLimit INI_as((uintptr_t)0); /* Old value while
-							   handling overflow */
-extern uintptr_t R_CStackStart	INI_as((uintptr_t)-1);	/* Initial stack address */
-/* Default here is for Windows: set from configure in src/unix/system.c */
+/* C stack direction.
+ *
+ * Limits/start are per-interpreter (see R_InterpreterState). */
 extern int	R_CStackDir	INI_as(1);	/* C stack direction */
 
 /* File Input/Output */

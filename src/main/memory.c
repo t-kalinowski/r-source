@@ -140,6 +140,49 @@ attribute_hidden int R_gc_running(void) { return R_in_gc; }
 # define PROTECTCHECK
 #endif
 
+/* Global heap/GC lock.
+ *
+ * This is an incremental step towards multi-threaded evaluation: it avoids
+ * corruption of the shared heap structures when multiple threads allocate
+ * concurrently. It is intentionally coarse.
+ *
+ * The lock is not unwind-safe at the C level. If an error longjmp occurs
+ * while holding it, R_mtl_heap_unlock_all() must be invoked at the
+ * interpreter's toplevel boundary to avoid deadlocks. */
+#ifdef HAVE_PTHREAD
+static pthread_mutex_t R_heap_mutex = PTHREAD_MUTEX_INITIALIZER;
+static R_THREAD_LOCAL int R_heap_lock_depth = 0;
+
+attribute_hidden void R_mtl_heap_lock(void)
+{
+    if (R_heap_lock_depth++ == 0)
+	pthread_mutex_lock(&R_heap_mutex);
+}
+
+attribute_hidden void R_mtl_heap_unlock(void)
+{
+    if (--R_heap_lock_depth == 0)
+	pthread_mutex_unlock(&R_heap_mutex);
+}
+
+attribute_hidden void R_mtl_heap_unlock_all(void)
+{
+    if (R_heap_lock_depth > 0) {
+	R_heap_lock_depth = 0;
+	pthread_mutex_unlock(&R_heap_mutex);
+    }
+}
+
+# define HEAP_LOCK() R_mtl_heap_lock()
+# define HEAP_UNLOCK() R_mtl_heap_unlock()
+#else
+attribute_hidden void R_mtl_heap_lock(void) {}
+attribute_hidden void R_mtl_heap_unlock(void) {}
+attribute_hidden void R_mtl_heap_unlock_all(void) {}
+# define HEAP_LOCK() ((void) 0)
+# define HEAP_UNLOCK() ((void) 0)
+#endif
+
 #ifdef PROTECTCHECK
 /* This is used to help detect unprotected SEXP values.  It is most
    useful if the strict barrier is enabled as well. The strategy is:
@@ -524,8 +567,7 @@ attribute_hidden SEXP do_maxNSize(SEXP call, SEXP op, SEXP args, SEXP rho)
 
 /* Miscellaneous Globals. */
 
-static SEXP R_VStack = NULL;		/* R_alloc stack pointer */
-static SEXP R_PreciousList = NULL;      /* List of Persistent Objects */
+/* R_VStack and R_PreciousList are per-interpreter (see R_InterpreterState). */
 static R_size_t R_LargeVallocSize = 0;
 static R_size_t R_SmallVallocSize = 0;
 static R_size_t orig_R_NSize;
@@ -1831,9 +1873,7 @@ static int RunGenCollect(R_size_t size_needed)
 	}
     }
 
-	    FORWARD_NODE(R_PreciousList);
-
-	    FORWARD_NODE(R_VStack);		   /* R_alloc stack */
+	    /* R_PreciousList and R_VStack are per-interpreter and scanned below. */
 	    /* Per-interpreter stacks/contexts that can hold live references. */
 	    LOCK_INTERP_REGISTRY();
 	    for (R_InterpreterState *ist = R_InterpreterRegistry;
@@ -1858,6 +1898,9 @@ static int RunGenCollect(R_size_t size_needed)
 
 		for (int j = 0; j < ist->ppStackTop; j++) /* Protected pointers */
 		    FORWARD_NODE(ist->ppStack[j]);
+
+		FORWARD_NODE(ist->preciousList);
+		FORWARD_NODE(ist->vStack);	   /* R_alloc stack */
 
 		if (ist->bcNodeStackBase && ist->bcNodeStackTop) {
 		    for (R_bcstack_t *sp = ist->bcNodeStackBase;
@@ -2275,11 +2318,27 @@ attribute_hidden void R_InitInterpreterProtectStack(R_InterpreterState *st)
 #endif
 }
 
+attribute_hidden void R_InitInterpreterBCNodeStack(R_InterpreterState *st)
+{
+    if (st->bcNodeStackBase != NULL)
+	return;
+    st->bcNodeStackBase =
+	(R_bcstack_t *) malloc(R_BCNODESTACKSIZE * sizeof(R_bcstack_t));
+    if (st->bcNodeStackBase == NULL)
+	R_Suicide("couldn't allocate node stack");
+    st->bcNodeStackTop = st->bcNodeStackBase;
+    st->bcNodeStackEnd = st->bcNodeStackBase + R_BCNODESTACKSIZE;
+    st->bcProtTop = st->bcNodeStackTop;
+    st->bcProtCommitted = st->bcNodeStackBase;
+}
+
 attribute_hidden void InitMemory(void)
 {
     int i;
     int gen;
     char *arg;
+
+    HEAP_LOCK();
 
     init_gctorture();
     init_gc_grow_settings();
@@ -2344,23 +2403,18 @@ attribute_hidden void InitMemory(void)
     ATTRIB(R_NilValue) = R_NilValue;
     MARK_NOT_MUTABLE(R_NilValue);
 
-    R_BCNodeStackBase =
-	(R_bcstack_t *) malloc(R_BCNODESTACKSIZE * sizeof(R_bcstack_t));
-    if (R_BCNodeStackBase == NULL)
-	R_Suicide("couldn't allocate node stack");
-    R_BCNodeStackTop = R_BCNodeStackBase;
-    R_BCNodeStackEnd = R_BCNodeStackBase + R_BCNODESTACKSIZE;
-    R_BCProtTop = R_BCNodeStackTop;
+    R_InitInterpreterBCNodeStack(R_Interpreter);
 
     R_weak_refs = R_NilValue;
 
     R_HandlerStack = R_RestartStack = R_NilValue;
 
-    /*  Unbound values which are to be preserved through GCs */
-    R_PreciousList = R_NilValue;
-
     /*  The current source line */
     R_Srcref = R_NilValue;
+
+    /* Unbound values which are to be preserved through GCs (per interpreter). */
+    R_PreciousList = R_NilValue;
+    R_VStack = R_NilValue;
 
     /* R_TrueValue and R_FalseValue */
     R_TrueValue = mkTrue();
@@ -2370,6 +2424,8 @@ attribute_hidden void InitMemory(void)
     R_LogicalNAValue = allocVector(LGLSXP, 1);
     LOGICAL(R_LogicalNAValue)[0] = NA_LOGICAL;
     MARK_NOT_MUTABLE(R_LogicalNAValue);
+
+    HEAP_UNLOCK();
 }
 
 /* Since memory allocated from the heap is non-moving, R_alloc just
@@ -2512,6 +2568,7 @@ SEXP allocSExp(SEXPTYPE t)
     if (t == NILSXP)
 	/* R_NilValue should be the only NILSXP object */
 	return R_NilValue;
+    HEAP_LOCK();
     SEXP s;
     if (FORCE_GC || NO_FREE_NODES()) {
 	R_gc_internal(0);
@@ -2526,11 +2583,13 @@ SEXP allocSExp(SEXPTYPE t)
     CDR(s) = R_NilValue;
     TAG(s) = R_NilValue;
     ATTRIB(s) = R_NilValue;
+    HEAP_UNLOCK();
     return s;
 }
 
 static SEXP allocSExpNonCons(SEXPTYPE t)
 {
+    HEAP_LOCK();
     SEXP s;
     if (FORCE_GC || NO_FREE_NODES()) {
 	R_gc_internal(0);
@@ -2543,6 +2602,7 @@ static SEXP allocSExpNonCons(SEXPTYPE t)
     SET_TYPEOF(s, t);
     TAG(s) = R_NilValue;
     ATTRIB(s) = R_NilValue;
+    HEAP_UNLOCK();
     return s;
 }
 
@@ -2550,6 +2610,7 @@ static SEXP allocSExpNonCons(SEXPTYPE t)
    unless a GC will actually occur. */
 SEXP cons(SEXP car, SEXP cdr)
 {
+    HEAP_LOCK();
     SEXP s;
     if (FORCE_GC || NO_FREE_NODES()) {
 	PROTECT(car);
@@ -2576,11 +2637,13 @@ SEXP cons(SEXP car, SEXP cdr)
     CDR(s) = CHK(cdr); if (cdr) INCREMENT_REFCNT(cdr);
     TAG(s) = R_NilValue;
     ATTRIB(s) = R_NilValue;
+    HEAP_UNLOCK();
     return s;
 }
 
 attribute_hidden SEXP CONS_NR(SEXP car, SEXP cdr)
 {
+    HEAP_LOCK();
     SEXP s;
     if (FORCE_GC || NO_FREE_NODES()) {
 	PROTECT(car);
@@ -2608,6 +2671,7 @@ attribute_hidden SEXP CONS_NR(SEXP car, SEXP cdr)
     CDR(s) = CHK(cdr);
     TAG(s) = R_NilValue;
     ATTRIB(s) = R_NilValue;
+    HEAP_UNLOCK();
     return s;
 }
 
@@ -2631,6 +2695,7 @@ attribute_hidden SEXP CONS_NR(SEXP car, SEXP cdr)
 */
 SEXP NewEnvironment(SEXP namelist, SEXP valuelist, SEXP rho)
 {
+    HEAP_LOCK();
     SEXP v, n, newrho;
 
     if (FORCE_GC || NO_FREE_NODES()) {
@@ -2668,6 +2733,7 @@ SEXP NewEnvironment(SEXP namelist, SEXP valuelist, SEXP rho)
 	v = CDR(v);
 	n = CDR(n);
     }
+    HEAP_UNLOCK();
     return (newrho);
 }
 
@@ -2675,6 +2741,7 @@ SEXP NewEnvironment(SEXP namelist, SEXP valuelist, SEXP rho)
    unless a GC will actually occur. */
 attribute_hidden SEXP mkPROMISE(SEXP expr, SEXP rho)
 {
+    HEAP_LOCK();
     SEXP s;
     if (FORCE_GC || NO_FREE_NODES()) {
 	PROTECT(expr);
@@ -2706,6 +2773,7 @@ attribute_hidden SEXP mkPROMISE(SEXP expr, SEXP rho)
     PRVALUE0(s) = R_UnboundValue;
     PRSEEN(s) = 0;
     ATTRIB(s) = R_NilValue;
+    HEAP_UNLOCK();
     return s;
 }
 
@@ -2758,9 +2826,14 @@ static void custom_node_free(void *ptr) {
 
 SEXP allocVector3(SEXPTYPE type, R_xlen_t length, R_allocator_t *allocator)
 {
+    if (type == NILSXP)
+	return R_NilValue;
+
+    HEAP_LOCK();
+
     SEXP s;     /* For the generational collector it would be safer to
-		   work in terms of a VECSXP here, but that would
-		   require several casts below... */
+			   work in terms of a VECSXP here, but that would
+			   require several casts below... */
     R_size_t size = 0, alloc_size, old_R_VSize;
     int node_class;
 #if VALGRIND_LEVEL > 0
@@ -2801,9 +2874,10 @@ SEXP allocVector3(SEXPTYPE type, R_xlen_t length, R_allocator_t *allocator)
 	    ATTRIB(s) = R_NilValue;
 	    SET_TYPEOF(s, type);
 	    SET_STDVEC_LENGTH(s, (R_len_t) length); // is 1
-	    SET_STDVEC_TRUELENGTH(s, 0);
-	    INIT_REFCNT(s);
-	    return(s);
+		    SET_STDVEC_TRUELENGTH(s, 0);
+		    INIT_REFCNT(s);
+		    HEAP_UNLOCK();
+		    return(s);
 	}
     }
 
@@ -2813,8 +2887,6 @@ SEXP allocVector3(SEXPTYPE type, R_xlen_t length, R_allocator_t *allocator)
 	error(_("negative length vectors are not allowed"));
     /* number of vector cells to allocate */
     switch (type) {
-    case NILSXP:
-	return R_NilValue;
     case RAWSXP:
 	size = BYTE2VEC(length);
 #if VALGRIND_LEVEL > 0
@@ -3054,6 +3126,7 @@ SEXP allocVector3(SEXPTYPE type, R_xlen_t length, R_allocator_t *allocator)
     else if (type == RAWSXP)
 	VALGRIND_MAKE_MEM_UNDEFINED(RAW(s), actual_size);
 #endif
+    HEAP_UNLOCK();
     return s;
 }
 

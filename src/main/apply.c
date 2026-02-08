@@ -47,9 +47,6 @@ typedef struct {
     int error;
     char errmsg[1024];
     pthread_mutex_t err_mutex;
-    uintptr_t main_CStackStart;
-    uintptr_t main_CStackLimit;
-    uintptr_t main_OldCStackLimit;
     int main_showErrorMessages;
 } mtl_shared_t;
 
@@ -60,8 +57,14 @@ typedef struct {
     R_InterpreterState interp;
 } mtl_worker_t;
 
-static pthread_mutex_t mtl_gil = PTHREAD_MUTEX_INITIALIZER;
-static R_THREAD_LOCAL int mtl_gil_held = 0;
+static int mtl_trace_cached = -1;
+static int mtl_trace_enabled(void)
+{
+    if (mtl_trace_cached < 0)
+	mtl_trace_cached = getenv("R_MTL_TRACE") ? 1 : 0;
+    return mtl_trace_cached;
+}
+
 static atomic_int mtl_parallel_active = 0;
 static atomic_int mtl_parallel_max = 0;
 
@@ -76,31 +79,20 @@ static void mtl_parallel_update_max(int cur)
     }
 }
 
-/* These are used by arithmetic.c to temporarily release the lock while doing
- * long-running, allocation-free compute loops (e.g. cos on a REALSXP). */
-attribute_hidden int R_mtl_parallel_region_begin(void)
-{
-    if (!mtl_gil_held)
-	return 0;
-    mtl_gil_held = 0;
-    pthread_mutex_unlock(&mtl_gil);
-    int cur = atomic_fetch_add_explicit(&mtl_parallel_active, 1, memory_order_relaxed) + 1;
-    mtl_parallel_update_max(cur);
-    return 1;
-}
-
-attribute_hidden void R_mtl_parallel_region_end(int token)
-{
-    if (!token)
-	return;
-    atomic_fetch_sub_explicit(&mtl_parallel_active, 1, memory_order_relaxed);
-    pthread_mutex_lock(&mtl_gil);
-    mtl_gil_held = 1;
-}
-
 static int mtl_parallel_max_and_reset(void)
 {
     return atomic_exchange_explicit(&mtl_parallel_max, 0, memory_order_relaxed);
+}
+
+static void mtl_parallel_begin(void)
+{
+    int cur = atomic_fetch_add_explicit(&mtl_parallel_active, 1, memory_order_relaxed) + 1;
+    mtl_parallel_update_max(cur);
+}
+
+static void mtl_parallel_end(void)
+{
+    atomic_fetch_sub_explicit(&mtl_parallel_active, 1, memory_order_relaxed);
 }
 static int mtl_main_thread_inited = 0;
 static pthread_t mtl_main_thread;
@@ -126,13 +118,18 @@ static void mtl_interp_init_from_main(R_InterpreterState *st)
     st->parseContext[0] = '\0';
     st->parseContextLast = 0;
     st->parseContextLine = 0;
+    st->cStackLimit = (uintptr_t) -1;
+    st->oldCStackLimit = (uintptr_t) 0;
+    st->cStackStart = (uintptr_t) -1;
+    st->vStack = R_NilValue;
+    st->preciousList = R_NilValue;
     st->expressions_keep = R_Expressions_keep;
     st->expressions = st->expressions_keep;
-    st->bcNodeStackBase = R_BCNodeStackBase;
-    st->bcNodeStackEnd = R_BCNodeStackEnd;
-    st->bcNodeStackTop = st->bcNodeStackBase;
-    st->bcProtTop = st->bcNodeStackTop;
-    st->bcProtCommitted = st->bcNodeStackBase;
+    st->bcNodeStackBase = NULL;
+    st->bcNodeStackEnd = NULL;
+    st->bcNodeStackTop = NULL;
+    st->bcProtTop = NULL;
+    st->bcProtCommitted = NULL;
     st->bcintactive = 0;
     st->bcpc = NULL;
     st->bcbody = NULL;
@@ -145,14 +142,17 @@ static void mtl_interp_init_from_main(R_InterpreterState *st)
     st->next = NULL;
 #ifdef R_USE_SIGNALS
     st->pendingPromises = NULL;
-    st->toplevelContext = R_ToplevelContext;
-    st->globalContext = R_GlobalContext;
-    st->sessionContext = R_SessionContext;
-    st->exitContext = R_ExitContext;
+    st->toplevelContext = NULL;
+    st->globalContext = NULL;
+    st->sessionContext = NULL;
+    st->exitContext = NULL;
 #endif
 
     /* Allocate per-interpreter protection stack for this worker. */
     R_InitInterpreterProtectStack(st);
+
+    /* Allocate per-interpreter bytecode node stack for this worker. */
+    R_InitInterpreterBCNodeStack(st);
 }
 
 static void mtl_interp_reset_for_eval(R_InterpreterState *st, const mtl_shared_t *sh)
@@ -210,13 +210,24 @@ static void *mtl_worker_main(void *vp)
 	R_xlen_t i = s->next++;
 	pthread_mutex_unlock(&s->next_mutex);
 
-	pthread_mutex_lock(&mtl_gil);
-	mtl_gil_held = 1;
-
 	R_InterpreterState *saved_interp = R_Interpreter;
 	R_Interpreter = &w->interp;
 
-	/* Disable stack checks in this thread; our saved start is for main. */
+#ifdef R_USE_SIGNALS
+	/* begincontext() assumes R_GlobalContext is non-NULL. Install a
+	   per-thread dummy toplevel context as the base of the chain. */
+	if (R_GlobalContext == NULL) {
+	    R_Toplevel.callflag = CTXT_TOPLEVEL;
+	    R_Toplevel.nextcontext = NULL;
+	    R_Toplevel.browserfinish = 0;
+	    R_ToplevelContext = &R_Toplevel;
+	    R_GlobalContext = &R_Toplevel;
+	    R_SessionContext = &R_Toplevel;
+	    R_ExitContext = NULL;
+	}
+#endif
+
+	/* Disable stack checks in this thread; main's limits are unrelated. */
 	R_CStackStart = (uintptr_t) -1;
 	R_CStackLimit = (uintptr_t) -1;
 	R_OldCStackLimit = (uintptr_t) 0;
@@ -226,7 +237,19 @@ static void *mtl_worker_main(void *vp)
 
 	SETCAR(w->argcell, VECTOR_ELT(s->XX, i));
 	int err = 0;
+	mtl_parallel_begin();
+	if (mtl_trace_enabled()) {
+	    fprintf(stderr, "[mtl] worker=%p eval i=%lld begin\n",
+		    (void *)w, (long long)i);
+	    fflush(stderr);
+	}
 	SEXP val = R_tryEvalSilent(w->fcall, R_GlobalEnv, &err);
+	if (mtl_trace_enabled()) {
+	    fprintf(stderr, "[mtl] worker=%p eval i=%lld end err=%d\n",
+		    (void *)w, (long long)i, err);
+	    fflush(stderr);
+	}
+	mtl_parallel_end();
 	if (err || val == NULL) {
 	    pthread_mutex_lock(&s->err_mutex);
 	    if (!s->error) {
@@ -237,8 +260,6 @@ static void *mtl_worker_main(void *vp)
 		    }
 		    pthread_mutex_unlock(&s->err_mutex);
 	    R_Interpreter = saved_interp;
-	    mtl_gil_held = 0;
-	    pthread_mutex_unlock(&mtl_gil);
 	    break;
 	}
 
@@ -250,8 +271,6 @@ static void *mtl_worker_main(void *vp)
 
 	s->results[i] = val;
 	R_Interpreter = saved_interp;
-	mtl_gil_held = 0;
-	pthread_mutex_unlock(&mtl_gil);
     }
 
     /* Worker interpreter stacks are not reused; free its protection stack. */
@@ -259,6 +278,12 @@ static void *mtl_worker_main(void *vp)
     free(w->interp.ppStack);
     w->interp.ppStack = NULL;
     w->interp.ppStackTop = 0;
+    free(w->interp.bcNodeStackBase);
+    w->interp.bcNodeStackBase = NULL;
+    w->interp.bcNodeStackTop = NULL;
+    w->interp.bcNodeStackEnd = NULL;
+    w->interp.bcProtTop = NULL;
+    w->interp.bcProtCommitted = NULL;
 
     return NULL;
 }
@@ -368,7 +393,7 @@ attribute_hidden SEXP do_mtlapply(SEXP call, SEXP op, SEXP args, SEXP rho)
     if (results == NULL)
 	error(_("cannot allocate memory"));
 
-    /* Save main thread's stack checks; worker threads will disable them. */
+    /* Worker threads will disable their own stack checks. */
     mtl_shared_t sh;
     sh.XX = XX;
     sh.n = n;
@@ -376,9 +401,6 @@ attribute_hidden SEXP do_mtlapply(SEXP call, SEXP op, SEXP args, SEXP rho)
     sh.next = 0;
     sh.error = 0;
     sh.errmsg[0] = '\0';
-    sh.main_CStackStart = R_CStackStart;
-    sh.main_CStackLimit = R_CStackLimit;
-    sh.main_OldCStackLimit = R_OldCStackLimit;
     sh.main_showErrorMessages = R_ShowErrorMessages;
 
     pthread_mutex_init(&sh.next_mutex, NULL);
@@ -405,11 +427,6 @@ attribute_hidden SEXP do_mtlapply(SEXP call, SEXP op, SEXP args, SEXP rho)
     }
     for (int t = 0; t < nthreads; t++)
 	pthread_join(threads[t], NULL);
-
-    /* Restore main thread stack check globals. */
-    R_CStackStart = sh.main_CStackStart;
-    R_CStackLimit = sh.main_CStackLimit;
-    R_OldCStackLimit = sh.main_OldCStackLimit;
 
     pthread_mutex_destroy(&sh.next_mutex);
     pthread_mutex_destroy(&sh.err_mutex);
@@ -444,8 +461,8 @@ attribute_hidden SEXP do_mtlapply(SEXP call, SEXP op, SEXP args, SEXP rho)
 
 /* .Internal(mtlparallelmax()) : testing/debugging aid.
  *
- * Returns the max number of threads simultaneously executing a released
- * "parallel region" since the last call, and resets the counter. */
+ * Returns the max number of worker threads simultaneously evaluating
+ * user code in mtlapply() since the last call, and resets the counter. */
 attribute_hidden SEXP do_mtlparallelmax(SEXP call, SEXP op, SEXP args, SEXP rho)
 {
     checkArity(op, args);

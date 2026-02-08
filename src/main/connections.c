@@ -6592,7 +6592,7 @@ SEXP R_compress1(SEXP in)
     if(TYPEOF(in) != RAWSXP)
 	error("R_compress1 requires a raw vector");
 
-    static struct libdeflate_compressor *c = NULL;
+    static R_THREAD_LOCAL struct libdeflate_compressor *c = NULL;
     if(c == NULL) {
        c = libdeflate_alloc_compressor(6);
        if(c == NULL)
@@ -6624,7 +6624,7 @@ SEXP R_decompress1(SEXP in, Rboolean *err)
 
     const void *vmax = vmaxget();
 
-    static struct libdeflate_decompressor *d = NULL;
+    static R_THREAD_LOCAL struct libdeflate_decompressor *d = NULL;
     if(d == NULL) {
 	d = libdeflate_alloc_decompressor();
 	if(d == NULL)
