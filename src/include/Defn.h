@@ -1582,6 +1582,8 @@ typedef struct R_InterpreterState_ {
     Rboolean visible;        /* Value visibility flag */
     int showErrorMessages;   /* show error messages? */
     int allowOptionsSet;     /* can this interpreter mutate global options? */
+    int isMTLWorker;         /* non-zero for mtlapply() worker interpreter */
+    SEXP workerGlobalEnv;    /* worker "global" env (parent is R_GlobalEnv) */
     int collectWarnings;     /* number of collected warnings (0 means none) */
     SEXP warnings;           /* collected warnings + calls */
     int evalDepth;           /* Evaluation recursion depth */
@@ -1634,6 +1636,10 @@ attribute_hidden void R_UnregisterInterpreterState(R_InterpreterState *st);
 attribute_hidden void R_mtl_heap_lock(void);
 attribute_hidden void R_mtl_heap_unlock(void);
 attribute_hidden void R_mtl_heap_unlock_all(void);
+
+attribute_hidden void R_mtl_global_lock(void);
+attribute_hidden void R_mtl_global_unlock(void);
+attribute_hidden void R_mtl_global_unlock_all(void);
 
 /* Thread-local storage (TLS) support for internal multi-threading work. */
 #ifndef R_THREAD_LOCAL

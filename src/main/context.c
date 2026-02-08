@@ -241,10 +241,11 @@ NORET attribute_hidden void R_jumpctxt(RCNTXT * targetcptr, int mask, SEXP val)
     if (mask == 0)
 	mask = 1; // make sure the return value for SETJMP is not zero
 
-    /* If an error/jump occurs while holding the heap lock, release it to
-       avoid deadlocks (e.g. worker threads blocking on the shared heap
-       mutex after a caught error in another thread). */
+    /* If an error/jump occurs while holding internal locks, release them to
+       avoid deadlocks (e.g. worker threads blocking on shared mutexes after
+       a caught error in another thread). */
     R_mtl_heap_unlock_all();
+    R_mtl_global_unlock_all();
 
     LONGJMP(cptr->cjmpbuf, mask);
 }
@@ -814,10 +815,12 @@ Rboolean R_ToplevelExec(void (*fun)(void *), void *data)
     }
     endcontext(&thiscontext);
 
-    /* If an error longjmp occurred while holding the heap lock, release it to
-       avoid deadlocks. */
-    if (!result)
+    /* If an error longjmp occurred while holding internal locks, release them
+       to avoid deadlocks. */
+    if (!result) {
 	R_mtl_heap_unlock_all();
+	R_mtl_global_unlock_all();
+    }
 
     R_ToplevelContext = saveToplevelContext;
     R_CurrentExpr = topExp;

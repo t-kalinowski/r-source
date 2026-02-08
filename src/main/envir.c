@@ -2481,6 +2481,9 @@ attribute_hidden SEXP do_missing(SEXP call, SEXP op, SEXP args, SEXP rho)
 attribute_hidden SEXP do_globalenv(SEXP call, SEXP op, SEXP args, SEXP rho)
 {
     checkArity(op, args);
+    if (R_Interpreter != NULL && R_Interpreter->isMTLWorker &&
+	R_Interpreter->workerGlobalEnv != NULL)
+	return R_Interpreter->workerGlobalEnv;
     return R_GlobalEnv;
 }
 
@@ -4635,4 +4638,3 @@ attribute_hidden void findFunctionForBody(SEXP body) {
 	}
     }
 }
-

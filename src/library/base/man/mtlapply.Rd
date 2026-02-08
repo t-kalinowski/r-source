@@ -36,10 +36,23 @@ mtlapply(X, FUN, \dots, threads = 2L)
   speed up allocation-heavy workloads, but can speed up computations that
   spend most of their time in allocation-free code.
 
+  Each worker evaluates \code{FUN} with a thread-local "global"
+  environment whose parent is the real global environment.
+  \code{globalenv()} in a worker returns this thread-local environment,
+  so top-level assignments (e.g. \code{x <- 1}) do not affect the main
+  thread.
+
   The worker function must not attempt to mutate process-global state.
-  In particular, \code{options()} can be used to query options, but
-  setting options from worker threads is not supported and results in an
-  error.
+  In particular, superassignment (\code{<<-}) and setting options via
+  \code{options(name = value)} are not supported in worker threads and
+  result in an error.
+
+  Some operations that rely on shared process-wide state may run under a
+  global internal lock (for example, \code{tempfile()}), and can
+  serialize across workers.
+
+  For now, just-in-time compilation of closures is disabled in worker
+  threads.
 }
 \value{
   A list of the same length as \code{X}.

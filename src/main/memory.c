@@ -183,6 +183,40 @@ attribute_hidden void R_mtl_heap_unlock_all(void) {}
 # define HEAP_UNLOCK() ((void) 0)
 #endif
 
+/* Global lock for operations that still mutate shared, process-wide state.
+ *
+ * This is distinct from the heap lock: it is intended to serialize access to
+ * global configuration/state that has not yet been moved into interpreter
+ * state. Use sparingly and in small critical sections. */
+#ifdef HAVE_PTHREAD
+static pthread_mutex_t R_global_mutex = PTHREAD_MUTEX_INITIALIZER;
+static R_THREAD_LOCAL int R_global_lock_depth = 0;
+
+attribute_hidden void R_mtl_global_lock(void)
+{
+    if (R_global_lock_depth++ == 0)
+	pthread_mutex_lock(&R_global_mutex);
+}
+
+attribute_hidden void R_mtl_global_unlock(void)
+{
+    if (--R_global_lock_depth == 0)
+	pthread_mutex_unlock(&R_global_mutex);
+}
+
+attribute_hidden void R_mtl_global_unlock_all(void)
+{
+    if (R_global_lock_depth > 0) {
+	R_global_lock_depth = 0;
+	pthread_mutex_unlock(&R_global_mutex);
+    }
+}
+#else
+attribute_hidden void R_mtl_global_lock(void) {}
+attribute_hidden void R_mtl_global_unlock(void) {}
+attribute_hidden void R_mtl_global_unlock_all(void) {}
+#endif
+
 #ifdef PROTECTCHECK
 /* This is used to help detect unprotected SEXP values.  It is most
    useful if the strict barrier is enabled as well. The strategy is:
@@ -1856,6 +1890,7 @@ static int RunGenCollect(R_size_t size_needed)
 		FORWARD_NODE(ist->returnedValue);
 		FORWARD_NODE(ist->handlerStack);      /* Condition handler stack */
 		FORWARD_NODE(ist->restartStack);      /* Available restarts stack */
+		FORWARD_NODE(ist->workerGlobalEnv);   /* Worker global env (may be NULL) */
 		FORWARD_NODE(ist->bcbody);            /* Current byte code object */
 		FORWARD_NODE(ist->parseErrorFile);    /* Parse error source file (may be NULL) */
 		if (ist->currentExpr)                 /* Current expression */

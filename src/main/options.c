@@ -480,6 +480,42 @@ static void check_TRUE_FALSE(SEXP arg, const char *chname) {
 	error(_("invalid value for '%s'"), chname);
 }
 
+static Rboolean options_wants_set(SEXP args)
+{
+    int n = length(args);
+    if (n == 1 && (isPairList(CAR(args)) || isVectorList(CAR(args)))
+	&& TAG(args) == R_NilValue) {
+	args = CAR(args);
+	n = length(args);
+    }
+
+    switch (TYPEOF(args)) {
+    case NILSXP:
+	return FALSE;
+    case LISTSXP:
+	for (SEXP a = args; a != R_NilValue; a = CDR(a))
+	    if (TAG(a) != R_NilValue)
+		return TRUE;
+	return FALSE;
+    case VECSXP: {
+	if (n <= 0)
+	    return FALSE;
+	SEXP nms = getAttrib(args, R_NamesSymbol);
+	if (isNull(nms) || LENGTH(nms) != n)
+	    return FALSE;
+	for (int i = 0; i < n; i++) {
+	    SEXP nm = STRING_ELT(nms, i);
+	    if (nm != NA_STRING && CHAR(nm)[0] != '\0')
+		return TRUE;
+	}
+	return FALSE;
+    }
+    default:
+	/* do_options will error; be conservative. */
+	return TRUE;
+    }
+}
+
 /* This needs to manage R_Visible */
 attribute_hidden SEXP do_options(SEXP call, SEXP op, SEXP args, SEXP rho)
 {
@@ -527,6 +563,10 @@ attribute_hidden SEXP do_options(SEXP call, SEXP op, SEXP args, SEXP rho)
 	R_Visible = TRUE;
 	return value2;
     }
+
+    if (R_Interpreter != NULL && !R_Interpreter->allowOptionsSet &&
+	options_wants_set(args))
+	errorcall(call, _("cannot set options from mtlapply() worker threads"));
 
     /* The arguments to "options" can either be a sequence of
        name = value form, or can be a single list.

@@ -48,6 +48,7 @@ typedef struct {
     char errmsg[1024];
     pthread_mutex_t err_mutex;
     int main_showErrorMessages;
+    SEXP dotGlobalEnvSym;
 } mtl_shared_t;
 
 typedef struct {
@@ -106,6 +107,8 @@ static void mtl_interp_init_from_main(R_InterpreterState *st)
     st->visible = TRUE;
     st->showErrorMessages = 1;
     st->allowOptionsSet = 0;
+    st->isMTLWorker = 1;
+    st->workerGlobalEnv = NULL;
     st->collectWarnings = 0;
     st->warnings = R_NilValue;
     st->evalDepth = 0;
@@ -201,6 +204,38 @@ static void *mtl_worker_main(void *vp)
 
     R_RegisterInterpreterState(&w->interp);
 
+    R_InterpreterState *saved_interp = R_Interpreter;
+    R_Interpreter = &w->interp;
+
+#ifdef R_USE_SIGNALS
+    /* begincontext() assumes R_GlobalContext is non-NULL. Install a
+       per-thread dummy toplevel context as the base of the chain. */
+    if (R_GlobalContext == NULL) {
+	R_Toplevel.callflag = CTXT_TOPLEVEL;
+	R_Toplevel.nextcontext = NULL;
+	R_Toplevel.browserfinish = 0;
+	R_ToplevelContext = &R_Toplevel;
+	R_GlobalContext = &R_Toplevel;
+	R_SessionContext = &R_Toplevel;
+	R_ExitContext = NULL;
+    }
+#endif
+
+    /* Disable stack checks in this thread; main's limits are unrelated. */
+    R_CStackStart = (uintptr_t) -1;
+    R_CStackLimit = (uintptr_t) -1;
+    R_OldCStackLimit = (uintptr_t) 0;
+
+    /* Create this worker's "global" environment (parent is the real global).
+       This keeps top-level assignments and lookups thread-local. */
+    if (w->interp.workerGlobalEnv == NULL) {
+	SEXP wenv = PROTECT(NewEnvironment(R_NilValue, R_NilValue, R_GlobalEnv));
+	w->interp.workerGlobalEnv = wenv;
+	/* Shadow .GlobalEnv for common explicit-envir uses. */
+	defineVar(s->dotGlobalEnvSym, wenv, wenv);
+	UNPROTECT(1);
+    }
+
     for (;;) {
 	pthread_mutex_lock(&s->next_mutex);
 	if (s->error || s->next >= s->n) {
@@ -209,28 +244,6 @@ static void *mtl_worker_main(void *vp)
 	}
 	R_xlen_t i = s->next++;
 	pthread_mutex_unlock(&s->next_mutex);
-
-	R_InterpreterState *saved_interp = R_Interpreter;
-	R_Interpreter = &w->interp;
-
-#ifdef R_USE_SIGNALS
-	/* begincontext() assumes R_GlobalContext is non-NULL. Install a
-	   per-thread dummy toplevel context as the base of the chain. */
-	if (R_GlobalContext == NULL) {
-	    R_Toplevel.callflag = CTXT_TOPLEVEL;
-	    R_Toplevel.nextcontext = NULL;
-	    R_Toplevel.browserfinish = 0;
-	    R_ToplevelContext = &R_Toplevel;
-	    R_GlobalContext = &R_Toplevel;
-	    R_SessionContext = &R_Toplevel;
-	    R_ExitContext = NULL;
-	}
-#endif
-
-	/* Disable stack checks in this thread; main's limits are unrelated. */
-	R_CStackStart = (uintptr_t) -1;
-	R_CStackLimit = (uintptr_t) -1;
-	R_OldCStackLimit = (uintptr_t) 0;
 
 	/* Reset per-interpreter stacks/slots for this evaluation. */
 	mtl_interp_reset_for_eval(&w->interp, s);
@@ -243,7 +256,7 @@ static void *mtl_worker_main(void *vp)
 		    (void *)w, (long long)i);
 	    fflush(stderr);
 	}
-	SEXP val = R_tryEvalSilent(w->fcall, R_GlobalEnv, &err);
+	SEXP val = R_tryEvalSilent(w->fcall, w->interp.workerGlobalEnv, &err);
 	if (mtl_trace_enabled()) {
 	    fprintf(stderr, "[mtl] worker=%p eval i=%lld end err=%d\n",
 		    (void *)w, (long long)i, err);
@@ -259,7 +272,6 @@ static void *mtl_worker_main(void *vp)
 		snprintf(s->errmsg, sizeof(s->errmsg), "%s", msg);
 		    }
 		    pthread_mutex_unlock(&s->err_mutex);
-	    R_Interpreter = saved_interp;
 	    break;
 	}
 
@@ -270,8 +282,9 @@ static void *mtl_worker_main(void *vp)
 	UNPROTECT(1);
 
 	s->results[i] = val;
-	R_Interpreter = saved_interp;
     }
+
+    R_Interpreter = saved_interp;
 
     /* Worker interpreter stacks are not reused; free its protection stack. */
     R_UnregisterInterpreterState(&w->interp);
@@ -402,6 +415,7 @@ attribute_hidden SEXP do_mtlapply(SEXP call, SEXP op, SEXP args, SEXP rho)
     sh.error = 0;
     sh.errmsg[0] = '\0';
     sh.main_showErrorMessages = R_ShowErrorMessages;
+    sh.dotGlobalEnvSym = install(".GlobalEnv");
 
     pthread_mutex_init(&sh.next_mutex, NULL);
     pthread_mutex_init(&sh.err_mutex, NULL);

@@ -244,11 +244,14 @@ attribute_hidden SEXP do_tempdir(SEXP call, SEXP op, SEXP args, SEXP env)
 {
     checkArity(op, args);
     bool check = asBool2(CAR(args), call);
+    R_mtl_global_lock();
     if(check && !R_isWriteableDir(R_TempDir)) {
 	R_TempDir = NULL;
 	R_reInitTempDir(/* die_on_fail = */ FALSE);
     }
-    return mkString(R_TempDir);
+    SEXP ans = mkString(R_TempDir);
+    R_mtl_global_unlock();
+    return ans;
 }
 
 
@@ -277,6 +280,8 @@ attribute_hidden SEXP do_tempfile(SEXP call, SEXP op, SEXP args, SEXP env)
 	error(_("no 'fileext'"));
     slen = (n1 > n2) ? n1 : n2;
     slen = (n3 > slen) ? n3 : slen;
+
+    R_mtl_global_lock();
     PROTECT(ans = allocVector(STRSXP, slen));
     for(i = 0; i < slen; i++) {
 	tn = translateCharFP( STRING_ELT( pattern , i%n1 ) );
@@ -288,6 +293,7 @@ attribute_hidden SEXP do_tempfile(SEXP call, SEXP op, SEXP args, SEXP env)
 	if(tm) free(tm);
     }
     UNPROTECT(1);
+    R_mtl_global_unlock();
     return (ans);
 }
 
@@ -3079,4 +3085,3 @@ attribute_hidden int R_isatty(int fd)
 #endif
     return isatty(fd);
 }
-

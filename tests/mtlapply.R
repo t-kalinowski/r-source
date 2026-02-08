@@ -13,7 +13,18 @@ stopifnot(identical(w, ow))
 ## Setting options from workers is not supported.
 e <- try(mtlapply(1:1, function(i) options(width = 80), threads = 2L), silent = TRUE)
 stopifnot(inherits(e, "try-error"))
-stopifnot(grepl("setting options is not supported in worker threads", conditionMessage(attr(e, "condition"))))
+stopifnot(grepl("cannot set options from mtlapply\\(\\) worker threads", conditionMessage(attr(e, "condition"))))
+
+## Superassignment is not allowed from workers.
+g <- 0L
+e_sup <- try(mtlapply(1:2, function(i) { g <<- i; i }, threads = 2L), silent = TRUE)
+stopifnot(inherits(e_sup, "try-error"))
+stopifnot(identical(g, 0L))
+stopifnot(grepl("superassignment is not allowed", conditionMessage(attr(e_sup, "condition"))))
+
+## tempfile() must be safe to call from workers (serializes via global lock).
+tf <- unlist(mtlapply(1:20, function(i) tempfile(pattern = "mtl"), threads = 4L), use.names = FALSE)
+stopifnot(length(unique(tf)) == length(tf))
 
 ## Errors in workers should not leave shared internal locks in a stuck state.
 e2 <- try(mtlapply(1:4, \(i) if (i == 2L) stop("boom") else i, threads = 2L), silent = TRUE)
