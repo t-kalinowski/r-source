@@ -1002,7 +1002,7 @@ static void forcePromise(SEXP e)
  * functional style.
  */
 
-static R_bcstack_t *R_BCProtCommitted;
+/* The committed part of the BC node stack that is treated as protected. */
 
 static R_INLINE void INCLNK_stack(R_bcstack_t *top)
 {

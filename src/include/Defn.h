@@ -1578,6 +1578,11 @@ typedef struct {
     int collectWarnings;     /* number of collected warnings (0 means none) */
     SEXP warnings;           /* collected warnings + calls */
     int evalDepth;           /* Evaluation recursion depth */
+    R_bcstack_t *bcNodeStackBase;
+    R_bcstack_t *bcNodeStackTop;
+    R_bcstack_t *bcNodeStackEnd;
+    R_bcstack_t *bcProtTop;
+    R_bcstack_t *bcProtCommitted;
     int bcintactive;         /* bcEval called more recently than top-level eval */
     void* bcpc;              /* current byte code instruction */
     SEXP bcbody;             /* current byte code object */
@@ -1614,6 +1619,11 @@ extern R_THREAD_LOCAL R_InterpreterState *R_Interpreter INI_as(&R_Interpreter0);
 #define R_CollectWarnings (R_Interpreter->collectWarnings)
 #define R_Warnings      (R_Interpreter->warnings)
 #define R_EvalDepth     (R_Interpreter->evalDepth)
+#define R_BCNodeStackBase (R_Interpreter->bcNodeStackBase)
+#define R_BCNodeStackTop  (R_Interpreter->bcNodeStackTop)
+#define R_BCNodeStackEnd  (R_Interpreter->bcNodeStackEnd)
+#define R_BCProtTop       (R_Interpreter->bcProtTop)
+#define R_BCProtCommitted (R_Interpreter->bcProtCommitted)
 #define R_BCIntActive   (R_Interpreter->bcintactive)
 #define R_BCpc          (R_Interpreter->bcpc)
 #define R_BCbody        (R_Interpreter->bcbody)
@@ -1733,9 +1743,6 @@ void resetTimeLimits(void);
 void R_CheckTimeLimits(void);
 
 #define R_BCNODESTACKSIZE 300000
-LibExtern R_bcstack_t *R_BCNodeStackTop, *R_BCNodeStackEnd;
-extern0 R_bcstack_t *R_BCNodeStackBase;
-extern0 R_bcstack_t *R_BCProtTop;
 extern0 int R_jit_enabled INI_as(0); /* has to be 0 during R startup */
 extern0 int R_compile_pkgs INI_as(0);
 extern0 int R_check_constants INI_as(0);
