@@ -1588,6 +1588,7 @@ typedef struct {
     int immediateWarning;    /* options(warn=1) scoped state (errors.c) */
     int noBreakWarning;      /* warning->error break suppression (errors.c) */
 #ifdef R_USE_SIGNALS
+    RCNTXT toplevel;         /* Storage for the toplevel context */
     struct RPRSTACK *pendingPromises; /* pending promise stack */
     RCNTXT* toplevelContext; /* The toplevel context */
     RCNTXT* globalContext;   /* The global (top) context */
@@ -1623,6 +1624,7 @@ extern R_THREAD_LOCAL R_InterpreterState *R_Interpreter INI_as(&R_Interpreter0);
 #define R_ImmediateWarning (R_Interpreter->immediateWarning)
 #define R_NoBreakWarning (R_Interpreter->noBreakWarning)
 #ifdef R_USE_SIGNALS
+#define R_Toplevel      (R_Interpreter->toplevel)
 #define R_PendingPromises (R_Interpreter->pendingPromises)
 #define R_ToplevelContext (R_Interpreter->toplevelContext)
 #define R_SessionContext  (R_Interpreter->sessionContext)
@@ -1630,7 +1632,6 @@ extern R_THREAD_LOCAL R_InterpreterState *R_Interpreter INI_as(&R_Interpreter0);
 #endif
 
 #ifdef R_USE_SIGNALS
-extern0 RCNTXT R_Toplevel;	      /* Storage for the toplevel context */
 LibExtern RCNTXT* R_GlobalContext;    /* The global context */
 #endif
 extern0 int	R_BrowseLines	INI_as(0);	/* lines/per call in browser :
