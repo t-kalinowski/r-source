@@ -1132,6 +1132,8 @@ static R_INLINE R_mtl_heap_state *mtl_sexp_owner(SEXP s)
    to be in a local variable of the caller named named
    forwarded_nodes. */
 
+#define MTL_GC_OWNS_NODE(n) (!R_HEAP->isWorker || mtl_sexp_owner(n) == R_HEAP)
+
 #define MARK_AND_UNSNAP_NODE(s) do {		\
 	SEXP mu__n__ = (s);			\
 	CHECK_FOR_FREE_NODE(mu__n__);		\
@@ -1141,7 +1143,7 @@ static R_INLINE R_mtl_heap_state *mtl_sexp_owner(SEXP s)
 
 #define FORWARD_NODE(s) do { \
   SEXP fn__n__ = (s); \
-  if (fn__n__ && ! NODE_IS_MARKED(fn__n__)) { \
+  if (fn__n__ && MTL_GC_OWNS_NODE(fn__n__) && ! NODE_IS_MARKED(fn__n__)) { \
     MARK_AND_UNSNAP_NODE(fn__n__); \
     SET_NEXT_NODE(fn__n__, forwarded_nodes); \
     forwarded_nodes = fn__n__; \
@@ -1160,7 +1162,7 @@ static R_INLINE R_mtl_heap_state *mtl_sexp_owner(SEXP s)
 #define FORWARD_AND_PROCESS_ONE_NODE(s, tp) do {	\
 	SEXP fpn__n__ = (s);				\
 	int __tp__ = (tp);				\
-	if (fpn__n__ && ! NODE_IS_MARKED(fpn__n__)) {	\
+	if (fpn__n__ && MTL_GC_OWNS_NODE(fpn__n__) && ! NODE_IS_MARKED(fpn__n__)) { \
 	    if (TYPEOF(fpn__n__) == __tp__ &&		\
 		! HAS_GENUINE_ATTRIB(fpn__n__)) {	\
 		MARK_AND_UNSNAP_NODE(fpn__n__);		\
@@ -1192,6 +1194,7 @@ static R_INLINE R_mtl_heap_state *mtl_sexp_owner(SEXP s)
 /* Node Allocation. */
 
 static void GetNewPage(int node_class);
+static void mtl_worker_gc(R_size_t size_needed);
 
 #ifdef HAVE_PTHREAD
 # define GENHEAP_FREE_LOAD(c) \
@@ -1268,19 +1271,28 @@ static R_INLINE SEXP try_get_free_node(int node_class)
 static R_INLINE void mtl_gc(R_size_t size_needed)
 {
     heap_alloc_suspend();
-    R_mtl_heap_lock();
-    R_gc_internal(size_needed);
-    R_mtl_heap_unlock();
+    if (R_HEAP->isWorker) {
+	mtl_worker_gc(size_needed);
+    } else {
+	R_mtl_heap_lock();
+	R_gc_internal(size_needed);
+	R_mtl_heap_unlock();
+    }
     heap_alloc_resume();
 }
 
 static R_INLINE void mtl_get_new_page(int node_class)
 {
     heap_alloc_suspend();
-    R_mtl_heap_lock();
-    if (CLASS_NEED_NEW_PAGE(node_class))
-	GetNewPage(node_class);
-    R_mtl_heap_unlock();
+    if (R_HEAP->isWorker) {
+	if (CLASS_NEED_NEW_PAGE(node_class))
+	    GetNewPage(node_class);
+    } else {
+	R_mtl_heap_lock();
+	if (CLASS_NEED_NEW_PAGE(node_class))
+	    GetNewPage(node_class);
+	R_mtl_heap_unlock();
+    }
     heap_alloc_resume();
 }
 
@@ -2456,6 +2468,113 @@ static int RunGenCollect(R_size_t size_needed)
     return gens_collected;
 }
 
+/* Minimal worker-local collection.
+ *
+ * This is used for mtlapply() worker heaps. It intentionally avoids global
+ * process state such as weak refs/finalizers and the global CHARSXP cache.
+ * It also only traces the current interpreter's roots/stacks/contexts.
+ */
+static void mtl_worker_gc(R_size_t size_needed)
+{
+    int i, gen;
+    RCNTXT *ctxt;
+    SEXP s;
+    SEXP forwarded_nodes = NULL;
+
+    bad_sexp_type_seen = 0;
+
+    /* Full collection: move everything out of old generations into New and
+       unmark, then forward reachable nodes back to Old lists. */
+    for (gen = 0; gen < NUM_OLD_GENERATIONS; gen++) {
+	for (i = 0; i < NUM_NODE_CLASSES; i++) {
+	    R_GenHeap[i].OldCount[gen] = 0;
+	    s = NEXT_NODE(R_GenHeap[i].Old[gen]);
+	    while (s != R_GenHeap[i].Old[gen]) {
+		SEXP next = NEXT_NODE(s);
+		UNMARK_NODE(s);
+		s = next;
+	    }
+	    if (NEXT_NODE(R_GenHeap[i].Old[gen]) != R_GenHeap[i].Old[gen])
+		BULK_MOVE(R_GenHeap[i].Old[gen], R_GenHeap[i].New);
+#ifndef EXPEL_OLD_TO_NEW
+	    s = NEXT_NODE(R_GenHeap[i].OldToNew[gen]);
+	    while (s != R_GenHeap[i].OldToNew[gen]) {
+		SEXP next = NEXT_NODE(s);
+		UNMARK_NODE(s);
+		s = next;
+	    }
+	    if (NEXT_NODE(R_GenHeap[i].OldToNew[gen]) != R_GenHeap[i].OldToNew[gen])
+		BULK_MOVE(R_GenHeap[i].OldToNew[gen], R_GenHeap[i].New);
+#endif
+	}
+    }
+
+    /* Forward interpreter roots. */
+    FORWARD_NODE(R_Warnings);
+    FORWARD_NODE(R_ReturnedValue);
+    FORWARD_NODE(R_HandlerStack);
+    FORWARD_NODE(R_RestartStack);
+    FORWARD_NODE(R_Interpreter->workerGlobalEnv);
+    FORWARD_NODE(R_BCbody);
+    FORWARD_NODE(R_ParseErrorFile);
+    if (R_CurrentExpr)
+	FORWARD_NODE(R_CurrentExpr);
+
+#ifdef R_USE_SIGNALS
+    for (ctxt = R_GlobalContext; ctxt != NULL; ctxt = ctxt->nextcontext) {
+	FORWARD_NODE(ctxt->conexit);
+	FORWARD_NODE(ctxt->promargs);
+	FORWARD_NODE(ctxt->callfun);
+	FORWARD_NODE(ctxt->sysparent);
+	FORWARD_NODE(ctxt->call);
+	FORWARD_NODE(ctxt->cloenv);
+	FORWARD_NODE(ctxt->bcbody);
+	FORWARD_NODE(ctxt->handlerstack);
+	FORWARD_NODE(ctxt->restartstack);
+	FORWARD_NODE(ctxt->srcref);
+	if (ctxt->returnValue.tag == 0)
+	    FORWARD_NODE(ctxt->returnValue.u.sxpval);
+    }
+#endif
+
+    for (int j = 0; j < R_PPStackTop; j++)
+	FORWARD_NODE(R_PPStack[j]);
+    FORWARD_NODE(R_PreciousList);
+    FORWARD_NODE(R_VStack);
+
+    if (R_BCNodeStackBase && R_BCNodeStackTop) {
+	for (R_bcstack_t *sp = R_BCNodeStackBase; sp < R_BCNodeStackTop; sp++) {
+	    if (sp->tag == RAWMEM_TAG)
+		sp += sp->u.ival;
+	    else if (sp->tag == 0 || IS_PARTIAL_SXP_TAG(sp->tag))
+		FORWARD_NODE(sp->u.sxpval);
+	}
+    }
+
+    PROCESS_NODES();
+
+    /* Release large vector allocations that ended up in New space. */
+    ReleaseLargeFreeVectors();
+
+    /* Reset Free pointers. */
+    for (i = 0; i < NUM_NODE_CLASSES; i++)
+	R_GenHeap[i].Free = NEXT_NODE(R_GenHeap[i].New);
+
+    /* Update heap statistics used by allocation fast paths. */
+    R_size_t nodes_in_use = 0;
+    R_size_t small_valloc = 0;
+    for (gen = 0; gen < NUM_OLD_GENERATIONS; gen++) {
+	for (i = 1; i < NUM_SMALL_NODE_CLASSES; i++)
+	    small_valloc += (R_size_t) R_GenHeap[i].OldCount[gen] * (R_size_t) NodeClassSize[i];
+	for (i = 0; i < NUM_NODE_CLASSES; i++)
+	    nodes_in_use += (R_size_t) R_GenHeap[i].OldCount[gen];
+    }
+    NODES_IN_USE_STORE(nodes_in_use);
+    SMALL_VALLOC_STORE(small_valloc);
+
+    (void) size_needed; /* currently ignored */
+}
+
 
 /* public interface for controlling GC torture settings */
 /* maybe, but in no header, and now hidden */
@@ -2696,6 +2815,109 @@ attribute_hidden void R_InitInterpreterBCNodeStack(R_InterpreterState *st)
     st->bcNodeStackEnd = st->bcNodeStackBase + R_BCNODESTACKSIZE;
     st->bcProtTop = st->bcNodeStackTop;
     st->bcProtCommitted = st->bcNodeStackBase;
+}
+
+static void mtl_heap_init(R_mtl_heap_state *h)
+{
+    for (int i = 0; i < NUM_NODE_CLASSES; i++) {
+	for (int gen = 0; gen < NUM_OLD_GENERATIONS; gen++) {
+	    h->GenHeap[i].Old[gen] = &h->GenHeap[i].OldPeg[gen];
+	    SET_PREV_NODE(h->GenHeap[i].Old[gen], h->GenHeap[i].Old[gen]);
+	    SET_NEXT_NODE(h->GenHeap[i].Old[gen], h->GenHeap[i].Old[gen]);
+#ifndef EXPEL_OLD_TO_NEW
+	    h->GenHeap[i].OldToNew[gen] = &h->GenHeap[i].OldToNewPeg[gen];
+	    SET_PREV_NODE(h->GenHeap[i].OldToNew[gen], h->GenHeap[i].OldToNew[gen]);
+	    SET_NEXT_NODE(h->GenHeap[i].OldToNew[gen], h->GenHeap[i].OldToNew[gen]);
+#endif
+	    h->GenHeap[i].OldCount[gen] = 0;
+	}
+	h->GenHeap[i].New = &h->GenHeap[i].NewPeg;
+	SET_PREV_NODE(h->GenHeap[i].New, h->GenHeap[i].New);
+	SET_NEXT_NODE(h->GenHeap[i].New, h->GenHeap[i].New);
+	h->GenHeap[i].pages = NULL;
+	h->GenHeap[i].AllocCount = 0;
+	h->GenHeap[i].PageCount = 0;
+    }
+    for (int i = 0; i < NUM_NODE_CLASSES; i++)
+	h->GenHeap[i].Free = NEXT_NODE(h->GenHeap[i].New);
+}
+
+attribute_hidden void R_InitInterpreterHeap(R_InterpreterState *st)
+{
+    if (st->heap != NULL)
+	return;
+
+    R_mtl_heap_state *h = (R_mtl_heap_state *) calloc(1, sizeof(R_mtl_heap_state));
+    if (h == NULL)
+	R_Suicide("couldn't allocate interpreter heap state");
+
+    h->isWorker = st->isMTLWorker ? 1 : 0;
+
+    /* Default worker heaps are smaller; they can still grow by allocating pages,
+       but will run GC sooner based on these thresholds. */
+    if (h->isWorker) {
+	h->NSize = R_NSize / 8;
+	if (h->NSize < 10000) h->NSize = 10000;
+	h->VSize = R_VSize / 8;
+	if (h->VSize < 10000) h->VSize = 10000;
+    } else {
+	h->NSize = R_NSize;
+	h->VSize = R_VSize;
+    }
+
+    mtl_heap_init(h);
+    st->heap = h;
+}
+
+attribute_hidden void R_DestroyInterpreterHeap(R_InterpreterState *st)
+{
+    if (st->heap == NULL || st->heap == &R_MainHeapState)
+	return;
+
+    R_mtl_heap_state *h = st->heap;
+
+    for (int i = 0; i < NUM_NODE_CLASSES; i++) {
+	PAGE_HEADER *page = h->GenHeap[i].pages;
+	while (page != NULL) {
+	    PAGE_HEADER *next = page->next;
+	    free(page);
+	    page = next;
+	}
+	h->GenHeap[i].pages = NULL;
+    }
+
+    /* Large/custom nodes are malloc-allocated; free anything still on the lists.
+       (This should only matter at shutdown.) */
+    for (int node_class = CUSTOM_NODE_CLASS; node_class <= LARGE_NODE_CLASS; node_class++) {
+	for (int gen = 0; gen < NUM_OLD_GENERATIONS; gen++) {
+	    SEXP s = NEXT_NODE(h->GenHeap[node_class].Old[gen]);
+	    while (s != h->GenHeap[node_class].Old[gen]) {
+		SEXP next = NEXT_NODE(s);
+		UNSNAP_NODE(s);
+		if (node_class == LARGE_NODE_CLASS) free(s); else custom_node_free(s);
+		s = next;
+	    }
+#ifndef EXPEL_OLD_TO_NEW
+	    s = NEXT_NODE(h->GenHeap[node_class].OldToNew[gen]);
+	    while (s != h->GenHeap[node_class].OldToNew[gen]) {
+		SEXP next = NEXT_NODE(s);
+		UNSNAP_NODE(s);
+		if (node_class == LARGE_NODE_CLASS) free(s); else custom_node_free(s);
+		s = next;
+	    }
+#endif
+	}
+	SEXP s = NEXT_NODE(h->GenHeap[node_class].New);
+	while (s != h->GenHeap[node_class].New) {
+	    SEXP next = NEXT_NODE(s);
+	    UNSNAP_NODE(s);
+	    if (node_class == LARGE_NODE_CLASS) free(s); else custom_node_free(s);
+	    s = next;
+	}
+    }
+
+    free(h);
+    st->heap = NULL;
 }
 
 attribute_hidden void InitMemory(void)

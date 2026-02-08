@@ -1631,6 +1631,8 @@ typedef struct R_InterpreterState_ {
 
 attribute_hidden void R_InitInterpreterProtectStack(R_InterpreterState *st);
 attribute_hidden void R_InitInterpreterBCNodeStack(R_InterpreterState *st);
+attribute_hidden void R_InitInterpreterHeap(R_InterpreterState *st);
+attribute_hidden void R_DestroyInterpreterHeap(R_InterpreterState *st);
 attribute_hidden void R_RegisterInterpreterState(R_InterpreterState *st);
 attribute_hidden void R_UnregisterInterpreterState(R_InterpreterState *st);
 
