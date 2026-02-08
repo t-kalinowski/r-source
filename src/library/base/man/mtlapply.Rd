@@ -28,8 +28,13 @@ mtlapply(X, FUN, \dots, threads = 2L)
 
   In this implementation, \code{\dots} are evaluated in the calling thread
   (as in \code{\link[parallel]{mclapply}} on Unix-alikes), and the worker
-  threads serialize entry to the interpreter via a global lock.  This means
-  \code{mtlapply} is not expected to speed up CPU-bound computations.
+  threads evaluate \code{FUN} concurrently.
+
+  The R heap is still shared between threads, and some operations may
+  involve coarse internal synchronization (for example, allocation and
+  garbage collection).  This means \code{mtlapply} is not expected to
+  speed up allocation-heavy workloads, but can speed up computations that
+  spend most of their time in allocation-free code.
 
   The worker function must not attempt to mutate process-global state.
   In particular, \code{options()} can be used to query options, but

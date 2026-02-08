@@ -16,7 +16,7 @@ stopifnot(inherits(e, "try-error"))
 stopifnot(grepl("setting options is not supported in worker threads", conditionMessage(attr(e, "condition"))))
 
 ## Ensure we get actual overlap in compute-heavy primitives.
-## (mtlparallelmax() is an internal counter of max concurrent "parallel regions".)
+## (mtlparallelmax() is an internal counter of max concurrent worker evals.)
 invisible(.Internal(mtlparallelmax()))
 invisible(mtlapply(rep(100000L, 8L), \(i) cos(seq(i)), threads = 4L))
 m <- .Internal(mtlparallelmax())
