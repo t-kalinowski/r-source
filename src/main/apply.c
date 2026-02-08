@@ -121,6 +121,7 @@ static SEXP mtl_dotGlobalEnvSym = NULL;
 
 static void mtl_interp_init_from_main(R_InterpreterState *st)
 {
+    st->heap = R_Interpreter->heap;
     st->currentExpr = NULL;
     st->returnedValue = R_NilValue;
     st->handlerStack = R_NilValue;

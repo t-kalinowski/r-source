@@ -721,13 +721,6 @@ attribute_hidden SEXP do_maxNSize(SEXP call, SEXP op, SEXP args, SEXP rho)
 /* Miscellaneous Globals. */
 
 /* R_VStack and R_PreciousList are per-interpreter (see R_InterpreterState). */
-#ifdef HAVE_PTHREAD
-static _Atomic(R_size_t) R_LargeVallocSize = 0;
-static _Atomic(R_size_t) R_SmallVallocSize = 0;
-#else
-static R_size_t R_LargeVallocSize = 0;
-static R_size_t R_SmallVallocSize = 0;
-#endif
 static R_size_t orig_R_NSize;
 static R_size_t orig_R_VSize;
 
@@ -806,8 +799,55 @@ typedef union PAGE_HEADER {
    sizeof(SEXPREC_ALIGN) + NodeClassSize[c] * sizeof(VECREC))
 
 #define PAGE_DATA(p) ((void *) (p + 1))
-#define VHEAP_FREE() (R_VSize - R_LargeVallocSize - R_SmallVallocSize)
+/* Per-interpreter heap/GC state.
+ *
+ * The long-term goal is fully independent heaps+GCs for subinterpreters.
+ * For now we at least parameterize the core heap bookkeeping by the current
+ * interpreter state (R_Interpreter->heap).
+ */
+typedef struct R_mtl_heap_state_ {
+    struct {
+	SEXP Old[NUM_OLD_GENERATIONS], New;
+#ifdef HAVE_PTHREAD
+	_Atomic(SEXP) Free;
+#else
+	SEXP Free;
+#endif
+	SEXPREC OldPeg[NUM_OLD_GENERATIONS], NewPeg;
+#ifndef EXPEL_OLD_TO_NEW
+	SEXP OldToNew[NUM_OLD_GENERATIONS];
+	SEXPREC OldToNewPeg[NUM_OLD_GENERATIONS];
+#endif
+	int OldCount[NUM_OLD_GENERATIONS], AllocCount, PageCount;
+	PAGE_HEADER *pages;
+    } GenHeap[NUM_NODE_CLASSES];
 
+#ifdef HAVE_PTHREAD
+    _Atomic(R_size_t) NodesInUse;
+    _Atomic(R_size_t) LargeVallocSize;
+    _Atomic(R_size_t) SmallVallocSize;
+#else
+    R_size_t NodesInUse;
+    R_size_t LargeVallocSize;
+    R_size_t SmallVallocSize;
+#endif
+
+    R_size_t NSize; /* node limit for this heap (cons cells) */
+    R_size_t VSize; /* vector heap limit for this heap (in VECRECs) */
+    int isWorker;
+} R_mtl_heap_state;
+
+static R_mtl_heap_state R_MainHeapState;
+
+#define R_HEAP (R_Interpreter->heap)
+#define R_GenHeap (R_HEAP->GenHeap)
+#define R_NodesInUse (R_HEAP->NodesInUse)
+#define R_LargeVallocSize (R_HEAP->LargeVallocSize)
+#define R_SmallVallocSize (R_HEAP->SmallVallocSize)
+#define R_NSize_heap (R_HEAP->NSize)
+#define R_VSize_heap (R_HEAP->VSize)
+
+#define VHEAP_FREE() (R_VSize_heap - R_LargeVallocSize - R_SmallVallocSize)
 
 /* The Heap Structure.  Nodes for each class/generation combination
    are arranged in circular doubly-linked lists.  The double linking
@@ -836,27 +876,6 @@ typedef union PAGE_HEADER {
    the execution time, though the difference is probably marginal on
    both counts.*/
 /*#define EXPEL_OLD_TO_NEW*/
-static struct {
-    SEXP Old[NUM_OLD_GENERATIONS], New;
-#ifdef HAVE_PTHREAD
-    _Atomic(SEXP) Free;
-#else
-    SEXP Free;
-#endif
-    SEXPREC OldPeg[NUM_OLD_GENERATIONS], NewPeg;
-#ifndef EXPEL_OLD_TO_NEW
-    SEXP OldToNew[NUM_OLD_GENERATIONS];
-    SEXPREC OldToNewPeg[NUM_OLD_GENERATIONS];
-#endif
-    int OldCount[NUM_OLD_GENERATIONS], AllocCount, PageCount;
-    PAGE_HEADER *pages;
-} R_GenHeap[NUM_NODE_CLASSES];
-
-#ifdef HAVE_PTHREAD
-static _Atomic(R_size_t) R_NodesInUse = 0;
-#else
-static R_size_t R_NodesInUse = 0;
-#endif
 
 #define NEXT_NODE(s) (s)->gengc_next_node
 #define PREV_NODE(s) (s)->gengc_prev_node
@@ -2571,6 +2590,13 @@ attribute_hidden void InitMemory(void)
 
     R_mtl_heap_lock();
 
+    if (R_Interpreter->heap == NULL) {
+	R_Interpreter->heap = &R_MainHeapState;
+	R_HEAP->isWorker = 0;
+	R_HEAP->NSize = R_NSize;
+	/* VSize is converted to VECRECs below, then stored in R_HEAP->VSize. */
+    }
+
     init_gctorture();
     init_gc_grow_settings();
 
@@ -2588,6 +2614,7 @@ attribute_hidden void InitMemory(void)
     vsfac = sizeof(VECREC);
     R_VSize = (R_VSize + 1)/vsfac;
     if (R_MaxVSize < R_SIZE_T_MAX) R_MaxVSize = (R_MaxVSize + 1)/vsfac;
+    R_HEAP->VSize = R_VSize;
 
     UNMARK_NODE(&UnmarkedNodeTemplate);
 
