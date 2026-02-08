@@ -15,3 +15,9 @@ e <- try(mtlapply(1:1, function(i) options(width = 80), threads = 2L), silent = 
 stopifnot(inherits(e, "try-error"))
 stopifnot(grepl("setting options is not supported in worker threads", conditionMessage(attr(e, "condition"))))
 
+## Ensure we get actual overlap in compute-heavy primitives.
+## (mtlparallelmax() is an internal counter of max concurrent "parallel regions".)
+invisible(.Internal(mtlparallelmax()))
+invisible(mtlapply(rep(100000L, 8L), \(i) cos(seq(i)), threads = 4L))
+m <- .Internal(mtlparallelmax())
+stopifnot(m >= 2L)
