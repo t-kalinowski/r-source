@@ -241,6 +241,11 @@ NORET attribute_hidden void R_jumpctxt(RCNTXT * targetcptr, int mask, SEXP val)
     if (mask == 0)
 	mask = 1; // make sure the return value for SETJMP is not zero
 
+    /* If an error/jump occurs while holding the heap lock, release it to
+       avoid deadlocks (e.g. worker threads blocking on the shared heap
+       mutex after a caught error in another thread). */
+    R_mtl_heap_unlock_all();
+
     LONGJMP(cptr->cjmpbuf, mask);
 }
 
