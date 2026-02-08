@@ -662,6 +662,13 @@ static void Rstd_CleanUp(SA_TYPE saveact, int status, int runLast)
 	free(ifile);
 	ifile = NULL;
     }
+
+#ifdef HAVE_PTHREAD
+    /* Join mtlapply() worker threads (if any) before exiting. */
+    extern void R_mtlpool_shutdown(void);
+    R_mtlpool_shutdown();
+#endif
+
     exit(status);
 }
 
@@ -1438,4 +1445,3 @@ int R_EnsureFDLimit(int desired)
     long limit = 16L*1024L*1024L;
     return (desired <= limit) ? desired : (int)limit;
 }
-

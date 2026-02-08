@@ -1297,6 +1297,12 @@ void Rstd_CleanUp(SA_TYPE saveact, int status, int runLast)
     }
     fpu_setup(FALSE);
 
+#ifdef HAVE_PTHREAD
+    /* Join mtlapply() worker threads (if any) before exiting. */
+    extern void R_mtlpool_shutdown(void);
+    R_mtlpool_shutdown();
+#endif
+
     exit(status);
 }
 

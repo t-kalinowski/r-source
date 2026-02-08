@@ -41,22 +41,39 @@ static SEXP checkArgIsSymbol(SEXP x) {
 typedef struct {
     SEXP XX;
     R_xlen_t n;
-    SEXP *results;
-    R_xlen_t next;
-    pthread_mutex_t next_mutex;
-    int error;
+    SEXP ans;                 /* rooted in main thread */
+    atomic_long next;         /* next index to claim */
+    atomic_int error;         /* 0/1 */
     char errmsg[1024];
-    pthread_mutex_t err_mutex;
+    pthread_mutex_t err_mutex; /* protects errmsg */
+    pthread_mutex_t ans_mutex; /* protects SET_VECTOR_ELT(ans, i, ...) */
     int main_showErrorMessages;
-    SEXP dotGlobalEnvSym;
-} mtl_shared_t;
+} mtl_job_t;
 
 typedef struct {
-    mtl_shared_t *sh;
+    int id;
+    struct mtl_pool_t *pool;
+    unsigned long seen_gen;
     SEXP argcell;
     SEXP fcall;
     R_InterpreterState interp;
 } mtl_worker_t;
+
+typedef struct mtl_pool_t {
+    int inited;
+    int shutdown;
+    int nthreads;
+    pthread_t *threads;
+    mtl_worker_t **workers;
+
+    pthread_mutex_t mu;
+    pthread_cond_t cv;
+
+    unsigned long gen;
+    int job_nthreads;
+    int job_done;
+    mtl_job_t *job; /* owned by the mtlapply() caller thread */
+} mtl_pool_t;
 
 static int mtl_trace_cached = -1;
 static int mtl_trace_enabled(void)
@@ -97,6 +114,10 @@ static void mtl_parallel_end(void)
 }
 static int mtl_main_thread_inited = 0;
 static pthread_t mtl_main_thread;
+
+static mtl_pool_t mtl_pool;
+static atomic_int mtl_pool_threads_created = 0;
+static SEXP mtl_dotGlobalEnvSym = NULL;
 
 static void mtl_interp_init_from_main(R_InterpreterState *st)
 {
@@ -158,14 +179,14 @@ static void mtl_interp_init_from_main(R_InterpreterState *st)
     R_InitInterpreterBCNodeStack(st);
 }
 
-static void mtl_interp_reset_for_eval(R_InterpreterState *st, const mtl_shared_t *sh)
+static void mtl_interp_reset_for_eval(R_InterpreterState *st, const mtl_job_t *job)
 {
     st->currentExpr = NULL;
     st->returnedValue = R_NilValue;
     st->handlerStack = R_NilValue;
     st->restartStack = R_NilValue;
     st->visible = TRUE;
-    st->showErrorMessages = sh->main_showErrorMessages;
+    st->showErrorMessages = job->main_showErrorMessages;
     st->collectWarnings = 0;
     st->warnings = R_NilValue;
     st->evalDepth = 0;
@@ -197,10 +218,22 @@ static void mtl_ensure_main_thread(void)
 	error("mtlapply() may only be called from the main thread");
 }
 
-static void *mtl_worker_main(void *vp)
+static void mtl_pool_init_if_needed(void)
+{
+    if (mtl_pool.inited)
+	return;
+
+    memset(&mtl_pool, 0, sizeof(mtl_pool));
+    pthread_mutex_init(&mtl_pool.mu, NULL);
+    pthread_cond_init(&mtl_pool.cv, NULL);
+    mtl_dotGlobalEnvSym = install(".GlobalEnv");
+    mtl_pool.inited = 1;
+}
+
+static void *mtl_pool_worker_main(void *vp)
 {
     mtl_worker_t *w = (mtl_worker_t *) vp;
-    mtl_shared_t *s = w->sh;
+    mtl_pool_t *p = w->pool;
 
     R_RegisterInterpreterState(&w->interp);
 
@@ -232,56 +265,79 @@ static void *mtl_worker_main(void *vp)
 	SEXP wenv = PROTECT(NewEnvironment(R_NilValue, R_NilValue, R_GlobalEnv));
 	w->interp.workerGlobalEnv = wenv;
 	/* Shadow .GlobalEnv for common explicit-envir uses. */
-	defineVar(s->dotGlobalEnvSym, wenv, wenv);
+	defineVar(mtl_dotGlobalEnvSym, wenv, wenv);
 	UNPROTECT(1);
     }
 
     for (;;) {
-	pthread_mutex_lock(&s->next_mutex);
-	if (s->error || s->next >= s->n) {
-	    pthread_mutex_unlock(&s->next_mutex);
-	    break;
+	pthread_mutex_lock(&p->mu);
+	while (!p->shutdown &&
+	       (p->job == NULL || w->id >= p->job_nthreads || w->seen_gen == p->gen)) {
+	    pthread_cond_wait(&p->cv, &p->mu);
 	}
-	R_xlen_t i = s->next++;
-	pthread_mutex_unlock(&s->next_mutex);
-
-	/* Reset per-interpreter stacks/slots for this evaluation. */
-	mtl_interp_reset_for_eval(&w->interp, s);
-
-	SETCAR(w->argcell, VECTOR_ELT(s->XX, i));
-	int err = 0;
-	mtl_parallel_begin();
-	if (mtl_trace_enabled()) {
-	    fprintf(stderr, "[mtl] worker=%p eval i=%lld begin\n",
-		    (void *)w, (long long)i);
-	    fflush(stderr);
-	}
-	SEXP val = R_tryEvalSilent(w->fcall, w->interp.workerGlobalEnv, &err);
-	if (mtl_trace_enabled()) {
-	    fprintf(stderr, "[mtl] worker=%p eval i=%lld end err=%d\n",
-		    (void *)w, (long long)i, err);
-	    fflush(stderr);
-	}
-	mtl_parallel_end();
-	if (err || val == NULL) {
-	    pthread_mutex_lock(&s->err_mutex);
-	    if (!s->error) {
-		s->error = 1;
-		const char *msg = R_curErrorBuf();
-		if (msg == NULL) msg = "error";
-		snprintf(s->errmsg, sizeof(s->errmsg), "%s", msg);
-		    }
-		    pthread_mutex_unlock(&s->err_mutex);
+	if (p->shutdown) {
+	    pthread_mutex_unlock(&p->mu);
 	    break;
 	}
 
-	PROTECT(val);
-	if (MAYBE_REFERENCED(val))
-	    val = lazy_duplicate(val);
-	R_PreserveObject(val);
-	UNPROTECT(1);
+	mtl_job_t *job = p->job;
+	unsigned long mygen = p->gen;
+	w->seen_gen = mygen;
+	pthread_mutex_unlock(&p->mu);
 
-	s->results[i] = val;
+	for (;;) {
+	    if (atomic_load_explicit(&job->error, memory_order_relaxed))
+		break;
+	    long idx = atomic_fetch_add_explicit(&job->next, 1, memory_order_relaxed);
+	    if (idx < 0 || (R_xlen_t) idx >= job->n)
+		break;
+	    R_xlen_t i = (R_xlen_t) idx;
+
+	    /* Reset per-interpreter stacks/slots for this evaluation. */
+	    mtl_interp_reset_for_eval(&w->interp, job);
+
+	    SETCAR(w->argcell, VECTOR_ELT(job->XX, i));
+	    int err = 0;
+	    mtl_parallel_begin();
+	    if (mtl_trace_enabled()) {
+		fprintf(stderr, "[mtl] worker=%p eval i=%lld begin\n",
+			(void *)w, (long long)i);
+		fflush(stderr);
+	    }
+	    SEXP val = R_tryEvalSilent(w->fcall, w->interp.workerGlobalEnv, &err);
+	    if (mtl_trace_enabled()) {
+		fprintf(stderr, "[mtl] worker=%p eval i=%lld end err=%d\n",
+			(void *)w, (long long)i, err);
+		fflush(stderr);
+	    }
+	    mtl_parallel_end();
+	    if (err || val == NULL) {
+		if (atomic_exchange_explicit(&job->error, 1, memory_order_relaxed) == 0) {
+		    pthread_mutex_lock(&job->err_mutex);
+		    const char *msg = R_curErrorBuf();
+		    if (msg == NULL) msg = "error";
+		    snprintf(job->errmsg, sizeof(job->errmsg), "%s", msg);
+		    pthread_mutex_unlock(&job->err_mutex);
+		}
+		break;
+	    }
+
+	    PROTECT(val);
+	    if (MAYBE_REFERENCED(val))
+		val = lazy_duplicate(val);
+
+	    pthread_mutex_lock(&job->ans_mutex);
+	    SET_VECTOR_ELT(job->ans, i, val);
+	    pthread_mutex_unlock(&job->ans_mutex);
+	    UNPROTECT(1);
+	}
+
+	pthread_mutex_lock(&p->mu);
+	if (p->job == job && p->gen == mygen) {
+	    p->job_done++;
+	    pthread_cond_broadcast(&p->cv);
+	}
+	pthread_mutex_unlock(&p->mu);
     }
 
     R_Interpreter = saved_interp;
@@ -299,6 +355,62 @@ static void *mtl_worker_main(void *vp)
     w->interp.bcProtCommitted = NULL;
 
     return NULL;
+}
+
+static void mtl_pool_ensure_threads(int nthreads)
+{
+    if (nthreads <= mtl_pool.nthreads)
+	return;
+
+    int old = mtl_pool.nthreads;
+    pthread_t *new_threads = (pthread_t *) calloc((size_t) nthreads, sizeof(pthread_t));
+    mtl_worker_t **new_workers = (mtl_worker_t **) calloc((size_t) nthreads, sizeof(mtl_worker_t *));
+    if (new_threads == NULL || new_workers == NULL)
+	error(_("cannot allocate memory"));
+    if (mtl_pool.nthreads > 0) {
+	memcpy(new_threads, mtl_pool.threads, (size_t) mtl_pool.nthreads * sizeof(pthread_t));
+	memcpy(new_workers, mtl_pool.workers, (size_t) mtl_pool.nthreads * sizeof(mtl_worker_t *));
+    }
+    free(mtl_pool.threads);
+    free(mtl_pool.workers);
+    mtl_pool.threads = new_threads;
+    mtl_pool.workers = new_workers;
+
+    for (int i = old; i < nthreads; i++) {
+	mtl_worker_t *w = (mtl_worker_t *) calloc(1, sizeof(mtl_worker_t));
+	if (w == NULL)
+	    error(_("cannot allocate memory"));
+	w->id = i;
+	w->pool = &mtl_pool;
+	mtl_interp_init_from_main(&w->interp);
+	mtl_pool.workers[i] = w;
+	int rc = pthread_create(&mtl_pool.threads[i], NULL, mtl_pool_worker_main, w);
+	if (rc != 0)
+	    error("pthread_create failed");
+	atomic_fetch_add_explicit(&mtl_pool_threads_created, 1, memory_order_relaxed);
+    }
+    mtl_pool.nthreads = nthreads;
+}
+
+attribute_hidden void R_mtlpool_shutdown(void)
+{
+    if (!mtl_pool.inited)
+	return;
+
+    pthread_mutex_lock(&mtl_pool.mu);
+    mtl_pool.shutdown = 1;
+    pthread_cond_broadcast(&mtl_pool.cv);
+    pthread_mutex_unlock(&mtl_pool.mu);
+
+    for (int i = 0; i < mtl_pool.nthreads; i++)
+	pthread_join(mtl_pool.threads[i], NULL);
+    for (int i = 0; i < mtl_pool.nthreads; i++)
+	free(mtl_pool.workers[i]);
+    free(mtl_pool.workers);
+    free(mtl_pool.threads);
+    pthread_mutex_destroy(&mtl_pool.mu);
+    pthread_cond_destroy(&mtl_pool.cv);
+    memset(&mtl_pool, 0, sizeof(mtl_pool));
 }
 #endif /* HAVE_PTHREAD */
 
@@ -390,84 +502,84 @@ attribute_hidden SEXP do_mtlapply(SEXP call, SEXP op, SEXP args, SEXP rho)
 
     mtl_ensure_main_thread();
 
-    if (nthreads > n) nthreads = (int) n;
-
     SEXP names = getAttrib(XX, R_NamesSymbol);
 
-    /* Convert DOTS list to a pairlist once, then share it across threads. */
+    if (n == 0) {
+	SEXP ans = allocVector(VECSXP, 0);
+	if (!isNull(names)) setAttrib(ans, R_NamesSymbol, names);
+	return ans;
+    }
+
+    if (nthreads > n) nthreads = (int) n;
+
+    mtl_pool_init_if_needed();
+    mtl_pool_ensure_threads(nthreads);
+
+    /* Convert DOTS list to a pairlist once, then duplicate per worker. */
     int nprotect = 0;
     PROTECT(XX); nprotect++;
     PROTECT(FUN); nprotect++;
     PROTECT(dots); nprotect++;
     SEXP tail0 = PROTECT(VectorToPairList(dots)); nprotect++;
 
-    /* Results are preserved while threads are running to keep them GC-safe. */
-    SEXP *results = (SEXP *) calloc((size_t) n, sizeof(SEXP));
-    if (results == NULL)
-	error(_("cannot allocate memory"));
-
-    /* Worker threads will disable their own stack checks. */
-    mtl_shared_t sh;
-    sh.XX = XX;
-    sh.n = n;
-    sh.results = results;
-    sh.next = 0;
-    sh.error = 0;
-    sh.errmsg[0] = '\0';
-    sh.main_showErrorMessages = R_ShowErrorMessages;
-    sh.dotGlobalEnvSym = install(".GlobalEnv");
-
-    pthread_mutex_init(&sh.next_mutex, NULL);
-    pthread_mutex_init(&sh.err_mutex, NULL);
-
-    pthread_t *threads = (pthread_t *) calloc((size_t) nthreads, sizeof(pthread_t));
-    mtl_worker_t *workers = (mtl_worker_t *) calloc((size_t) nthreads, sizeof(mtl_worker_t));
-    if (threads == NULL || workers == NULL)
-	error(_("cannot allocate memory"));
-
-    /* Per-thread call objects (each thread gets its own DOTS pairlist). */
-    for (int t = 0; t < nthreads; t++) {
-	workers[t].sh = &sh;
-	SEXP tail = PROTECT(duplicate(tail0)); nprotect++;
-	workers[t].argcell = PROTECT(CONS(R_NilValue, tail)); nprotect++;
-	workers[t].fcall = PROTECT(LCONS(FUN, workers[t].argcell)); nprotect++;
-	mtl_interp_init_from_main(&workers[t].interp);
-    }
-
-    for (int t = 0; t < nthreads; t++) {
-	int rc = pthread_create(&threads[t], NULL, mtl_worker_main, &workers[t]);
-	if (rc != 0)
-	    error("pthread_create failed");
-    }
-    for (int t = 0; t < nthreads; t++)
-	pthread_join(threads[t], NULL);
-
-    pthread_mutex_destroy(&sh.next_mutex);
-    pthread_mutex_destroy(&sh.err_mutex);
-    free(threads);
-    free(workers);
-
-    if (sh.error) {
-	for (R_xlen_t i = 0; i < n; i++)
-	    if (results[i] != NULL)
-		R_ReleaseObject(results[i]);
-	free(results);
-	UNPROTECT(nprotect);
-	error("%s", sh.errmsg[0] ? sh.errmsg : "mtlapply error");
-    }
-
+    /* Root the answer while workers are running. */
     SEXP ans = PROTECT(allocVector(VECSXP, n)); nprotect++;
     if (!isNull(names)) setAttrib(ans, R_NamesSymbol, names);
-    for (R_xlen_t i = 0; i < n; i++) {
-	SEXP val = results[i];
-	if (val == NULL)
-	    val = R_NilValue;
-	SET_VECTOR_ELT(ans, i, val);
-	if (results[i] != NULL)
-	    R_ReleaseObject(results[i]);
+
+    mtl_job_t job;
+    memset(&job, 0, sizeof(job));
+    job.XX = XX;
+    job.n = n;
+    job.ans = ans;
+    atomic_init(&job.next, 0);
+    atomic_init(&job.error, 0);
+    job.errmsg[0] = '\0';
+    job.main_showErrorMessages = R_ShowErrorMessages;
+    pthread_mutex_init(&job.err_mutex, NULL);
+    pthread_mutex_init(&job.ans_mutex, NULL);
+
+    /* Per-worker call objects for this job (each worker gets its own DOTS
+       pairlist). Keep them rooted via call_roots. */
+    SEXP call_roots = PROTECT(allocVector(VECSXP, (R_xlen_t) nthreads * 3)); nprotect++;
+    for (int t = 0; t < nthreads; t++) {
+	SEXP tail = PROTECT(duplicate(tail0));
+	SEXP argcell = PROTECT(CONS(R_NilValue, tail));
+	SEXP fcall = PROTECT(LCONS(FUN, argcell));
+	MARK_NOT_MUTABLE(fcall);
+	SET_VECTOR_ELT(call_roots, (R_xlen_t) t * 3 + 0, tail);
+	SET_VECTOR_ELT(call_roots, (R_xlen_t) t * 3 + 1, argcell);
+	SET_VECTOR_ELT(call_roots, (R_xlen_t) t * 3 + 2, fcall);
+
+	mtl_worker_t *w = mtl_pool.workers[t];
+	w->argcell = argcell;
+	w->fcall = fcall;
+	UNPROTECT(3);
     }
 
-    free(results);
+    pthread_mutex_lock(&mtl_pool.mu);
+    if (mtl_pool.job != NULL) {
+	pthread_mutex_unlock(&mtl_pool.mu);
+	error("mtlapply internal error: concurrent job");
+    }
+    mtl_pool.job = &job;
+    mtl_pool.job_nthreads = nthreads;
+    mtl_pool.job_done = 0;
+    mtl_pool.gen++;
+    pthread_cond_broadcast(&mtl_pool.cv);
+    while (mtl_pool.job_done < nthreads)
+	pthread_cond_wait(&mtl_pool.cv, &mtl_pool.mu);
+    mtl_pool.job = NULL;
+    pthread_cond_broadcast(&mtl_pool.cv);
+    pthread_mutex_unlock(&mtl_pool.mu);
+
+    pthread_mutex_destroy(&job.err_mutex);
+    pthread_mutex_destroy(&job.ans_mutex);
+
+    if (atomic_load_explicit(&job.error, memory_order_relaxed)) {
+	UNPROTECT(nprotect);
+	error("%s", job.errmsg[0] ? job.errmsg : "mtlapply error");
+    }
+
     UNPROTECT(nprotect);
     return ans;
 #endif
