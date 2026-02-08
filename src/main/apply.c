@@ -55,50 +55,21 @@ typedef struct {
     mtl_shared_t *sh;
     SEXP argcell;
     SEXP fcall;
+    R_InterpreterState interp;
 } mtl_worker_t;
 
 static pthread_mutex_t mtl_gil = PTHREAD_MUTEX_INITIALIZER;
+static int mtl_main_thread_inited = 0;
+static pthread_t mtl_main_thread;
 
-static SEXP mtl_try_eval(SEXP expr, SEXP env, int *pError)
+static void mtl_ensure_main_thread(void)
 {
-    RCNTXT thiscontext;
-    RCNTXT * volatile saveToplevelContext;
-    volatile int savestack;
-    volatile SEXP topExp, oldHStack, oldRStack, oldRVal;
-    volatile Rboolean oldvis;
-    SEXP val = NULL;
-
-    PROTECT(oldHStack = R_HandlerStack);
-    PROTECT(oldRStack = R_RestartStack);
-    PROTECT(oldRVal = R_ReturnedValue);
-    PROTECT(topExp = R_CurrentExpr);
-    oldvis = R_Visible;
-    savestack = R_PPStackTop;
-    R_HandlerStack = R_NilValue;
-    R_RestartStack = R_NilValue;
-
-    begincontext(&thiscontext, CTXT_TOPLEVEL, R_NilValue, R_GlobalEnv,
-		 R_BaseEnv, R_NilValue, R_NilValue);
-    saveToplevelContext = R_ToplevelContext;
-    if (SETJMP(thiscontext.cjmpbuf)) {
-	if (pError) *pError = 1;
-	val = NULL;
-    } else {
-	if (pError) *pError = 0;
-	R_GlobalContext = R_ToplevelContext = &thiscontext;
-	val = eval(expr, env);
+    if (!mtl_main_thread_inited) {
+	mtl_main_thread = pthread_self();
+	mtl_main_thread_inited = 1;
     }
-    endcontext(&thiscontext);
-    R_ToplevelContext = saveToplevelContext;
-    R_PPStackTop = savestack;
-    R_CurrentExpr = topExp;
-    R_HandlerStack = oldHStack;
-    R_RestartStack = oldRStack;
-    R_ReturnedValue = oldRVal;
-    R_Visible = oldvis;
-    UNPROTECT(4);
-
-    return val;
+    if (!pthread_equal(mtl_main_thread, pthread_self()))
+	error("mtlapply() may only be called from the main thread");
 }
 
 static void *mtl_worker_main(void *vp)
@@ -117,14 +88,23 @@ static void *mtl_worker_main(void *vp)
 
 	pthread_mutex_lock(&mtl_gil);
 
+	R_InterpreterState *saved_interp = R_Interpreter;
+	R_Interpreter = &w->interp;
+
 	/* Disable stack checks in this thread; our saved start is for main. */
 	R_CStackStart = (uintptr_t) -1;
 	R_CStackLimit = (uintptr_t) -1;
 	R_OldCStackLimit = (uintptr_t) 0;
 
+	/* Reset per-interpreter stacks/slots for this evaluation. */
+	w->interp.currentExpr = NULL;
+	w->interp.returnedValue = R_NilValue;
+	w->interp.handlerStack = R_NilValue;
+	w->interp.restartStack = R_NilValue;
+
 	SETCAR(w->argcell, VECTOR_ELT(s->XX, i));
 	int err = 0;
-	SEXP val = mtl_try_eval(w->fcall, R_GlobalEnv, &err);
+	SEXP val = R_tryEvalSilent(w->fcall, R_GlobalEnv, &err);
 	if (err || val == NULL) {
 	    pthread_mutex_lock(&s->err_mutex);
 	    if (!s->error) {
@@ -134,6 +114,7 @@ static void *mtl_worker_main(void *vp)
 		snprintf(s->errmsg, sizeof(s->errmsg), "%s", msg);
 	    }
 	    pthread_mutex_unlock(&s->err_mutex);
+	    R_Interpreter = saved_interp;
 	    pthread_mutex_unlock(&mtl_gil);
 	    break;
 	}
@@ -145,6 +126,7 @@ static void *mtl_worker_main(void *vp)
 	UNPROTECT(1);
 
 	s->results[i] = val;
+	R_Interpreter = saved_interp;
 	pthread_mutex_unlock(&mtl_gil);
     }
 
@@ -238,6 +220,8 @@ attribute_hidden SEXP do_mtlapply(SEXP call, SEXP op, SEXP args, SEXP rho)
     if (n == NA_INTEGER)
 	error(_("invalid length"));
 
+    mtl_ensure_main_thread();
+
     if (nthreads > n) nthreads = (int) n;
 
     SEXP names = getAttrib(XX, R_NamesSymbol);
@@ -280,6 +264,16 @@ attribute_hidden SEXP do_mtlapply(SEXP call, SEXP op, SEXP args, SEXP rho)
 	SEXP tail = PROTECT(duplicate(tail0)); nprotect++;
 	workers[t].argcell = PROTECT(CONS(R_NilValue, tail)); nprotect++;
 	workers[t].fcall = PROTECT(LCONS(FUN, workers[t].argcell)); nprotect++;
+
+	workers[t].interp.currentExpr = NULL;
+	workers[t].interp.returnedValue = R_NilValue;
+	workers[t].interp.handlerStack = R_NilValue;
+	workers[t].interp.restartStack = R_NilValue;
+#ifdef R_USE_SIGNALS
+	workers[t].interp.toplevelContext = R_ToplevelContext;
+	workers[t].interp.sessionContext = R_SessionContext;
+	workers[t].interp.exitContext = R_ExitContext;
+#endif
     }
 
     for (int t = 0; t < nthreads; t++) {
