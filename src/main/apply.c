@@ -103,6 +103,7 @@ static void *mtl_worker_main(void *vp)
 	w->interp.restartStack = R_NilValue;
 	w->interp.visible = TRUE;
 	w->interp.showErrorMessages = 1;
+	w->interp.evalDepth = 0;
 #ifdef R_USE_SIGNALS
 	RCNTXT *saved_global_context = R_GlobalContext;
 	R_GlobalContext = w->interp.globalContext;
@@ -285,6 +286,7 @@ attribute_hidden SEXP do_mtlapply(SEXP call, SEXP op, SEXP args, SEXP rho)
 	workers[t].interp.restartStack = R_NilValue;
 	workers[t].interp.visible = TRUE;
 	workers[t].interp.showErrorMessages = 1;
+	workers[t].interp.evalDepth = 0;
 #ifdef R_USE_SIGNALS
 	workers[t].interp.toplevelContext = R_ToplevelContext;
 	workers[t].interp.globalContext = R_GlobalContext;

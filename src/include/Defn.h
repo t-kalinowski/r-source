@@ -1579,6 +1579,7 @@ typedef struct {
     SEXP restartStack;       /* Stack of available restarts */
     Rboolean visible;        /* Value visibility flag */
     int showErrorMessages;   /* show error messages? */
+    int evalDepth;           /* Evaluation recursion depth */
 #ifdef R_USE_SIGNALS
     RCNTXT* toplevelContext; /* The toplevel context */
     RCNTXT* globalContext;   /* The global (top) context */
@@ -1600,6 +1601,7 @@ extern R_THREAD_LOCAL R_InterpreterState *R_Interpreter INI_as(&R_Interpreter0);
 #define R_RestartStack  (R_Interpreter->restartStack)
 #define R_Visible       (R_Interpreter->visible)
 #define R_ShowErrorMessages (R_Interpreter->showErrorMessages)
+#define R_EvalDepth     (R_Interpreter->evalDepth)
 #ifdef R_USE_SIGNALS
 #define R_ToplevelContext (R_Interpreter->toplevelContext)
 #define R_SessionContext  (R_Interpreter->sessionContext)
@@ -1610,7 +1612,6 @@ extern R_THREAD_LOCAL R_InterpreterState *R_Interpreter INI_as(&R_Interpreter0);
 extern0 RCNTXT R_Toplevel;	      /* Storage for the toplevel context */
 LibExtern RCNTXT* R_GlobalContext;    /* The global context */
 #endif
-extern0 int	R_EvalDepth	INI_as(0);	/* Evaluation recursion depth */
 extern0 int	R_BrowseLines	INI_as(0);	/* lines/per call in browser :
 						 * options(deparse.max.lines) */
 extern0 int	R_Expressions	INI_as(5000);	/* options(expressions) */
