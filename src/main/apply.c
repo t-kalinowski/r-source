@@ -62,6 +62,60 @@ static pthread_mutex_t mtl_gil = PTHREAD_MUTEX_INITIALIZER;
 static int mtl_main_thread_inited = 0;
 static pthread_t mtl_main_thread;
 
+static void mtl_interp_init_from_main(R_InterpreterState *st)
+{
+    st->currentExpr = NULL;
+    st->returnedValue = R_NilValue;
+    st->handlerStack = R_NilValue;
+    st->restartStack = R_NilValue;
+    st->visible = TRUE;
+    st->showErrorMessages = 1;
+    st->collectWarnings = 0;
+    st->warnings = R_NilValue;
+    st->evalDepth = 0;
+    st->bcintactive = 0;
+    st->bcpc = NULL;
+    st->bcbody = NULL;
+    st->bcframe = NULL;
+    st->inError = 0;
+    st->inWarning = 0;
+    st->inPrintWarnings = 0;
+    st->immediateWarning = 0;
+    st->noBreakWarning = 0;
+#ifdef R_USE_SIGNALS
+    st->pendingPromises = NULL;
+    st->toplevelContext = R_ToplevelContext;
+    st->globalContext = R_GlobalContext;
+    st->sessionContext = R_SessionContext;
+    st->exitContext = R_ExitContext;
+#endif
+}
+
+static void mtl_interp_reset_for_eval(R_InterpreterState *st)
+{
+    st->currentExpr = NULL;
+    st->returnedValue = R_NilValue;
+    st->handlerStack = R_NilValue;
+    st->restartStack = R_NilValue;
+    st->visible = TRUE;
+    st->showErrorMessages = 1;
+    st->collectWarnings = 0;
+    st->warnings = R_NilValue;
+    st->evalDepth = 0;
+    st->bcintactive = 0;
+    st->bcpc = NULL;
+    st->bcbody = NULL;
+    st->bcframe = NULL;
+    st->inError = 0;
+    st->inWarning = 0;
+    st->inPrintWarnings = 0;
+    st->immediateWarning = 0;
+    st->noBreakWarning = 0;
+#ifdef R_USE_SIGNALS
+    st->pendingPromises = NULL;
+#endif
+}
+
 static void mtl_ensure_main_thread(void)
 {
     if (!mtl_main_thread_inited) {
@@ -97,26 +151,8 @@ static void *mtl_worker_main(void *vp)
 	R_OldCStackLimit = (uintptr_t) 0;
 
 	/* Reset per-interpreter stacks/slots for this evaluation. */
-	w->interp.currentExpr = NULL;
-	w->interp.returnedValue = R_NilValue;
-	w->interp.handlerStack = R_NilValue;
-	w->interp.restartStack = R_NilValue;
-	w->interp.visible = TRUE;
-	w->interp.showErrorMessages = 1;
-	w->interp.collectWarnings = 0;
-	w->interp.warnings = R_NilValue;
-	w->interp.evalDepth = 0;
-	w->interp.bcintactive = 0;
-	w->interp.bcpc = NULL;
-	w->interp.bcbody = NULL;
-	w->interp.bcframe = NULL;
-	w->interp.inError = 0;
-	w->interp.inWarning = 0;
-	w->interp.inPrintWarnings = 0;
-	w->interp.immediateWarning = 0;
-	w->interp.noBreakWarning = 0;
+	mtl_interp_reset_for_eval(&w->interp);
 #ifdef R_USE_SIGNALS
-	w->interp.pendingPromises = NULL;
 	RCNTXT *saved_global_context = R_GlobalContext;
 	R_GlobalContext = w->interp.globalContext;
 #endif
@@ -291,32 +327,7 @@ attribute_hidden SEXP do_mtlapply(SEXP call, SEXP op, SEXP args, SEXP rho)
 	SEXP tail = PROTECT(duplicate(tail0)); nprotect++;
 	workers[t].argcell = PROTECT(CONS(R_NilValue, tail)); nprotect++;
 	workers[t].fcall = PROTECT(LCONS(FUN, workers[t].argcell)); nprotect++;
-
-	workers[t].interp.currentExpr = NULL;
-	workers[t].interp.returnedValue = R_NilValue;
-	workers[t].interp.handlerStack = R_NilValue;
-	workers[t].interp.restartStack = R_NilValue;
-	workers[t].interp.visible = TRUE;
-	workers[t].interp.showErrorMessages = 1;
-	workers[t].interp.collectWarnings = 0;
-	workers[t].interp.warnings = R_NilValue;
-	workers[t].interp.evalDepth = 0;
-	workers[t].interp.bcintactive = 0;
-	workers[t].interp.bcpc = NULL;
-	workers[t].interp.bcbody = NULL;
-	workers[t].interp.bcframe = NULL;
-	workers[t].interp.inError = 0;
-	workers[t].interp.inWarning = 0;
-	workers[t].interp.inPrintWarnings = 0;
-	workers[t].interp.immediateWarning = 0;
-	workers[t].interp.noBreakWarning = 0;
-#ifdef R_USE_SIGNALS
-	workers[t].interp.pendingPromises = NULL;
-	workers[t].interp.toplevelContext = R_ToplevelContext;
-	workers[t].interp.globalContext = R_GlobalContext;
-	workers[t].interp.sessionContext = R_SessionContext;
-	workers[t].interp.exitContext = R_ExitContext;
-#endif
+	mtl_interp_init_from_main(&workers[t].interp);
     }
 
     for (int t = 0; t < nthreads; t++) {
