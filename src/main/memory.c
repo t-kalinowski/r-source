@@ -140,47 +140,166 @@ attribute_hidden int R_gc_running(void) { return R_in_gc; }
 # define PROTECTCHECK
 #endif
 
-/* Global heap/GC lock.
+/* Heap synchronization for internal multi-threading experiments.
  *
- * This is an incremental step towards multi-threaded evaluation: it avoids
- * corruption of the shared heap structures when multiple threads allocate
- * concurrently. It is intentionally coarse.
+ * Goal: allow concurrent allocation in multiple threads while still running
+ * a stop-the-world GC.
  *
- * The lock is not unwind-safe at the C level. If an error longjmp occurs
- * while holding it, R_mtl_heap_unlock_all() must be invoked at the
- * interpreter's toplevel boundary to avoid deadlocks. */
+ * - A thread enters the "allocation region" before manipulating shared heap
+ *   allocation cursors/counters.
+ * - The GC (and a few other heap-structure mutations) enters an exclusive
+ *   region that waits for in-flight allocators to drain.
+ *
+ * Unwind safety: if an error longjmp occurs while holding heap state, the
+ * toplevel boundary must call R_mtl_heap_unlock_all() to avoid deadlocks and
+ * stuck allocator counters (context.c does this).
+ */
 #ifdef HAVE_PTHREAD
-static pthread_mutex_t R_heap_mutex = PTHREAD_MUTEX_INITIALIZER;
-static R_THREAD_LOCAL int R_heap_lock_depth = 0;
+# include <stdatomic.h>
+
+static pthread_mutex_t R_heap_excl_mutex = PTHREAD_MUTEX_INITIALIZER;
+static pthread_cond_t  R_heap_excl_cond  = PTHREAD_COND_INITIALIZER;
+static atomic_int      R_heap_exclusive  = 0; /* set while in exclusive region */
+static atomic_ulong    R_heap_inflight   = 0; /* active allocator threads */
+
+static R_THREAD_LOCAL int R_heap_excl_depth = 0;
+static R_THREAD_LOCAL int R_heap_alloc_depth = 0;
+static R_THREAD_LOCAL int R_heap_inflight_held = 0;
+static R_THREAD_LOCAL int R_heap_inflight_suspended = 0;
+
+static R_INLINE void heap_alloc_suspend(void)
+{
+    if (R_heap_inflight_held && !R_heap_inflight_suspended) {
+	atomic_fetch_sub_explicit(&R_heap_inflight, 1, memory_order_relaxed);
+	R_heap_inflight_suspended = 1;
+	if (atomic_load_explicit(&R_heap_exclusive, memory_order_relaxed)) {
+	    pthread_mutex_lock(&R_heap_excl_mutex);
+	    pthread_cond_broadcast(&R_heap_excl_cond);
+	    pthread_mutex_unlock(&R_heap_excl_mutex);
+	}
+    }
+}
+
+static R_INLINE void heap_alloc_resume(void)
+{
+    if (R_heap_inflight_held && R_heap_inflight_suspended) {
+	atomic_fetch_add_explicit(&R_heap_inflight, 1, memory_order_relaxed);
+	R_heap_inflight_suspended = 0;
+    }
+}
+
+static R_INLINE void heap_alloc_enter(void)
+{
+    if (R_heap_excl_depth > 0) {
+	R_heap_alloc_depth++;
+	return;
+    }
+    if (R_heap_alloc_depth++ != 0)
+	return;
+
+    for (;;) {
+	/* Wait if another thread is in an exclusive heap region. */
+	if (atomic_load_explicit(&R_heap_exclusive, memory_order_acquire)) {
+	    pthread_mutex_lock(&R_heap_excl_mutex);
+	    while (atomic_load_explicit(&R_heap_exclusive, memory_order_relaxed))
+		pthread_cond_wait(&R_heap_excl_cond, &R_heap_excl_mutex);
+	    pthread_mutex_unlock(&R_heap_excl_mutex);
+	    continue;
+	}
+	atomic_fetch_add_explicit(&R_heap_inflight, 1, memory_order_acq_rel);
+	/* Re-check: if exclusivity raced with us, back out and retry. */
+	if (atomic_load_explicit(&R_heap_exclusive, memory_order_acquire)) {
+	    atomic_fetch_sub_explicit(&R_heap_inflight, 1, memory_order_relaxed);
+	    pthread_mutex_lock(&R_heap_excl_mutex);
+	    pthread_cond_broadcast(&R_heap_excl_cond);
+	    while (atomic_load_explicit(&R_heap_exclusive, memory_order_relaxed))
+		pthread_cond_wait(&R_heap_excl_cond, &R_heap_excl_mutex);
+	    pthread_mutex_unlock(&R_heap_excl_mutex);
+	    continue;
+	}
+	R_heap_inflight_held = 1;
+	R_heap_inflight_suspended = 0;
+	break;
+    }
+}
+
+static R_INLINE void heap_alloc_exit(void)
+{
+    if (R_heap_excl_depth > 0) {
+	R_heap_alloc_depth--;
+	return;
+    }
+    if (--R_heap_alloc_depth != 0)
+	return;
+    if (!R_heap_inflight_held)
+	return;
+
+    if (!R_heap_inflight_suspended)
+	atomic_fetch_sub_explicit(&R_heap_inflight, 1, memory_order_relaxed);
+    R_heap_inflight_held = 0;
+    R_heap_inflight_suspended = 0;
+
+    /* Wake any waiter for inflight==0. */
+    if (atomic_load_explicit(&R_heap_exclusive, memory_order_relaxed)) {
+	pthread_mutex_lock(&R_heap_excl_mutex);
+	pthread_cond_broadcast(&R_heap_excl_cond);
+	pthread_mutex_unlock(&R_heap_excl_mutex);
+    }
+}
 
 attribute_hidden void R_mtl_heap_lock(void)
 {
-    if (R_heap_lock_depth++ == 0)
-	pthread_mutex_lock(&R_heap_mutex);
+    if (R_heap_excl_depth++ > 0)
+	return;
+
+    /* If we're in an allocation region, temporarily drop our inflight count
+       to avoid deadlocking waiting for ourselves. */
+    heap_alloc_suspend();
+
+    pthread_mutex_lock(&R_heap_excl_mutex);
+    atomic_store_explicit(&R_heap_exclusive, 1, memory_order_release);
+    while (atomic_load_explicit(&R_heap_inflight, memory_order_acquire) != 0)
+	pthread_cond_wait(&R_heap_excl_cond, &R_heap_excl_mutex);
+    /* Keep mutex held until unlock. */
 }
 
 attribute_hidden void R_mtl_heap_unlock(void)
 {
-    if (--R_heap_lock_depth == 0)
-	pthread_mutex_unlock(&R_heap_mutex);
+    if (--R_heap_excl_depth > 0)
+	return;
+
+    atomic_store_explicit(&R_heap_exclusive, 0, memory_order_release);
+    pthread_cond_broadcast(&R_heap_excl_cond);
+    pthread_mutex_unlock(&R_heap_excl_mutex);
+    heap_alloc_resume();
 }
 
 attribute_hidden void R_mtl_heap_unlock_all(void)
 {
-    if (R_heap_lock_depth > 0) {
-	R_heap_lock_depth = 0;
-	pthread_mutex_unlock(&R_heap_mutex);
+    /* Drop allocator inflight accounting if we are unwinding mid-allocation. */
+    if (R_heap_inflight_held) {
+	heap_alloc_suspend();
+	R_heap_inflight_held = 0;
+	R_heap_inflight_suspended = 0;
+	R_heap_alloc_depth = 0;
+    }
+
+    if (R_heap_excl_depth > 0) {
+	R_heap_excl_depth = 0;
+	atomic_store_explicit(&R_heap_exclusive, 0, memory_order_release);
+	pthread_cond_broadcast(&R_heap_excl_cond);
+	pthread_mutex_unlock(&R_heap_excl_mutex);
     }
 }
-
-# define HEAP_LOCK() R_mtl_heap_lock()
-# define HEAP_UNLOCK() R_mtl_heap_unlock()
 #else
+static R_INLINE void heap_alloc_enter(void) {}
+static R_INLINE void heap_alloc_exit(void) {}
+static R_INLINE void heap_alloc_suspend(void) {}
+static R_INLINE void heap_alloc_resume(void) {}
+
 attribute_hidden void R_mtl_heap_lock(void) {}
 attribute_hidden void R_mtl_heap_unlock(void) {}
 attribute_hidden void R_mtl_heap_unlock_all(void) {}
-# define HEAP_LOCK() ((void) 0)
-# define HEAP_UNLOCK() ((void) 0)
 #endif
 
 /* Global lock for operations that still mutate shared, process-wide state.
@@ -602,8 +721,13 @@ attribute_hidden SEXP do_maxNSize(SEXP call, SEXP op, SEXP args, SEXP rho)
 /* Miscellaneous Globals. */
 
 /* R_VStack and R_PreciousList are per-interpreter (see R_InterpreterState). */
+#ifdef HAVE_PTHREAD
+static _Atomic(R_size_t) R_LargeVallocSize = 0;
+static _Atomic(R_size_t) R_SmallVallocSize = 0;
+#else
 static R_size_t R_LargeVallocSize = 0;
 static R_size_t R_SmallVallocSize = 0;
+#endif
 static R_size_t orig_R_NSize;
 static R_size_t orig_R_VSize;
 
@@ -713,7 +837,12 @@ typedef union PAGE_HEADER {
    both counts.*/
 /*#define EXPEL_OLD_TO_NEW*/
 static struct {
-    SEXP Old[NUM_OLD_GENERATIONS], New, Free;
+    SEXP Old[NUM_OLD_GENERATIONS], New;
+#ifdef HAVE_PTHREAD
+    _Atomic(SEXP) Free;
+#else
+    SEXP Free;
+#endif
     SEXPREC OldPeg[NUM_OLD_GENERATIONS], NewPeg;
 #ifndef EXPEL_OLD_TO_NEW
     SEXP OldToNew[NUM_OLD_GENERATIONS];
@@ -723,7 +852,11 @@ static struct {
     PAGE_HEADER *pages;
 } R_GenHeap[NUM_NODE_CLASSES];
 
+#ifdef HAVE_PTHREAD
+static _Atomic(R_size_t) R_NodesInUse = 0;
+#else
 static R_size_t R_NodesInUse = 0;
+#endif
 
 #define NEXT_NODE(s) (s)->gengc_next_node
 #define PREV_NODE(s) (s)->gengc_prev_node
@@ -932,35 +1065,98 @@ static R_size_t R_NodesInUse = 0;
 
 /* Node Allocation. */
 
-#define CLASS_GET_FREE_NODE(c,s) do { \
-  SEXP __n__ = R_GenHeap[c].Free; \
-  if (__n__ == R_GenHeap[c].New) { \
-    GetNewPage(c); \
-    __n__ = R_GenHeap[c].Free; \
-  } \
-  R_GenHeap[c].Free = NEXT_NODE(__n__); \
-  R_NodesInUse++; \
-  (s) = __n__; \
-} while (0)
+static void GetNewPage(int node_class);
 
-#define NO_FREE_NODES() (R_NodesInUse >= R_NSize)
-#define GET_FREE_NODE(s) CLASS_GET_FREE_NODE(0,s)
+#ifdef HAVE_PTHREAD
+# define GENHEAP_FREE_LOAD(c) \
+    atomic_load_explicit(&R_GenHeap[c].Free, memory_order_acquire)
+# define GENHEAP_FREE_STORE(c, v) \
+    atomic_store_explicit(&R_GenHeap[c].Free, (v), memory_order_release)
+# define NODES_IN_USE_LOAD() \
+    atomic_load_explicit(&R_NodesInUse, memory_order_relaxed)
+# define NODES_IN_USE_STORE(v) \
+    atomic_store_explicit(&R_NodesInUse, (v), memory_order_relaxed)
+# define NODES_IN_USE_ADD(n) \
+    atomic_fetch_add_explicit(&R_NodesInUse, (n), memory_order_relaxed)
+# define SMALL_VALLOC_LOAD() \
+    atomic_load_explicit(&R_SmallVallocSize, memory_order_relaxed)
+# define LARGE_VALLOC_LOAD() \
+    atomic_load_explicit(&R_LargeVallocSize, memory_order_relaxed)
+# define SMALL_VALLOC_ADD(n) \
+    atomic_fetch_add_explicit(&R_SmallVallocSize, (n), memory_order_relaxed)
+# define LARGE_VALLOC_ADD(n) \
+    atomic_fetch_add_explicit(&R_LargeVallocSize, (n), memory_order_relaxed)
+# define SMALL_VALLOC_STORE(v) \
+    atomic_store_explicit(&R_SmallVallocSize, (v), memory_order_relaxed)
+# define LARGE_VALLOC_STORE(v) \
+    atomic_store_explicit(&R_LargeVallocSize, (v), memory_order_relaxed)
+#else
+# define GENHEAP_FREE_LOAD(c) (R_GenHeap[c].Free)
+# define GENHEAP_FREE_STORE(c, v) (R_GenHeap[c].Free = (v))
+# define NODES_IN_USE_LOAD() (R_NodesInUse)
+# define NODES_IN_USE_STORE(v) (R_NodesInUse = (v))
+# define NODES_IN_USE_ADD(n) (R_NodesInUse += (n))
+# define SMALL_VALLOC_LOAD() (R_SmallVallocSize)
+# define LARGE_VALLOC_LOAD() (R_LargeVallocSize)
+# define SMALL_VALLOC_ADD(n) (R_SmallVallocSize += (n))
+# define LARGE_VALLOC_ADD(n) (R_LargeVallocSize += (n))
+# define SMALL_VALLOC_STORE(v) (R_SmallVallocSize = (v))
+# define LARGE_VALLOC_STORE(v) (R_LargeVallocSize = (v))
+#endif
 
-/* versions that assume nodes are available without adding a new page */
-#define CLASS_QUICK_GET_FREE_NODE(c,s) do {		\
-	SEXP __n__ = R_GenHeap[c].Free;			\
-	if (__n__ == R_GenHeap[c].New)			\
-	    error("need new page - should not happen");	\
-	R_GenHeap[c].Free = NEXT_NODE(__n__);		\
-	R_NodesInUse++;					\
-	(s) = __n__;					\
-    } while (0)
-
-#define QUICK_GET_FREE_NODE(s) CLASS_QUICK_GET_FREE_NODE(0,s)
-
-/* QUICK versions can be used if (CLASS_)NEED_NEW_PAGE returns FALSE */
-#define CLASS_NEED_NEW_PAGE(c) (R_GenHeap[c].Free == R_GenHeap[c].New)
+#define NO_FREE_NODES() (NODES_IN_USE_LOAD() >= R_NSize)
+#define CLASS_NEED_NEW_PAGE(c) (GENHEAP_FREE_LOAD(c) == R_GenHeap[c].New)
 #define NEED_NEW_PAGE() CLASS_NEED_NEW_PAGE(0)
+
+static R_INLINE R_size_t VHEAP_FREE_MTL(void)
+{
+    return R_VSize - LARGE_VALLOC_LOAD() - SMALL_VALLOC_LOAD();
+}
+
+static R_INLINE SEXP try_get_free_node(int node_class)
+{
+#ifdef HAVE_PTHREAD
+    for (;;) {
+	SEXP expected = GENHEAP_FREE_LOAD(node_class);
+	if (expected == R_GenHeap[node_class].New)
+	    return NULL;
+	SEXP desired = NEXT_NODE(expected);
+	if (atomic_compare_exchange_weak_explicit(&R_GenHeap[node_class].Free,
+						 &expected, desired,
+						 memory_order_acq_rel,
+						 memory_order_acquire)) {
+	    NODES_IN_USE_ADD(1);
+	    return expected;
+	}
+    }
+#else
+    SEXP s = GENHEAP_FREE_LOAD(node_class);
+    if (s == R_GenHeap[node_class].New)
+	return NULL;
+    GENHEAP_FREE_STORE(node_class, NEXT_NODE(s));
+    NODES_IN_USE_ADD(1);
+    return s;
+#endif
+}
+
+static R_INLINE void mtl_gc(R_size_t size_needed)
+{
+    heap_alloc_suspend();
+    R_mtl_heap_lock();
+    R_gc_internal(size_needed);
+    R_mtl_heap_unlock();
+    heap_alloc_resume();
+}
+
+static R_INLINE void mtl_get_new_page(int node_class)
+{
+    heap_alloc_suspend();
+    R_mtl_heap_lock();
+    if (CLASS_NEED_NEW_PAGE(node_class))
+	GetNewPage(node_class);
+    R_mtl_heap_unlock();
+    heap_alloc_resume();
+}
 
 
 /* Debugging Routines. */
@@ -2373,7 +2569,7 @@ attribute_hidden void InitMemory(void)
     int gen;
     char *arg;
 
-    HEAP_LOCK();
+    R_mtl_heap_lock();
 
     init_gctorture();
     init_gc_grow_settings();
@@ -2427,7 +2623,11 @@ attribute_hidden void InitMemory(void)
     /* Field assignments for R_NilValue must not go through write barrier
        since the write barrier prevents assignments to R_NilValue's fields.
        because of checks for nil */
-    GET_FREE_NODE(R_NilValue);
+    if (CLASS_NEED_NEW_PAGE(0))
+	GetNewPage(0);
+    R_NilValue = try_get_free_node(0);
+    if (R_NilValue == NULL)
+	R_Suicide("InitMemory: failed to allocate R_NilValue");
     R_NilValue->sxpinfo = UnmarkedNodeTemplate.sxpinfo;
     INIT_REFCNT(R_NilValue);
     SET_REFCNT(R_NilValue, REFCNTMAX);
@@ -2460,7 +2660,7 @@ attribute_hidden void InitMemory(void)
     LOGICAL(R_LogicalNAValue)[0] = NA_LOGICAL;
     MARK_NOT_MUTABLE(R_LogicalNAValue);
 
-    HEAP_UNLOCK();
+    R_mtl_heap_unlock();
 }
 
 /* Since memory allocated from the heap is non-moving, R_alloc just
@@ -2603,111 +2803,127 @@ SEXP allocSExp(SEXPTYPE t)
     if (t == NILSXP)
 	/* R_NilValue should be the only NILSXP object */
 	return R_NilValue;
-    HEAP_LOCK();
-    SEXP s;
-    if (FORCE_GC || NO_FREE_NODES()) {
-	R_gc_internal(0);
-	if (NO_FREE_NODES())
-	    mem_err_cons();
+    heap_alloc_enter();
+    for (;;) {
+	if (FORCE_GC || NO_FREE_NODES()) {
+	    mtl_gc(0);
+	    if (NO_FREE_NODES())
+		mem_err_cons();
+	    continue;
+	}
+	SEXP s = try_get_free_node(0);
+	if (s == NULL) {
+	    mtl_get_new_page(0);
+	    continue;
+	}
+	s->sxpinfo = UnmarkedNodeTemplate.sxpinfo;
+	INIT_REFCNT(s);
+	SET_TYPEOF(s, t);
+	CAR0(s) = R_NilValue;
+	CDR(s) = R_NilValue;
+	TAG(s) = R_NilValue;
+	ATTRIB(s) = R_NilValue;
+	heap_alloc_exit();
+	return s;
     }
-    GET_FREE_NODE(s);
-    s->sxpinfo = UnmarkedNodeTemplate.sxpinfo;
-    INIT_REFCNT(s);
-    SET_TYPEOF(s, t);
-    CAR0(s) = R_NilValue;
-    CDR(s) = R_NilValue;
-    TAG(s) = R_NilValue;
-    ATTRIB(s) = R_NilValue;
-    HEAP_UNLOCK();
-    return s;
 }
 
 static SEXP allocSExpNonCons(SEXPTYPE t)
 {
-    HEAP_LOCK();
-    SEXP s;
-    if (FORCE_GC || NO_FREE_NODES()) {
-	R_gc_internal(0);
-	if (NO_FREE_NODES())
-	    mem_err_cons();
+    heap_alloc_enter();
+    for (;;) {
+	if (FORCE_GC || NO_FREE_NODES()) {
+	    mtl_gc(0);
+	    if (NO_FREE_NODES())
+		mem_err_cons();
+	    continue;
+	}
+	SEXP s = try_get_free_node(0);
+	if (s == NULL) {
+	    mtl_get_new_page(0);
+	    continue;
+	}
+	s->sxpinfo = UnmarkedNodeTemplate.sxpinfo;
+	INIT_REFCNT(s);
+	SET_TYPEOF(s, t);
+	TAG(s) = R_NilValue;
+	ATTRIB(s) = R_NilValue;
+	heap_alloc_exit();
+	return s;
     }
-    GET_FREE_NODE(s);
-    s->sxpinfo = UnmarkedNodeTemplate.sxpinfo;
-    INIT_REFCNT(s);
-    SET_TYPEOF(s, t);
-    TAG(s) = R_NilValue;
-    ATTRIB(s) = R_NilValue;
-    HEAP_UNLOCK();
-    return s;
 }
 
 /* cons is defined directly to avoid the need to protect its arguments
    unless a GC will actually occur. */
 SEXP cons(SEXP car, SEXP cdr)
 {
-    HEAP_LOCK();
-    SEXP s;
-    if (FORCE_GC || NO_FREE_NODES()) {
-	PROTECT(car);
-	PROTECT(cdr);
-	R_gc_internal(0);
-	UNPROTECT(2);
-	if (NO_FREE_NODES())
-	    mem_err_cons();
-    }
+    heap_alloc_enter();
+    for (;;) {
+	if (FORCE_GC || NO_FREE_NODES()) {
+	    PROTECT(car);
+	    PROTECT(cdr);
+	    mtl_gc(0);
+	    UNPROTECT(2);
+	    if (NO_FREE_NODES())
+		mem_err_cons();
+	    continue;
+	}
 
-    if (NEED_NEW_PAGE()) {
-	PROTECT(car);
-	PROTECT(cdr);
-	GET_FREE_NODE(s);
-	UNPROTECT(2);
-    }
-    else
-	QUICK_GET_FREE_NODE(s);
+	SEXP s = try_get_free_node(0);
+	if (s == NULL) {
+	    PROTECT(car);
+	    PROTECT(cdr);
+	    mtl_get_new_page(0);
+	    UNPROTECT(2);
+	    continue;
+	}
 
-    s->sxpinfo = UnmarkedNodeTemplate.sxpinfo;
-    INIT_REFCNT(s);
-    SET_TYPEOF(s, LISTSXP);
-    CAR0(s) = CHK(car); if (car) INCREMENT_REFCNT(car);
-    CDR(s) = CHK(cdr); if (cdr) INCREMENT_REFCNT(cdr);
-    TAG(s) = R_NilValue;
-    ATTRIB(s) = R_NilValue;
-    HEAP_UNLOCK();
-    return s;
+	s->sxpinfo = UnmarkedNodeTemplate.sxpinfo;
+	INIT_REFCNT(s);
+	SET_TYPEOF(s, LISTSXP);
+	CAR0(s) = CHK(car); if (car) INCREMENT_REFCNT(car);
+	CDR(s) = CHK(cdr); if (cdr) INCREMENT_REFCNT(cdr);
+	TAG(s) = R_NilValue;
+	ATTRIB(s) = R_NilValue;
+	heap_alloc_exit();
+	return s;
+    }
 }
 
 attribute_hidden SEXP CONS_NR(SEXP car, SEXP cdr)
 {
-    HEAP_LOCK();
-    SEXP s;
-    if (FORCE_GC || NO_FREE_NODES()) {
-	PROTECT(car);
-	PROTECT(cdr);
-	R_gc_internal(0);
-	UNPROTECT(2);
-	if (NO_FREE_NODES())
-	    mem_err_cons();
-    }
+    heap_alloc_enter();
+    for (;;) {
+	if (FORCE_GC || NO_FREE_NODES()) {
+	    PROTECT(car);
+	    PROTECT(cdr);
+	    mtl_gc(0);
+	    UNPROTECT(2);
+	    if (NO_FREE_NODES())
+		mem_err_cons();
+	    continue;
+	}
 
-    if (NEED_NEW_PAGE()) {
-	PROTECT(car);
-	PROTECT(cdr);
-	GET_FREE_NODE(s);
-	UNPROTECT(2);
-    }
-    else
-	QUICK_GET_FREE_NODE(s);
+	SEXP s = try_get_free_node(0);
+	if (s == NULL) {
+	    PROTECT(car);
+	    PROTECT(cdr);
+	    mtl_get_new_page(0);
+	    UNPROTECT(2);
+	    continue;
+	}
 
-    s->sxpinfo = UnmarkedNodeTemplate.sxpinfo;
-    INIT_REFCNT(s);
-    DISABLE_REFCNT(s);
-    SET_TYPEOF(s, LISTSXP);
-    CAR0(s) = CHK(car);
-    CDR(s) = CHK(cdr);
-    TAG(s) = R_NilValue;
-    ATTRIB(s) = R_NilValue;
-    HEAP_UNLOCK();
-    return s;
+	s->sxpinfo = UnmarkedNodeTemplate.sxpinfo;
+	INIT_REFCNT(s);
+	DISABLE_REFCNT(s);
+	SET_TYPEOF(s, LISTSXP);
+	CAR0(s) = CHK(car);
+	CDR(s) = CHK(cdr);
+	TAG(s) = R_NilValue;
+	ATTRIB(s) = R_NilValue;
+	heap_alloc_exit();
+	return s;
+    }
 }
 
 /*----------------------------------------------------------------------
@@ -2730,86 +2946,90 @@ attribute_hidden SEXP CONS_NR(SEXP car, SEXP cdr)
 */
 SEXP NewEnvironment(SEXP namelist, SEXP valuelist, SEXP rho)
 {
-    HEAP_LOCK();
-    SEXP v, n, newrho;
+    heap_alloc_enter();
+    for (;;) {
+	if (FORCE_GC || NO_FREE_NODES()) {
+	    PROTECT(namelist);
+	    PROTECT(valuelist);
+	    PROTECT(rho);
+	    mtl_gc(0);
+	    UNPROTECT(3);
+	    if (NO_FREE_NODES())
+		mem_err_cons();
+	    continue;
+	}
 
-    if (FORCE_GC || NO_FREE_NODES()) {
-	PROTECT(namelist);
-	PROTECT(valuelist);
-	PROTECT(rho);
-	R_gc_internal(0);
-	UNPROTECT(3);
-	if (NO_FREE_NODES())
-	    mem_err_cons();
+	SEXP newrho = try_get_free_node(0);
+	if (newrho == NULL) {
+	    PROTECT(namelist);
+	    PROTECT(valuelist);
+	    PROTECT(rho);
+	    mtl_get_new_page(0);
+	    UNPROTECT(3);
+	    continue;
+	}
+
+	newrho->sxpinfo = UnmarkedNodeTemplate.sxpinfo;
+	INIT_REFCNT(newrho);
+	SET_TYPEOF(newrho, ENVSXP);
+	FRAME(newrho) = valuelist; INCREMENT_REFCNT(valuelist);
+	ENCLOS(newrho) = CHK(rho); if (rho != NULL) INCREMENT_REFCNT(rho);
+	HASHTAB(newrho) = R_NilValue;
+	ATTRIB(newrho) = R_NilValue;
+
+	SEXP v = CHK(valuelist);
+	SEXP n = CHK(namelist);
+	while (v != R_NilValue && n != R_NilValue) {
+	    SET_TAG(v, TAG(n));
+	    v = CDR(v);
+	    n = CDR(n);
+	}
+
+	heap_alloc_exit();
+	return newrho;
     }
-
-    if (NEED_NEW_PAGE()) {
-	PROTECT(namelist);
-	PROTECT(valuelist);
-	PROTECT(rho);
-	GET_FREE_NODE(newrho);
-	UNPROTECT(3);
-    }
-    else
-	QUICK_GET_FREE_NODE(newrho);
-
-    newrho->sxpinfo = UnmarkedNodeTemplate.sxpinfo;
-    INIT_REFCNT(newrho);
-    SET_TYPEOF(newrho, ENVSXP);
-    FRAME(newrho) = valuelist; INCREMENT_REFCNT(valuelist);
-    ENCLOS(newrho) = CHK(rho); if (rho != NULL) INCREMENT_REFCNT(rho);
-    HASHTAB(newrho) = R_NilValue;
-    ATTRIB(newrho) = R_NilValue;
-
-    v = CHK(valuelist);
-    n = CHK(namelist);
-    while (v != R_NilValue && n != R_NilValue) {
-	SET_TAG(v, TAG(n));
-	v = CDR(v);
-	n = CDR(n);
-    }
-    HEAP_UNLOCK();
-    return (newrho);
 }
 
 /* mkPROMISE is defined directly do avoid the need to protect its arguments
    unless a GC will actually occur. */
 attribute_hidden SEXP mkPROMISE(SEXP expr, SEXP rho)
 {
-    HEAP_LOCK();
-    SEXP s;
-    if (FORCE_GC || NO_FREE_NODES()) {
-	PROTECT(expr);
-	PROTECT(rho);
-	R_gc_internal(0);
-	UNPROTECT(2);
-	if (NO_FREE_NODES())
-	    mem_err_cons();
+    heap_alloc_enter();
+    for (;;) {
+	if (FORCE_GC || NO_FREE_NODES()) {
+	    PROTECT(expr);
+	    PROTECT(rho);
+	    mtl_gc(0);
+	    UNPROTECT(2);
+	    if (NO_FREE_NODES())
+		mem_err_cons();
+	    continue;
+	}
+
+	SEXP s = try_get_free_node(0);
+	if (s == NULL) {
+	    PROTECT(expr);
+	    PROTECT(rho);
+	    mtl_get_new_page(0);
+	    UNPROTECT(2);
+	    continue;
+	}
+
+	/* precaution to ensure code does not get modified via
+	   substitute() and the like */
+	ENSURE_NAMEDMAX(expr);
+
+	s->sxpinfo = UnmarkedNodeTemplate.sxpinfo;
+	INIT_REFCNT(s);
+	SET_TYPEOF(s, PROMSXP);
+	PRCODE(s) = CHK(expr); INCREMENT_REFCNT(expr);
+	PRENV(s) = CHK(rho); INCREMENT_REFCNT(rho);
+	PRVALUE0(s) = R_UnboundValue;
+	PRSEEN(s) = 0;
+	ATTRIB(s) = R_NilValue;
+	heap_alloc_exit();
+	return s;
     }
-
-    if (NEED_NEW_PAGE()) {
-	PROTECT(expr);
-	PROTECT(rho);
-	GET_FREE_NODE(s);
-	UNPROTECT(2);
-    }
-    else
-	QUICK_GET_FREE_NODE(s);
-
-    /* precaution to ensure code does not get modified via
-       substitute() and the like */
-    ENSURE_NAMEDMAX(expr);
-
-    s->sxpinfo = UnmarkedNodeTemplate.sxpinfo;
-    INIT_REFCNT(s);
-    SET_TYPEOF(s, PROMSXP);
-    PRCODE(s) = CHK(expr); INCREMENT_REFCNT(expr);
-    PRENV(s) = CHK(rho); INCREMENT_REFCNT(rho);
-    PRVALUE0(s) = R_UnboundValue;
-    PRSEEN(s) = 0;
-    ATTRIB(s) = R_NilValue;
-    HEAP_UNLOCK();
-    return s;
 }
 
 attribute_hidden /* would need to be in an installed header if not hidden */
@@ -2864,13 +3084,11 @@ SEXP allocVector3(SEXPTYPE type, R_xlen_t length, R_allocator_t *allocator)
     if (type == NILSXP)
 	return R_NilValue;
 
-    HEAP_LOCK();
+    heap_alloc_enter();
 
-    SEXP s;     /* For the generational collector it would be safer to
-			   work in terms of a VECSXP here, but that would
-			   require several casts below... */
-    R_size_t size = 0, alloc_size, old_R_VSize;
-    int node_class;
+    SEXP s = NULL;  /* See comment in original code about VECSXP casts. */
+    R_size_t size = 0, alloc_size = 0, old_R_VSize = 0;
+    int node_class = 0;
 #if VALGRIND_LEVEL > 0
     R_size_t actual_size = 0;
 #endif
@@ -2883,15 +3101,22 @@ SEXP allocVector3(SEXPTYPE type, R_xlen_t length, R_allocator_t *allocator)
 	case LGLSXP:
 	    node_class = 1;
 	    alloc_size = NodeClassSize[1];
-	    if (FORCE_GC || NO_FREE_NODES() || VHEAP_FREE() < alloc_size) {
-		R_gc_internal(alloc_size);
-		if (NO_FREE_NODES())
-		    mem_err_cons();
-		if (VHEAP_FREE() < alloc_size)
-		    mem_err_heap(size);
+	    for (;;) {
+		if (FORCE_GC || NO_FREE_NODES() || VHEAP_FREE() < alloc_size) {
+		    mtl_gc(alloc_size);
+		    if (NO_FREE_NODES())
+			mem_err_cons();
+		    if (VHEAP_FREE() < alloc_size)
+			mem_err_heap(size);
+		    continue;
+		}
+		s = try_get_free_node(node_class);
+		if (s == NULL) {
+		    mtl_get_new_page(node_class);
+		    continue;
+		}
+		break;
 	    }
-
-	    CLASS_GET_FREE_NODE(node_class, s);
 #if VALGRIND_LEVEL > 1
 	    switch(type) {
 	    case REALSXP: actual_size = sizeof(double); break;
@@ -2903,16 +3128,18 @@ SEXP allocVector3(SEXPTYPE type, R_xlen_t length, R_allocator_t *allocator)
 	    s->sxpinfo = UnmarkedNodeTemplate.sxpinfo;
 	    SETSCALAR(s, 1);
 	    SET_NODE_CLASS(s, node_class);
-	    R_SmallVallocSize += alloc_size;
+	    SMALL_VALLOC_ADD(alloc_size);
 	    /* Note that we do not include the header size into VallocSize,
 	       but it is counted into memory usage via R_NodesInUse. */
 	    ATTRIB(s) = R_NilValue;
 	    SET_TYPEOF(s, type);
-	    SET_STDVEC_LENGTH(s, (R_len_t) length); // is 1
-		    SET_STDVEC_TRUELENGTH(s, 0);
-		    INIT_REFCNT(s);
-		    HEAP_UNLOCK();
-		    return(s);
+	    SET_STDVEC_LENGTH(s, (R_len_t) length); /* is 1 */
+	    SET_STDVEC_TRUELENGTH(s, 0);
+	    INIT_REFCNT(s);
+	    heap_alloc_exit();
+	    return s;
+	default:
+	    break;
 	}
     }
 
@@ -2993,18 +3220,24 @@ SEXP allocVector3(SEXPTYPE type, R_xlen_t length, R_allocator_t *allocator)
 	}
 	break;
     case LANGSXP:
-	if(length == 0) return R_NilValue;
+	if (length == 0) {
+	    heap_alloc_exit();
+	    return R_NilValue;
+	}
 #ifdef LONG_VECTOR_SUPPORT
 	if (length > R_SHORT_LEN_MAX) error("invalid length for pairlist");
 #endif
 	s = allocList((int) length);
 	SET_TYPEOF(s, LANGSXP);
+	heap_alloc_exit();
 	return s;
     case LISTSXP:
 #ifdef LONG_VECTOR_SUPPORT
 	if (length > R_SHORT_LEN_MAX) error("invalid length for pairlist");
 #endif
-	return allocList((int) length);
+	s = allocList((int) length);
+	heap_alloc_exit();
+	return s;
     default:
 	error(_("invalid type/length (%s/%lld) in vector allocation"),
 	      type2char(type), (long long)length);
@@ -3036,7 +3269,7 @@ SEXP allocVector3(SEXPTYPE type, R_xlen_t length, R_allocator_t *allocator)
 
     /* we need to do the gc here so allocSExp doesn't! */
     if (FORCE_GC || NO_FREE_NODES() || VHEAP_FREE() < alloc_size) {
-	R_gc_internal(alloc_size);
+	mtl_gc(alloc_size);
 	if (NO_FREE_NODES())
 	    mem_err_cons();
 	if (VHEAP_FREE() < alloc_size)
@@ -3045,14 +3278,19 @@ SEXP allocVector3(SEXPTYPE type, R_xlen_t length, R_allocator_t *allocator)
 
     if (size > 0) {
 	if (node_class < NUM_SMALL_NODE_CLASSES) {
-	    CLASS_GET_FREE_NODE(node_class, s);
+	    for (;;) {
+		s = try_get_free_node(node_class);
+		if (s != NULL)
+		    break;
+		mtl_get_new_page(node_class);
+	    }
 #if VALGRIND_LEVEL > 1
 	    VALGRIND_MAKE_MEM_UNDEFINED(STDVEC_DATAPTR(s), actual_size);
 #endif
 	    s->sxpinfo = UnmarkedNodeTemplate.sxpinfo;
 	    INIT_REFCNT(s);
 	    SET_NODE_CLASS(s, node_class);
-	    R_SmallVallocSize += alloc_size;
+	    SMALL_VALLOC_ADD(alloc_size);
 	    SET_STDVEC_LENGTH(s, (R_len_t) length);
 	}
 	else {
@@ -3107,10 +3345,15 @@ SEXP allocVector3(SEXPTYPE type, R_xlen_t length, R_allocator_t *allocator)
 	    s->sxpinfo = UnmarkedNodeTemplate.sxpinfo;
 	    INIT_REFCNT(s);
 	    SET_NODE_CLASS(s, node_class);
-	    if (!allocator) R_LargeVallocSize += size;
+	    /* Large vector nodes mutate the New list, so serialize that part. */
+	    heap_alloc_suspend();
+	    R_mtl_heap_lock();
+	    if (!allocator) LARGE_VALLOC_ADD(size);
 	    R_GenHeap[node_class].AllocCount++;
-	    R_NodesInUse++;
+	    NODES_IN_USE_ADD(1);
 	    SNAP_NODE(s, R_GenHeap[node_class].New);
+	    R_mtl_heap_unlock();
+	    heap_alloc_resume();
 	}
 	ATTRIB(s) = R_NilValue;
 	SET_TYPEOF(s, type);
@@ -3161,7 +3404,7 @@ SEXP allocVector3(SEXPTYPE type, R_xlen_t length, R_allocator_t *allocator)
     else if (type == RAWSXP)
 	VALGRIND_MAKE_MEM_UNDEFINED(RAW(s), actual_size);
 #endif
-    HEAP_UNLOCK();
+    heap_alloc_exit();
     return s;
 }
 
