@@ -1691,6 +1691,13 @@ extern R_THREAD_LOCAL R_InterpreterState *R_Interpreter INI_as(&R_Interpreter0);
 #define R_ExitContext     (R_Interpreter->exitContext)
 #endif
 
+/* Experimental: mtlapply() parallel regions.
+ *
+ * The interpreter runs under a coarse lock, but selected "pure compute"
+ * loops can temporarily release it to allow parallel execution. */
+attribute_hidden int R_mtl_parallel_region_begin(void);
+attribute_hidden void R_mtl_parallel_region_end(int token);
+
 extern0 int	R_BrowseLines	INI_as(0);	/* lines/per call in browser :
 						 * options(deparse.max.lines) */
 extern0 Rboolean R_KeepSource	INI_as(FALSE);	/* options(keep.source) */

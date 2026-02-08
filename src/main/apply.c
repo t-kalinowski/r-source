@@ -28,6 +28,7 @@
 
 #ifdef HAVE_PTHREAD
 # include <pthread.h>
+# include <stdatomic.h>
 #endif
 
 static SEXP checkArgIsSymbol(SEXP x) {
@@ -60,6 +61,47 @@ typedef struct {
 } mtl_worker_t;
 
 static pthread_mutex_t mtl_gil = PTHREAD_MUTEX_INITIALIZER;
+static R_THREAD_LOCAL int mtl_gil_held = 0;
+static atomic_int mtl_parallel_active = 0;
+static atomic_int mtl_parallel_max = 0;
+
+static void mtl_parallel_update_max(int cur)
+{
+    int old = atomic_load_explicit(&mtl_parallel_max, memory_order_relaxed);
+    while (cur > old &&
+	   !atomic_compare_exchange_weak_explicit(&mtl_parallel_max, &old, cur,
+						 memory_order_relaxed,
+						 memory_order_relaxed)) {
+	/* retry */
+    }
+}
+
+/* These are used by arithmetic.c to temporarily release the lock while doing
+ * long-running, allocation-free compute loops (e.g. cos on a REALSXP). */
+attribute_hidden int R_mtl_parallel_region_begin(void)
+{
+    if (!mtl_gil_held)
+	return 0;
+    mtl_gil_held = 0;
+    pthread_mutex_unlock(&mtl_gil);
+    int cur = atomic_fetch_add_explicit(&mtl_parallel_active, 1, memory_order_relaxed) + 1;
+    mtl_parallel_update_max(cur);
+    return 1;
+}
+
+attribute_hidden void R_mtl_parallel_region_end(int token)
+{
+    if (!token)
+	return;
+    atomic_fetch_sub_explicit(&mtl_parallel_active, 1, memory_order_relaxed);
+    pthread_mutex_lock(&mtl_gil);
+    mtl_gil_held = 1;
+}
+
+static int mtl_parallel_max_and_reset(void)
+{
+    return atomic_exchange_explicit(&mtl_parallel_max, 0, memory_order_relaxed);
+}
 static int mtl_main_thread_inited = 0;
 static pthread_t mtl_main_thread;
 
@@ -169,6 +211,7 @@ static void *mtl_worker_main(void *vp)
 	pthread_mutex_unlock(&s->next_mutex);
 
 	pthread_mutex_lock(&mtl_gil);
+	mtl_gil_held = 1;
 
 	R_InterpreterState *saved_interp = R_Interpreter;
 	R_Interpreter = &w->interp;
@@ -194,6 +237,7 @@ static void *mtl_worker_main(void *vp)
 		    }
 		    pthread_mutex_unlock(&s->err_mutex);
 	    R_Interpreter = saved_interp;
+	    mtl_gil_held = 0;
 	    pthread_mutex_unlock(&mtl_gil);
 	    break;
 	}
@@ -206,6 +250,7 @@ static void *mtl_worker_main(void *vp)
 
 	s->results[i] = val;
 	R_Interpreter = saved_interp;
+	mtl_gil_held = 0;
 	pthread_mutex_unlock(&mtl_gil);
     }
 
@@ -394,6 +439,20 @@ attribute_hidden SEXP do_mtlapply(SEXP call, SEXP op, SEXP args, SEXP rho)
     free(results);
     UNPROTECT(nprotect);
     return ans;
+#endif
+}
+
+/* .Internal(mtlparallelmax()) : testing/debugging aid.
+ *
+ * Returns the max number of threads simultaneously executing a released
+ * "parallel region" since the last call, and resets the counter. */
+attribute_hidden SEXP do_mtlparallelmax(SEXP call, SEXP op, SEXP args, SEXP rho)
+{
+    checkArity(op, args);
+#ifndef HAVE_PTHREAD
+    return ScalarInteger(0);
+#else
+    return ScalarInteger(mtl_parallel_max_and_reset());
 #endif
 }
 

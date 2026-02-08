@@ -1224,6 +1224,10 @@ static SEXP math1_ari(SEXP sa, double(*f)(double), double arg, double res, SEXP 
     const double *a = REAL_RO(sa);
     double *y = REAL(sy);
     naflag = 0;
+
+    /* Allow compute-heavy loops to run in parallel under mtlapply() by
+     * temporarily releasing the interpreter lock. */
+    int par_token = R_mtl_parallel_region_begin();
     for (i = 0; i < n; i++) {
 	double x = a[i]; /* in case y == a (when sy = sa) */
 	if (x == arg)
@@ -1239,6 +1243,7 @@ static SEXP math1_ari(SEXP sa, double(*f)(double), double arg, double res, SEXP 
 		naflag = 1;
 	}
     }
+    R_mtl_parallel_region_end(par_token);
     /* These are primitives, so need to use the call */
     if(naflag) warningcall(lcall, R_MSG_NA);
 
@@ -1264,6 +1269,7 @@ static SEXP math1(SEXP sa, double(*f)(double), SEXP lcall)
     const double *a = REAL_RO(sa);
     double *y = REAL(sy);
     naflag = 0;
+    int par_token = R_mtl_parallel_region_begin();
     for (i = 0; i < n; i++) {
 	double x = a[i]; /* in case y == a */
 	/* This code assumes that ISNAN(x) implies ISNAN(f(x)), so we
@@ -1276,6 +1282,7 @@ static SEXP math1(SEXP sa, double(*f)(double), SEXP lcall)
 		naflag = 1;
 	}
     }
+    R_mtl_parallel_region_end(par_token);
     /* These are primitives, so need to use the call */
     if(naflag) warningcall(lcall, R_MSG_NA);
 
