@@ -103,6 +103,8 @@ static void *mtl_worker_main(void *vp)
 	w->interp.restartStack = R_NilValue;
 	w->interp.visible = TRUE;
 	w->interp.showErrorMessages = 1;
+	w->interp.collectWarnings = 0;
+	w->interp.warnings = R_NilValue;
 	w->interp.evalDepth = 0;
 	w->interp.bcintactive = 0;
 	w->interp.bcpc = NULL;
@@ -291,6 +293,8 @@ attribute_hidden SEXP do_mtlapply(SEXP call, SEXP op, SEXP args, SEXP rho)
 	workers[t].interp.restartStack = R_NilValue;
 	workers[t].interp.visible = TRUE;
 	workers[t].interp.showErrorMessages = 1;
+	workers[t].interp.collectWarnings = 0;
+	workers[t].interp.warnings = R_NilValue;
 	workers[t].interp.evalDepth = 0;
 	workers[t].interp.bcintactive = 0;
 	workers[t].interp.bcpc = NULL;

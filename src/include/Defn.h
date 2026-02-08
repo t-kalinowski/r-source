@@ -1574,6 +1574,8 @@ typedef struct {
     SEXP restartStack;       /* Stack of available restarts */
     Rboolean visible;        /* Value visibility flag */
     int showErrorMessages;   /* show error messages? */
+    int collectWarnings;     /* number of collected warnings (0 means none) */
+    SEXP warnings;           /* collected warnings + calls */
     int evalDepth;           /* Evaluation recursion depth */
     int bcintactive;         /* bcEval called more recently than top-level eval */
     void* bcpc;              /* current byte code instruction */
@@ -1601,6 +1603,8 @@ extern R_THREAD_LOCAL R_InterpreterState *R_Interpreter INI_as(&R_Interpreter0);
 #define R_RestartStack  (R_Interpreter->restartStack)
 #define R_Visible       (R_Interpreter->visible)
 #define R_ShowErrorMessages (R_Interpreter->showErrorMessages)
+#define R_CollectWarnings (R_Interpreter->collectWarnings)
+#define R_Warnings      (R_Interpreter->warnings)
 #define R_EvalDepth     (R_Interpreter->evalDepth)
 #define R_BCIntActive   (R_Interpreter->bcintactive)
 #define R_BCpc          (R_Interpreter->bcpc)
@@ -1675,8 +1679,6 @@ LibExtern int	R_RestoreHistory;	/* restore the history file? */
 extern void 	R_setupHistory(void);
 
 /* Warnings/Errors */
-extern0 int	R_CollectWarnings INI_as(0);	/* the number of warnings */
-extern0 SEXP	R_Warnings;	    /* the warnings and their calls */
 extern0 Rboolean R_warn_partial_match_args   INI_as(FALSE);
 extern0 Rboolean R_warn_partial_match_dollar INI_as(FALSE);
 extern0 Rboolean R_warn_partial_match_attr INI_as(FALSE);
