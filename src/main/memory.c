@@ -35,6 +35,8 @@
 #endif
 
 #include <stdarg.h>
+#include <stdint.h>
+#include <unistd.h>
 
 #ifdef HAVE_PTHREAD
 # include <pthread.h>
@@ -780,9 +782,14 @@ static int collect_counts[NUM_OLD_GENERATIONS];
    from fixed size pages.  The pages for each node class are kept in a
    linked list. */
 
-typedef union PAGE_HEADER {
-  union PAGE_HEADER *next;
-  double align;
+typedef struct R_mtl_heap_state_ R_mtl_heap_state;
+
+#define R_MTL_PAGE_MAGIC UINT64_C(0x525F4D544C504147) /* "R_MTLPAG" */
+
+typedef struct PAGE_HEADER {
+  uint64_t magic;
+  struct PAGE_HEADER *next;
+  R_mtl_heap_state *owner;
 } PAGE_HEADER;
 
 #if ( SIZEOF_SIZE_T > 4 )
@@ -805,7 +812,7 @@ typedef union PAGE_HEADER {
  * For now we at least parameterize the core heap bookkeeping by the current
  * interpreter state (R_Interpreter->heap).
  */
-typedef struct R_mtl_heap_state_ {
+struct R_mtl_heap_state_ {
     struct {
 	SEXP Old[NUM_OLD_GENERATIONS], New;
 #ifdef HAVE_PTHREAD
@@ -835,7 +842,7 @@ typedef struct R_mtl_heap_state_ {
     R_size_t NSize; /* node limit for this heap (cons cells) */
     R_size_t VSize; /* vector heap limit for this heap (in VECRECs) */
     int isWorker;
-} R_mtl_heap_state;
+};
 
 static R_mtl_heap_state R_MainHeapState;
 
@@ -848,6 +855,15 @@ static R_mtl_heap_state R_MainHeapState;
 #define R_VSize_heap (R_HEAP->VSize)
 
 #define VHEAP_FREE() (R_VSize_heap - R_LargeVallocSize - R_SmallVallocSize)
+
+static size_t R_mtl_pagesize = 0;
+static uintptr_t R_mtl_pagesize_mask = 0;
+
+static R_INLINE PAGE_HEADER *mtl_page_header_from_ptr(const void *p)
+{
+    uintptr_t a = (uintptr_t) p;
+    return (PAGE_HEADER *) (a & ~R_mtl_pagesize_mask);
+}
 
 /* The Heap Structure.  Nodes for each class/generation combination
    are arranged in circular doubly-linked lists.  The double linking
@@ -1304,16 +1320,24 @@ static void GetNewPage(int node_class)
     node_size = NODE_SIZE(node_class);
     page_count = (R_PAGE_SIZE - sizeof(PAGE_HEADER)) / node_size;
 
-    page = malloc(R_PAGE_SIZE);
+    void *pmem = NULL;
+    if (posix_memalign(&pmem, R_mtl_pagesize, (size_t) R_PAGE_SIZE) != 0)
+	pmem = NULL;
+    page = (PAGE_HEADER *) pmem;
     if (page == NULL) {
 	R_gc_no_finalizers(0);
-	page = malloc(R_PAGE_SIZE);
+	pmem = NULL;
+	if (posix_memalign(&pmem, R_mtl_pagesize, (size_t) R_PAGE_SIZE) != 0)
+	    pmem = NULL;
+	page = (PAGE_HEADER *) pmem;
 	if (page == NULL)
 	    mem_err_malloc((R_size_t) R_PAGE_SIZE);
     }
 #ifdef R_MEMORY_PROFILING
     R_ReportNewPage();
 #endif
+    page->magic = R_MTL_PAGE_MAGIC;
+    page->owner = R_HEAP;
     page->next = R_GenHeap[node_class].pages;
     R_GenHeap[node_class].pages = page;
     R_GenHeap[node_class].PageCount++;
@@ -2596,6 +2620,15 @@ attribute_hidden void InitMemory(void)
 	R_HEAP->NSize = R_NSize;
 	/* VSize is converted to VECRECs below, then stored in R_HEAP->VSize. */
     }
+    if (R_mtl_pagesize == 0) {
+	long ps = sysconf(_SC_PAGESIZE);
+	if (ps <= 0)
+	    R_Suicide("InitMemory: sysconf(_SC_PAGESIZE) failed");
+	R_mtl_pagesize = (size_t) ps;
+	if ((R_mtl_pagesize & (R_mtl_pagesize - 1)) != 0)
+	    R_Suicide("InitMemory: page size is not a power of two");
+	R_mtl_pagesize_mask = (uintptr_t) (R_mtl_pagesize - 1);
+    }
 
     init_gctorture();
     init_gc_grow_settings();
@@ -2734,8 +2767,6 @@ char *R_alloc(size_t nelem, int eltsize)
 #ifdef HAVE_STDALIGN_H
 # include <stdalign.h>
 #endif
-
-#include <stdint.h>
 
 long double *R_allocLD(size_t nelem)
 {
