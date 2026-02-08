@@ -1545,11 +1545,6 @@ extern0 R_size_t R_NSize  INI_as(R_NSIZE);/* Size of cons cell heap */
 extern0 R_size_t R_VSize  INI_as(R_VSIZE);/* Size of the vector heap */
 extern0 int	R_GCEnabled INI_as(1);
 extern0 int	R_in_gc INI_as(0);
-extern0 int	R_BCIntActive INI_as(0); /* bcEval called more recently than
-                                            eval */
-extern0 void*	R_BCpc INI_as(NULL);/* current byte code instruction */
-extern0 SEXP	R_BCbody INI_as(NULL); /* current byte code object */
-extern0 R_bcFrame_type *R_BCFrame INI_as(NULL); /* bcEval() frame */
 extern0 SEXP	R_NHeap;	    /* Start of the cons cell heap */
 extern0 SEXP	R_FreeSEXP;	    /* Cons cell free list */
 extern0 R_size_t R_Collected;	    /* Number of free cons cells (after gc) */
@@ -1580,6 +1575,10 @@ typedef struct {
     Rboolean visible;        /* Value visibility flag */
     int showErrorMessages;   /* show error messages? */
     int evalDepth;           /* Evaluation recursion depth */
+    int bcintactive;         /* bcEval called more recently than top-level eval */
+    void* bcpc;              /* current byte code instruction */
+    SEXP bcbody;             /* current byte code object */
+    R_bcFrame_type *bcframe; /* bcEval() frame */
 #ifdef R_USE_SIGNALS
     RCNTXT* toplevelContext; /* The toplevel context */
     RCNTXT* globalContext;   /* The global (top) context */
@@ -1602,6 +1601,10 @@ extern R_THREAD_LOCAL R_InterpreterState *R_Interpreter INI_as(&R_Interpreter0);
 #define R_Visible       (R_Interpreter->visible)
 #define R_ShowErrorMessages (R_Interpreter->showErrorMessages)
 #define R_EvalDepth     (R_Interpreter->evalDepth)
+#define R_BCIntActive   (R_Interpreter->bcintactive)
+#define R_BCpc          (R_Interpreter->bcpc)
+#define R_BCbody        (R_Interpreter->bcbody)
+#define R_BCFrame       (R_Interpreter->bcframe)
 #ifdef R_USE_SIGNALS
 #define R_ToplevelContext (R_Interpreter->toplevelContext)
 #define R_SessionContext  (R_Interpreter->sessionContext)
