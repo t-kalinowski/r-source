@@ -1563,6 +1563,7 @@ typedef struct {
     SEXP returnedValue;      /* Slot for return-ing values */
     SEXP handlerStack;       /* Condition handler stack */
     SEXP restartStack;       /* Stack of available restarts */
+    Rboolean visible;        /* Value visibility flag */
 #ifdef R_USE_SIGNALS
     RCNTXT* toplevelContext; /* The toplevel context */
     RCNTXT* globalContext;   /* The global (top) context */
@@ -1572,12 +1573,17 @@ typedef struct {
 } R_InterpreterState;
 
 extern0 R_InterpreterState R_Interpreter0;
-extern0 R_InterpreterState *R_Interpreter INI_as(&R_Interpreter0);
+/*
+ * Must be visible for internal shared objects (e.g. grDevices.so) that are
+ * built against Defn.h and use macros like R_Visible.
+ */
+extern R_InterpreterState *R_Interpreter INI_as(&R_Interpreter0);
 
 #define R_CurrentExpr   (R_Interpreter->currentExpr)
 #define R_ReturnedValue (R_Interpreter->returnedValue)
 #define R_HandlerStack  (R_Interpreter->handlerStack)
 #define R_RestartStack  (R_Interpreter->restartStack)
+#define R_Visible       (R_Interpreter->visible)
 #ifdef R_USE_SIGNALS
 #define R_ToplevelContext (R_Interpreter->toplevelContext)
 #define R_SessionContext  (R_Interpreter->sessionContext)
@@ -1588,7 +1594,6 @@ extern0 R_InterpreterState *R_Interpreter INI_as(&R_Interpreter0);
 extern0 RCNTXT R_Toplevel;	      /* Storage for the toplevel context */
 LibExtern RCNTXT* R_GlobalContext;    /* The global context */
 #endif
-extern Rboolean R_Visible;	    /* Value visibility flag */
 extern0 int	R_EvalDepth	INI_as(0);	/* Evaluation recursion depth */
 extern0 int	R_BrowseLines	INI_as(0);	/* lines/per call in browser :
 						 * options(deparse.max.lines) */
