@@ -49,6 +49,7 @@ typedef struct {
     uintptr_t main_CStackStart;
     uintptr_t main_CStackLimit;
     uintptr_t main_OldCStackLimit;
+    int main_showErrorMessages;
 } mtl_shared_t;
 
 typedef struct {
@@ -92,14 +93,14 @@ static void mtl_interp_init_from_main(R_InterpreterState *st)
 #endif
 }
 
-static void mtl_interp_reset_for_eval(R_InterpreterState *st)
+static void mtl_interp_reset_for_eval(R_InterpreterState *st, const mtl_shared_t *sh)
 {
     st->currentExpr = NULL;
     st->returnedValue = R_NilValue;
     st->handlerStack = R_NilValue;
     st->restartStack = R_NilValue;
     st->visible = TRUE;
-    st->showErrorMessages = 1;
+    st->showErrorMessages = sh->main_showErrorMessages;
     st->collectWarnings = 0;
     st->warnings = R_NilValue;
     st->evalDepth = 0;
@@ -152,7 +153,7 @@ static void *mtl_worker_main(void *vp)
 	R_OldCStackLimit = (uintptr_t) 0;
 
 	/* Reset per-interpreter stacks/slots for this evaluation. */
-	mtl_interp_reset_for_eval(&w->interp);
+	mtl_interp_reset_for_eval(&w->interp, s);
 #ifdef R_USE_SIGNALS
 	RCNTXT *saved_global_context = R_GlobalContext;
 	R_GlobalContext = w->interp.globalContext;
@@ -313,6 +314,7 @@ attribute_hidden SEXP do_mtlapply(SEXP call, SEXP op, SEXP args, SEXP rho)
     sh.main_CStackStart = R_CStackStart;
     sh.main_CStackLimit = R_CStackLimit;
     sh.main_OldCStackLimit = R_OldCStackLimit;
+    sh.main_showErrorMessages = R_ShowErrorMessages;
 
     pthread_mutex_init(&sh.next_mutex, NULL);
     pthread_mutex_init(&sh.err_mutex, NULL);
