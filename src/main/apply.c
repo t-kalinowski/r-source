@@ -75,6 +75,8 @@ static void mtl_interp_init_from_main(R_InterpreterState *st)
     st->collectWarnings = 0;
     st->warnings = R_NilValue;
     st->evalDepth = 0;
+    st->ppStackTop = 0;
+    st->ppStack = NULL;
     st->expressions_keep = R_Expressions_keep;
     st->expressions = st->expressions_keep;
     st->bcNodeStackBase = R_BCNodeStackBase;
@@ -98,6 +100,9 @@ static void mtl_interp_init_from_main(R_InterpreterState *st)
     st->sessionContext = R_SessionContext;
     st->exitContext = R_ExitContext;
 #endif
+
+    /* Allocate per-interpreter protection stack for this worker. */
+    R_InitInterpreterProtectStack(st);
 }
 
 static void mtl_interp_reset_for_eval(R_InterpreterState *st, const mtl_shared_t *sh)
@@ -193,6 +198,11 @@ static void *mtl_worker_main(void *vp)
 	R_Interpreter = saved_interp;
 	pthread_mutex_unlock(&mtl_gil);
     }
+
+    /* Worker interpreter stacks are not reused; free its protection stack. */
+    free(w->interp.ppStack);
+    w->interp.ppStack = NULL;
+    w->interp.ppStackTop = 0;
 
     return NULL;
 }

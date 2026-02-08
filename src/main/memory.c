@@ -2202,6 +2202,20 @@ NORET static void mem_err_malloc(R_size_t size)
 #define PP_REDZONE_SIZE 1000L
 static int R_StandardPPStackSize, R_RealPPStackSize;
 
+attribute_hidden void R_InitInterpreterProtectStack(R_InterpreterState *st)
+{
+    if (st->ppStack != NULL)
+	return;
+    if (R_RealPPStackSize <= 0)
+	R_Suicide("R_InitInterpreterProtectStack called before InitMemory");
+    if (!(st->ppStack = (SEXP *) malloc(R_RealPPStackSize * sizeof(SEXP))))
+	R_Suicide("couldn't allocate memory for pointer stack");
+    st->ppStackTop = 0;
+#if VALGRIND_LEVEL > 1
+    VALGRIND_MAKE_MEM_NOACCESS(st->ppStack+R_PPStackSize, PP_REDZONE_SIZE);
+#endif
+}
+
 attribute_hidden void InitMemory(void)
 {
     int i;
@@ -2220,12 +2234,7 @@ attribute_hidden void InitMemory(void)
     gc_reporting = R_Verbose;
     R_StandardPPStackSize = R_PPStackSize;
     R_RealPPStackSize = R_PPStackSize + PP_REDZONE_SIZE;
-    if (!(R_PPStack = (SEXP *) malloc(R_RealPPStackSize * sizeof(SEXP))))
-	R_Suicide("couldn't allocate memory for pointer stack");
-    R_PPStackTop = 0;
-#if VALGRIND_LEVEL > 1
-    VALGRIND_MAKE_MEM_NOACCESS(R_PPStack+R_PPStackSize, PP_REDZONE_SIZE);
-#endif
+    R_InitInterpreterProtectStack(R_Interpreter);
     vsfac = sizeof(VECREC);
     R_VSize = (R_VSize + 1)/vsfac;
     if (R_MaxVSize < R_SIZE_T_MAX) R_MaxVSize = (R_MaxVSize + 1)/vsfac;

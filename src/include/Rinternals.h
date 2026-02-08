@@ -82,7 +82,15 @@ typedef int R_len_t;
 # define R_PRIdXLEN_T "d"
 #endif
 
-#ifndef TESTING_WRITE_BARRIER
+/*
+ * INLINE_PROTECT controls whether PROTECT/UNPROTECT are inlined via
+ * Rinlinedfuns.h and access the protection stack directly.
+ *
+ * For experimental multi-threading work we may want out-of-line
+ * PROTECT/UNPROTECT so the implementation can use per-thread /
+ * per-interpreter state.
+ */
+#if !defined(TESTING_WRITE_BARRIER) && defined(R_ENABLE_INLINE_PROTECT)
 # define INLINE_PROTECT
 #endif
 

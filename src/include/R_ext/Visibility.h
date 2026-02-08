@@ -40,4 +40,29 @@
 # define attribute_hidden
 #endif
 
+/*
+ * Thread-local storage support for the public C API.
+ *
+ * This is used by a small number of performance-sensitive inline helpers
+ * (e.g. INLINE_PROTECT in Rinlinedfuns.h) and by experimental multi-threading
+ * work.
+ */
+#ifndef R_THREAD_LOCAL
+# ifdef __cplusplus
+#  if __cplusplus >= 201103L
+#   define R_THREAD_LOCAL thread_local
+#  else
+#   define R_THREAD_LOCAL /* no TLS */
+#  endif
+# elif defined(_MSC_VER)
+#  define R_THREAD_LOCAL __declspec(thread)
+# elif defined(__STDC_VERSION__) && (__STDC_VERSION__ >= 201112L)
+#  define R_THREAD_LOCAL _Thread_local
+# elif defined(__GNUC__) || defined(__clang__)
+#  define R_THREAD_LOCAL __thread
+# else
+#  define R_THREAD_LOCAL /* no TLS */
+# endif
+#endif
+
 #endif /* R_EXT_VISIBILITY_H_ */

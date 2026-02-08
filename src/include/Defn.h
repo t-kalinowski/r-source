@@ -785,7 +785,7 @@ const char * R_typeToChar2(SEXP, SEXPTYPE);
 /* Defining NO_RINLINEDFUNS disables use to simulate platforms where
    this is not available */
 #if !defined(__MAIN__) && (defined(COMPILING_R) || ( __GNUC__ && !defined(__INTEL_COMPILER) )) && (defined(COMPILING_R) || !defined(NO_RINLINEDFUNS))
-#include "Rinlinedfuns.h"
+# include "Rinlinedfuns.h"
 #else
 /* need remapped names here for use with R_NO_REMAP */
 
@@ -1552,8 +1552,7 @@ extern0 int	R_Is_Running;	    /* for Windows memory manager */
 
 /* The Pointer Protection Stack */
 LibExtern int	R_PPStackSize	INI_as(R_PPSSIZE); /* The stack size (elements) */
-LibExtern int	R_PPStackTop;	    /* The top of the stack */
-LibExtern SEXP*	R_PPStack;	    /* The pointer protection stack */
+/* R_PPStackTop and R_PPStack are per-interpreter (see R_InterpreterState). */
 
 void R_ReleaseMSet(SEXP mset, int keepSize);
 
@@ -1578,6 +1577,8 @@ typedef struct {
     int collectWarnings;     /* number of collected warnings (0 means none) */
     SEXP warnings;           /* collected warnings + calls */
     int evalDepth;           /* Evaluation recursion depth */
+    int ppStackTop;          /* The top of the pointer protection stack */
+    SEXP *ppStack;           /* The pointer protection stack */
     int expressions;         /* options(expressions) active value */
     int expressions_keep;    /* options(expressions) base value */
     R_bcstack_t *bcNodeStackBase;
@@ -1604,6 +1605,23 @@ typedef struct {
 #endif
 } R_InterpreterState;
 
+attribute_hidden void R_InitInterpreterProtectStack(R_InterpreterState *st);
+
+/* Thread-local storage (TLS) support for internal multi-threading work. */
+#ifndef R_THREAD_LOCAL
+# ifdef __cplusplus
+#  define R_THREAD_LOCAL thread_local
+# elif defined(_MSC_VER)
+#  define R_THREAD_LOCAL __declspec(thread)
+# elif defined(__STDC_VERSION__) && (__STDC_VERSION__ >= 201112L)
+#  define R_THREAD_LOCAL _Thread_local
+# elif defined(__GNUC__) || defined(__clang__)
+#  define R_THREAD_LOCAL __thread
+# else
+#  define R_THREAD_LOCAL /* no TLS */
+# endif
+#endif
+
 extern R_InterpreterState R_Interpreter0;
 /*
  * Must be visible for internal shared objects (e.g. grDevices.so) that are
@@ -1621,6 +1639,8 @@ extern R_THREAD_LOCAL R_InterpreterState *R_Interpreter INI_as(&R_Interpreter0);
 #define R_CollectWarnings (R_Interpreter->collectWarnings)
 #define R_Warnings      (R_Interpreter->warnings)
 #define R_EvalDepth     (R_Interpreter->evalDepth)
+#define R_PPStackTop    (R_Interpreter->ppStackTop)
+#define R_PPStack       (R_Interpreter->ppStack)
 #define R_Expressions   (R_Interpreter->expressions)
 #define R_Expressions_keep (R_Interpreter->expressions_keep)
 #define R_BCNodeStackBase (R_Interpreter->bcNodeStackBase)
