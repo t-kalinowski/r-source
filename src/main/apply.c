@@ -75,6 +75,8 @@ static void mtl_interp_init_from_main(R_InterpreterState *st)
     st->collectWarnings = 0;
     st->warnings = R_NilValue;
     st->evalDepth = 0;
+    st->expressions_keep = R_Expressions_keep;
+    st->expressions = st->expressions_keep;
     st->bcNodeStackBase = R_BCNodeStackBase;
     st->bcNodeStackEnd = R_BCNodeStackEnd;
     st->bcNodeStackTop = st->bcNodeStackBase;
@@ -109,6 +111,7 @@ static void mtl_interp_reset_for_eval(R_InterpreterState *st, const mtl_shared_t
     st->collectWarnings = 0;
     st->warnings = R_NilValue;
     st->evalDepth = 0;
+    st->expressions = st->expressions_keep;
     st->bcNodeStackTop = st->bcNodeStackBase;
     st->bcProtTop = st->bcNodeStackTop;
     st->bcProtCommitted = st->bcNodeStackBase;

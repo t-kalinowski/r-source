@@ -151,8 +151,6 @@
  R_EvalDepth
  R_ExactSymbol
  R_ExitContext
- R_Expressions
- R_Expressions_keep
  R_FileMtime
  R_FinalizeSrcRefState
  R_FixupExitingHandlerResult

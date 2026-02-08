@@ -1578,6 +1578,8 @@ typedef struct {
     int collectWarnings;     /* number of collected warnings (0 means none) */
     SEXP warnings;           /* collected warnings + calls */
     int evalDepth;           /* Evaluation recursion depth */
+    int expressions;         /* options(expressions) active value */
+    int expressions_keep;    /* options(expressions) base value */
     R_bcstack_t *bcNodeStackBase;
     R_bcstack_t *bcNodeStackTop;
     R_bcstack_t *bcNodeStackEnd;
@@ -1619,6 +1621,8 @@ extern R_THREAD_LOCAL R_InterpreterState *R_Interpreter INI_as(&R_Interpreter0);
 #define R_CollectWarnings (R_Interpreter->collectWarnings)
 #define R_Warnings      (R_Interpreter->warnings)
 #define R_EvalDepth     (R_Interpreter->evalDepth)
+#define R_Expressions   (R_Interpreter->expressions)
+#define R_Expressions_keep (R_Interpreter->expressions_keep)
 #define R_BCNodeStackBase (R_Interpreter->bcNodeStackBase)
 #define R_BCNodeStackTop  (R_Interpreter->bcNodeStackTop)
 #define R_BCNodeStackEnd  (R_Interpreter->bcNodeStackEnd)
@@ -1644,8 +1648,6 @@ extern R_THREAD_LOCAL R_InterpreterState *R_Interpreter INI_as(&R_Interpreter0);
 
 extern0 int	R_BrowseLines	INI_as(0);	/* lines/per call in browser :
 						 * options(deparse.max.lines) */
-extern0 int	R_Expressions	INI_as(5000);	/* options(expressions) */
-extern0 int	R_Expressions_keep INI_as(5000);/* options(expressions) */
 extern0 Rboolean R_KeepSource	INI_as(FALSE);	/* options(keep.source) */
 extern0 Rboolean R_CBoundsCheck	INI_as(FALSE);	/* options(CBoundsCheck) */
 extern0 MATPROD_TYPE R_Matprod	INI_as(MATPROD_DEFAULT);  /* options(matprod) */

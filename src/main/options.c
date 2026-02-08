@@ -27,7 +27,7 @@
 #include "Print.h"
 #include <Rinternals.h>
 
-/* The global var. R_Expressions is in Defn.h */
+/* R_Expressions state is in Defn.h (as part of the interpreter state). */
 #define R_MIN_EXPRESSIONS_OPT	25
 #define R_MAX_EXPRESSIONS_OPT	500000
 
