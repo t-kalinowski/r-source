@@ -1777,6 +1777,7 @@ static int RunGenCollect(R_size_t size_needed)
 
     FORWARD_NODE(R_BCbody);                /* Current byte code object */
     FORWARD_NODE(R_Srcref);                /* Current source reference */
+    FORWARD_NODE(R_ParseErrorFile);        /* Parse error source file (may be NULL) */
 
     FORWARD_NODE(R_TrueValue);
     FORWARD_NODE(R_FalseValue);

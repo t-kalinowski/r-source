@@ -77,6 +77,13 @@ static void mtl_interp_init_from_main(R_InterpreterState *st)
     st->evalDepth = 0;
     st->ppStackTop = 0;
     st->ppStack = NULL;
+    st->parseError = 0;
+    st->parseErrorCol = 0;
+    st->parseErrorFile = NULL;
+    st->parseErrorMsg[0] = '\0';
+    st->parseContext[0] = '\0';
+    st->parseContextLast = 0;
+    st->parseContextLine = 0;
     st->expressions_keep = R_Expressions_keep;
     st->expressions = st->expressions_keep;
     st->bcNodeStackBase = R_BCNodeStackBase;

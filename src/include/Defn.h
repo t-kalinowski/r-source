@@ -1556,6 +1556,14 @@ LibExtern int	R_PPStackSize	INI_as(R_PPSSIZE); /* The stack size (elements) */
 
 void R_ReleaseMSet(SEXP mset, int keepSize);
 
+/* Objects used in parsing. Sizes are part of the ABI of R_InterpreterState. */
+#ifndef PARSE_ERROR_SIZE
+#define PARSE_ERROR_SIZE 256	    /* Parse error messages saved here */
+#endif
+#ifndef PARSE_CONTEXT_SIZE
+#define PARSE_CONTEXT_SIZE 256	    /* Recent parse context kept in a circular buffer */
+#endif
+
 /* Evaluation Environment */
 extern0 SEXP*	R_SymbolTable;	    /* The symbol table */
 
@@ -1579,6 +1587,13 @@ typedef struct {
     int evalDepth;           /* Evaluation recursion depth */
     int ppStackTop;          /* The top of the pointer protection stack */
     SEXP *ppStack;           /* The pointer protection stack */
+    int parseError;          /* Line where parse error occurred */
+    int parseErrorCol;       /* Column of parse error */
+    SEXP parseErrorFile;     /* Source file where parse error was seen (may be NULL) */
+    char parseErrorMsg[PARSE_ERROR_SIZE];  /* parse error message */
+    char parseContext[PARSE_CONTEXT_SIZE]; /* recent parse context */
+    int parseContextLast;    /* last character in context buffer */
+    int parseContextLine;    /* line in file of the above */
     int expressions;         /* options(expressions) active value */
     int expressions_keep;    /* options(expressions) base value */
     R_bcstack_t *bcNodeStackBase;
@@ -1641,6 +1656,13 @@ extern R_THREAD_LOCAL R_InterpreterState *R_Interpreter INI_as(&R_Interpreter0);
 #define R_EvalDepth     (R_Interpreter->evalDepth)
 #define R_PPStackTop    (R_Interpreter->ppStackTop)
 #define R_PPStack       (R_Interpreter->ppStack)
+#define R_ParseError    (R_Interpreter->parseError)
+#define R_ParseErrorCol (R_Interpreter->parseErrorCol)
+#define R_ParseErrorFile (R_Interpreter->parseErrorFile)
+#define R_ParseErrorMsg (R_Interpreter->parseErrorMsg)
+#define R_ParseContext  (R_Interpreter->parseContext)
+#define R_ParseContextLast (R_Interpreter->parseContextLast)
+#define R_ParseContextLine (R_Interpreter->parseContextLine)
 #define R_Expressions   (R_Interpreter->expressions)
 #define R_Expressions_keep (R_Interpreter->expressions_keep)
 #define R_BCNodeStackBase (R_Interpreter->bcNodeStackBase)
@@ -1701,16 +1723,7 @@ extern0 char   *Sys_TempDir	INI_as(NULL);	/* Name of per-session dir
 extern0 char	R_StdinEnc[31]  INI_as("");	/* Encoding assumed for stdin */
 
 /* Objects Used In Parsing  */
-LibExtern int	R_ParseError	INI_as(0); /* Line where parse error occurred */
-extern0 int	R_ParseErrorCol;    /* Column of start of token where parse error occurred */
-extern0 SEXP	R_ParseErrorFile;   /* Source file where parse error was seen.  Either a
-				       STRSXP or (when keeping srcrefs) a SrcFile ENVSXP */
-#define PARSE_ERROR_SIZE 256	    /* Parse error messages saved here */
-LibExtern char	R_ParseErrorMsg[PARSE_ERROR_SIZE] INI_as("");
-#define PARSE_CONTEXT_SIZE 256	    /* Recent parse context kept in a circular buffer */
-LibExtern char	R_ParseContext[PARSE_CONTEXT_SIZE] INI_as("");
-LibExtern int	R_ParseContextLast INI_as(0); /* last character in context buffer */
-LibExtern int	R_ParseContextLine; /* Line in file of the above */
+/* Per-interpreter; see R_InterpreterState. */
 
 /* Image Dump/Restore */
 extern int	R_DirtyImage	INI_as(0);	/* Current image dirty */
