@@ -1508,6 +1508,20 @@ FUNTAB	R_FunTab[];	    /* Built in functions */
 
 #include <R_ext/libextern.h>
 
+#ifndef R_THREAD_LOCAL
+# ifdef __cplusplus
+#  define R_THREAD_LOCAL thread_local
+# elif defined(_MSC_VER)
+#  define R_THREAD_LOCAL __declspec(thread)
+# elif defined(__STDC_VERSION__) && (__STDC_VERSION__ >= 201112L)
+#  define R_THREAD_LOCAL _Thread_local
+# elif defined(__GNUC__) || defined(__clang__)
+#  define R_THREAD_LOCAL __thread
+# else
+#  define R_THREAD_LOCAL /* no TLS */
+# endif
+#endif
+
 #ifdef __MAIN__
 # define INI_as(v) = v
 #define extern0 attribute_hidden
@@ -1577,7 +1591,7 @@ extern0 R_InterpreterState R_Interpreter0;
  * Must be visible for internal shared objects (e.g. grDevices.so) that are
  * built against Defn.h and use macros like R_Visible.
  */
-extern R_InterpreterState *R_Interpreter INI_as(&R_Interpreter0);
+extern R_THREAD_LOCAL R_InterpreterState *R_Interpreter INI_as(&R_Interpreter0);
 
 #define R_CurrentExpr   (R_Interpreter->currentExpr)
 #define R_ReturnedValue (R_Interpreter->returnedValue)
