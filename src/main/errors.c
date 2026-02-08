@@ -56,18 +56,12 @@ static SEXP evalKeepVis(SEXP e, SEXP rho)
 #define LONGWARN 75
 
 /*
-Different values of inError are used to indicate different places
+Different values of R_InError are used to indicate different places
 in the error handling:
-inError = 1: In internal error handling, e.g. `verrorcall_dflt`, others.
-inError = 2: Writing traceback
-inError = 3: In user error handler (i.e. options(error=handler))
+R_InError = 1: In internal error handling, e.g. `verrorcall_dflt`, others.
+R_InError = 2: Writing traceback
+R_InError = 3: In user error handler (i.e. options(error=handler))
 */
-static int inError = 0;
-static int inWarning = 0;
-static int inPrintWarnings = 0;
-static int immediateWarning = 0;
-static int noBreakWarning = 0;
-
 static void try_jump_to_restart(void);
 // The next is crucial to the use of NORET attributes.
 NORET static void 
@@ -219,7 +213,7 @@ attribute_hidden void onsigusr1(int dummy)
 	return;
     }
 
-    inError = 1;
+    R_InError = 1;
 
     if(R_CollectWarnings) PrintWarnings();
 
@@ -247,7 +241,7 @@ attribute_hidden void onsigusr1(int dummy)
 
 attribute_hidden void onsigusr2(int dummy)
 {
-    inError = 1;
+    R_InError = 1;
 
     if (R_interrupts_suspended) {
 	/**** ought to save signal and handle after suspend */
@@ -419,7 +413,7 @@ NORET static void invokeRestart(SEXP, SEXP);
 
 static void reset_inWarning(void *data)
 {
-    inWarning = 0;
+    R_InWarning = 0;
 }
 
 #include <rlocale.h>
@@ -452,7 +446,7 @@ static void vwarningcall_dflt(SEXP call, const char *format, va_list ap)
     size_t psize;
     int pval;
 
-    if (inWarning)
+    if (R_InWarning)
 	return;
 
     s = GetOption1(install("warning.expression"));
@@ -471,23 +465,23 @@ static void vwarningcall_dflt(SEXP call, const char *format, va_list ap)
     if( w == NA_INTEGER ) /* set to a sensible value */
 	w = 0;
 
-    if( w <= 0 && immediateWarning ) w = 1;
+    if( w <= 0 && R_ImmediateWarning ) w = 1;
 
-    if( w < 0 || inWarning || inError) /* ignore if w<0 or already in here*/
+    if( w < 0 || R_InWarning || R_InError) /* ignore if w<0 or already in here*/
 	return;
 
-    /* set up a context which will restore inWarning if there is an exit */
+    /* set up a context which will restore R_InWarning if there is an exit */
     begincontext(&cntxt, CTXT_CCODE, R_NilValue, R_BaseEnv, R_BaseEnv,
 		 R_NilValue, R_NilValue);
     cntxt.cend = &reset_inWarning;
 
-    inWarning = 1;
+    R_InWarning = 1;
 
     if(w >= 2) { /* make it an error */
 	psize = min(BUFSIZE, R_WarnLength+1);
 	pval = Rvsnprintf_mbcs(buf, psize, format, ap);
 	RprintTrunc(buf, pval >= psize);
-	inWarning = 0; /* PR#1570 */
+	R_InWarning = 0; /* PR#1570 */
 	errorcall(call, _("(converted from warning) %s"), buf);
     }
     else if(w == 1) {	/* print as they happen */
@@ -509,7 +503,7 @@ static void vwarningcall_dflt(SEXP call, const char *format, va_list ap)
 	    strncpy(buf1, buf, BUFSIZE);
 	    char *p = strstr(buf1, "\n");
 	    if(p) *p = '\0';
-	    if(!(noBreakWarning ||
+	    if(!(R_NoBreakWarning ||
 		 ( mbcslocale && (18 + wd(dcall) + wd(buf1) <= LONGWARN)) ||
 		 (!mbcslocale && (18 + strlen(dcall) + strlen(buf1) <= LONGWARN))))
 		REprintf("\n ");
@@ -543,7 +537,7 @@ static void vwarningcall_dflt(SEXP call, const char *format, va_list ap)
     }
     /* else:  w <= -1 */
     endcontext(&cntxt);
-    inWarning = 0;
+    R_InWarning = 0;
 }
 
 static void warningcall_dflt(SEXP call, const char *format,...)
@@ -567,11 +561,11 @@ void warningcall_immediate(SEXP call, const char *format, ...)
 {
     va_list(ap);
 
-    immediateWarning = 1;
+    R_ImmediateWarning = 1;
     va_start(ap, format);
     vsignalWarning(call, format, ap);
     va_end(ap);
-    immediateWarning = 0;
+    R_ImmediateWarning = 0;
 }
 
 static void cleanup_PrintWarnings(void *data)
@@ -581,7 +575,7 @@ static void cleanup_PrintWarnings(void *data)
 	R_Warnings = R_NilValue;
 	REprintf(_("Lost warning messages\n"));
     }
-    inPrintWarnings = 0;
+    R_InPrintWarnings = 0;
 }
 
 attribute_hidden
@@ -594,7 +588,7 @@ void PrintWarnings(void)
 
     if (R_CollectWarnings == 0)
 	return;
-    else if (inPrintWarnings) {
+    else if (R_InPrintWarnings) {
 	if (R_CollectWarnings) {
 	    R_CollectWarnings = 0;
 	    R_Warnings = R_NilValue;
@@ -603,13 +597,13 @@ void PrintWarnings(void)
 	return;
     }
 
-    /* set up a context which will restore inPrintWarnings if there is
+    /* set up a context which will restore R_InPrintWarnings if there is
        an exit */
     begincontext(&cntxt, CTXT_CCODE, R_NilValue, R_BaseEnv, R_BaseEnv,
 		 R_NilValue, R_NilValue);
     cntxt.cend = &cleanup_PrintWarnings;
 
-    inPrintWarnings = 1;
+    R_InPrintWarnings = 1;
     header = ngettext("Warning message:", "Warning messages:",
 		      R_CollectWarnings);
     if( R_CollectWarnings == 1 ) {
@@ -696,7 +690,7 @@ void PrintWarnings(void)
 
     endcontext(&cntxt);
 
-    inPrintWarnings = 0;
+    R_InPrintWarnings = 0;
     R_CollectWarnings = 0;
     R_Warnings = R_NilValue;
     return;
@@ -735,7 +729,7 @@ const char *R_curErrorBuf(void) {
 static void restore_inError(void *data)
 {
     int *poldval = (int *) data;
-    inError = *poldval;
+    R_InError = *poldval;
     R_Expressions = R_Expressions_keep;
 }
 
@@ -756,9 +750,9 @@ verrorcall_dflt(SEXP call, const char *format, va_list ap)
 	R_checkConstants(TRUE);
     }
 
-    if (inError) {
+    if (R_InError) {
 	/* fail-safe handler for recursive errors */
-	if(inError == 3) {
+	if(R_InError == 3) {
 	     /* Can REprintf generate an error? If so we should guard for it */
 	    REprintf(_("Error during wrapup: "));
 	    /* this does NOT try to print the call since that could
@@ -777,15 +771,15 @@ verrorcall_dflt(SEXP call, const char *format, va_list ap)
 	jump_to_top_ex(FALSE, FALSE, FALSE, FALSE, FALSE);
     }
 
-    /* set up a context to restore inError value on exit */
+    /* set up a context to restore R_InError value on exit */
     RCNTXT cntxt;
     begincontext(&cntxt, CTXT_CCODE, R_NilValue, R_BaseEnv, R_BaseEnv,
 		 R_NilValue, R_NilValue);
     int oldInError;
     cntxt.cend = &restore_inError;
     cntxt.cenddata = &oldInError;
-    oldInError = inError;
-    inError = 1;
+    oldInError = R_InError;
+    R_InError = 1;
 
     // For use with Rv?snprintf, which truncates at size - 1, hence the + 1
     size_t msg_len = min(BUFSIZE, R_WarnLength) + 1;
@@ -892,7 +886,7 @@ verrorcall_dflt(SEXP call, const char *format, va_list ap)
 
     /* not reached */
     endcontext(&cntxt);
-    inError = oldInError;
+    R_InError = oldInError;
 }
 
 NORET static void errorcall_dflt(SEXP call, const char *format,...)
@@ -990,20 +984,20 @@ static void jump_to_top_ex(Rboolean traceback,
     SEXP s;
     int haveHandler, oldInError;
 
-    /* set up a context to restore inError value on exit */
+    /* set up a context to restore R_InError value on exit */
     begincontext(&cntxt, CTXT_CCODE, R_NilValue, R_BaseEnv, R_BaseEnv,
 		 R_NilValue, R_NilValue);
     cntxt.cend = &restore_inError;
     cntxt.cenddata = &oldInError;
 
-    oldInError = inError;
+    oldInError = R_InError;
 
     haveHandler = FALSE;
 
     /* don't use options("error") when handling a C stack overflow */
-    if (R_OldCStackLimit == 0 && tryUserHandler && inError < 3) {
-	if (! inError)
-	    inError = 1;
+    if (R_OldCStackLimit == 0 && tryUserHandler && R_InError < 3) {
+	if (! R_InError)
+	    R_InError = 1;
 
 	/* now see if options("error") is set */
 	s = GetOption1(install("error"));
@@ -1013,7 +1007,7 @@ static void jump_to_top_ex(Rboolean traceback,
 		REprintf(_("invalid option \"error\"\n"));
 	    else {
 		R_CheckStack();
-		inError = 3;
+		R_InError = 3;
 		if (isLanguage(s))
 		    eval(s, R_GlobalEnv);
 		else /* expression */
@@ -1022,10 +1016,10 @@ static void jump_to_top_ex(Rboolean traceback,
 			for (i = 0 ; i < n ; i++)
 			    eval(VECTOR_ELT(s, i), R_GlobalEnv);
 		    }
-		inError = oldInError;
+		R_InError = oldInError;
 	    }
 	}
-	inError = oldInError;
+	R_InError = oldInError;
     }
 
     /* print warnings if there are any left to be printed */
@@ -1064,16 +1058,16 @@ static void jump_to_top_ex(Rboolean traceback,
 
     if (R_Interactive || haveHandler || R_isTRUE(GetOption1(install("catch.script.errors")))) {
 	/* write traceback if requested, unless we're already doing it
-	   or there is an inconsistency between inError and oldInError
+	   or there is an inconsistency between R_InError and oldInError
 	   (which should not happen) */
-	if (traceback && inError < 2 && inError == oldInError) {
-	    inError = 2;
+	if (traceback && R_InError < 2 && R_InError == oldInError) {
+	    R_InError = 2;
 	    PROTECT(s = R_GetTracebackOnly(0));
 	    SET_SYMVALUE(install(".Traceback"), s);
 	    /* should have been defineVar
 	       setVar(install(".Traceback"), s, R_GlobalEnv); */
 	    UNPROTECT(1);
-	    inError = oldInError;
+	    R_InError = oldInError;
 	}
     }
 
@@ -1378,14 +1372,14 @@ attribute_hidden SEXP do_warning(SEXP call, SEXP op, SEXP args, SEXP rho)
 
     args = CDR(args);
     if(asLogical(CAR(args))) { /* immediate = TRUE */
-	immediateWarning = 1;
+	R_ImmediateWarning = 1;
     } else
-	immediateWarning = 0;
+	R_ImmediateWarning = 0;
     args = CDR(args);
     if(asLogical(CAR(args))) { /* noBreak = TRUE */
-	noBreakWarning = 1;
+	R_NoBreakWarning = 1;
     } else
-	noBreakWarning = 0;
+	R_NoBreakWarning = 0;
     args = CDR(args);
     if (CAR(args) != R_NilValue) {
 	SETCAR(args, coerceVector(CAR(args), STRSXP));
@@ -1396,8 +1390,8 @@ attribute_hidden SEXP do_warning(SEXP call, SEXP op, SEXP args, SEXP rho)
     }
     else
 	warningcall(c_call, "%s", "");
-    immediateWarning = 0; /* reset to internal calls */
-    noBreakWarning = 0;
+    R_ImmediateWarning = 0; /* reset to internal calls */
+    R_NoBreakWarning = 0;
 
     return CAR(args);
 }

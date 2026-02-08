@@ -110,6 +110,11 @@ static void *mtl_worker_main(void *vp)
 	w->interp.bcpc = NULL;
 	w->interp.bcbody = NULL;
 	w->interp.bcframe = NULL;
+	w->interp.inError = 0;
+	w->interp.inWarning = 0;
+	w->interp.inPrintWarnings = 0;
+	w->interp.immediateWarning = 0;
+	w->interp.noBreakWarning = 0;
 #ifdef R_USE_SIGNALS
 	w->interp.pendingPromises = NULL;
 	RCNTXT *saved_global_context = R_GlobalContext;
@@ -300,6 +305,11 @@ attribute_hidden SEXP do_mtlapply(SEXP call, SEXP op, SEXP args, SEXP rho)
 	workers[t].interp.bcpc = NULL;
 	workers[t].interp.bcbody = NULL;
 	workers[t].interp.bcframe = NULL;
+	workers[t].interp.inError = 0;
+	workers[t].interp.inWarning = 0;
+	workers[t].interp.inPrintWarnings = 0;
+	workers[t].interp.immediateWarning = 0;
+	workers[t].interp.noBreakWarning = 0;
 #ifdef R_USE_SIGNALS
 	workers[t].interp.pendingPromises = NULL;
 	workers[t].interp.toplevelContext = R_ToplevelContext;

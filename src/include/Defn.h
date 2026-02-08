@@ -1581,6 +1581,11 @@ typedef struct {
     void* bcpc;              /* current byte code instruction */
     SEXP bcbody;             /* current byte code object */
     R_bcFrame_type *bcframe; /* bcEval() frame */
+    int inError;             /* error handling state (errors.c) */
+    int inWarning;           /* warning handling state (errors.c) */
+    int inPrintWarnings;     /* printing warnings state (errors.c) */
+    int immediateWarning;    /* options(warn=1) scoped state (errors.c) */
+    int noBreakWarning;      /* warning->error break suppression (errors.c) */
 #ifdef R_USE_SIGNALS
     struct RPRSTACK *pendingPromises; /* pending promise stack */
     RCNTXT* toplevelContext; /* The toplevel context */
@@ -1610,6 +1615,11 @@ extern R_THREAD_LOCAL R_InterpreterState *R_Interpreter INI_as(&R_Interpreter0);
 #define R_BCpc          (R_Interpreter->bcpc)
 #define R_BCbody        (R_Interpreter->bcbody)
 #define R_BCFrame       (R_Interpreter->bcframe)
+#define R_InError       (R_Interpreter->inError)
+#define R_InWarning     (R_Interpreter->inWarning)
+#define R_InPrintWarnings (R_Interpreter->inPrintWarnings)
+#define R_ImmediateWarning (R_Interpreter->immediateWarning)
+#define R_NoBreakWarning (R_Interpreter->noBreakWarning)
 #ifdef R_USE_SIGNALS
 #define R_PendingPromises (R_Interpreter->pendingPromises)
 #define R_ToplevelContext (R_Interpreter->toplevelContext)
