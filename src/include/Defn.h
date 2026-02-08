@@ -1565,6 +1565,7 @@ typedef struct {
     SEXP restartStack;       /* Stack of available restarts */
 #ifdef R_USE_SIGNALS
     RCNTXT* toplevelContext; /* The toplevel context */
+    RCNTXT* globalContext;   /* The global (top) context */
     RCNTXT* sessionContext;  /* The session toplevel context */
     RCNTXT* exitContext;     /* The active context for on.exit processing */
 #endif

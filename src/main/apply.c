@@ -101,6 +101,10 @@ static void *mtl_worker_main(void *vp)
 	w->interp.returnedValue = R_NilValue;
 	w->interp.handlerStack = R_NilValue;
 	w->interp.restartStack = R_NilValue;
+#ifdef R_USE_SIGNALS
+	RCNTXT *saved_global_context = R_GlobalContext;
+	R_GlobalContext = w->interp.globalContext;
+#endif
 
 	SETCAR(w->argcell, VECTOR_ELT(s->XX, i));
 	int err = 0;
@@ -112,9 +116,13 @@ static void *mtl_worker_main(void *vp)
 		const char *msg = R_curErrorBuf();
 		if (msg == NULL) msg = "error";
 		snprintf(s->errmsg, sizeof(s->errmsg), "%s", msg);
-	    }
-	    pthread_mutex_unlock(&s->err_mutex);
+		    }
+		    pthread_mutex_unlock(&s->err_mutex);
 	    R_Interpreter = saved_interp;
+#ifdef R_USE_SIGNALS
+	    w->interp.globalContext = R_GlobalContext;
+	    R_GlobalContext = saved_global_context;
+#endif
 	    pthread_mutex_unlock(&mtl_gil);
 	    break;
 	}
@@ -127,6 +135,10 @@ static void *mtl_worker_main(void *vp)
 
 	s->results[i] = val;
 	R_Interpreter = saved_interp;
+#ifdef R_USE_SIGNALS
+	w->interp.globalContext = R_GlobalContext;
+	R_GlobalContext = saved_global_context;
+#endif
 	pthread_mutex_unlock(&mtl_gil);
     }
 
@@ -271,6 +283,7 @@ attribute_hidden SEXP do_mtlapply(SEXP call, SEXP op, SEXP args, SEXP rho)
 	workers[t].interp.restartStack = R_NilValue;
 #ifdef R_USE_SIGNALS
 	workers[t].interp.toplevelContext = R_ToplevelContext;
+	workers[t].interp.globalContext = R_GlobalContext;
 	workers[t].interp.sessionContext = R_SessionContext;
 	workers[t].interp.exitContext = R_ExitContext;
 #endif
