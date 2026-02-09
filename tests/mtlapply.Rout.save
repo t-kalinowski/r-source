@@ -1,0 +1,43 @@
+
+R version 4.6.0 Under development (unstable) (1970-01-01) -- "Unsuffered Consequences"
+Copyright (C) 1970 The R Foundation for Statistical Computing
+Platform: aarch64-apple-darwin25.2.0
+
+R is free software and comes with ABSOLUTELY NO WARRANTY.
+You are welcome to redistribute it under certain conditions.
+Type 'license()' or 'licence()' for distribution details.
+
+R is a collaborative project with many contributors.
+Type 'contributors()' for more information and
+'citation()' on how to cite R or R packages in publications.
+
+Type 'demo()' for some demos, 'help()' for on-line help, or
+'help.start()' for an HTML browser interface to help.
+Type 'q()' to quit R.
+
+> ## Regression test for experimental mtlapply()
+> ##
+> ## This is intended to catch races in global runtime flags (notably GC enable)
+> ## when evaluating in parallel worker interpreters.
+> 
+> stopifnot(exists("mtlapply"))
+> 
+> # Workload should allocate and also touch global caches (symbols/CHARSXPs).
+> f <- function(i) {
++   s <- paste0("sym-", i, "-", i)
++   sym <- as.name(s)
++   v <- cos(seq_len(i))
++   list(s = s, sym = sym, v = v)
++ }
+> 
+> x <- mtlapply(1:100, f, threads = 4L)
+> stopifnot(length(x) == 100L)
+> stopifnot(isTRUE(all.equal(x[[3]]$v, cos(1:3))))
+> 
+> # The critical regression: a GC after mtlapply() must not wedge the interpreter.
+> invisible(gc())
+> 
+> cat("mtlapply ok\n")
+mtlapply ok
+> 
+> 

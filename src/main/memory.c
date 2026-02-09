@@ -466,14 +466,16 @@ const char *sexptype2char(SEXPTYPE type) {
 
 #define GC_TORTURE
 
-static int gc_pending = 0;
+/* These are per-interpreter state: worker threads must not be able to
+   interfere with main-thread GC scheduling decisions. */
+static R_THREAD_LOCAL int gc_pending = 0;
 #ifdef GC_TORTURE
 /* **** if the user specified a wait before starting to force
    **** collections it might make sense to also wait before starting
    **** to inhibit releases */
-static int gc_force_wait = 0;
-static int gc_force_gap = 0;
-static Rboolean gc_inhibit_release = FALSE;
+static R_THREAD_LOCAL int gc_force_wait = 0;
+static R_THREAD_LOCAL int gc_force_gap = 0;
+static R_THREAD_LOCAL Rboolean gc_inhibit_release = FALSE;
 #define FORCE_GC (gc_pending || (gc_force_wait > 0 ? (--gc_force_wait > 0 ? 0 : (gc_force_wait = gc_force_gap, 1)) : 0))
 #else
 # define FORCE_GC gc_pending

@@ -63,7 +63,7 @@ test-src-reg-1 = array-subset.R \
   r-strict-tst.R \
   reg-IO.R reg-IO2.R reg-plot.R reg-S4.R reg-S4-examples.R reg-BLAS.R
 ## added to in Makefile.win
-test-src-reg-1e =
+test-src-reg-1e = mtlapply.R
 test-src-reg = $(test-src-reg-1) $(test-src-reg-1e)
 ## to be run with $(R2), not forcing LC_ALL=C
 test-src-reg-enc = reg-encodings.R
