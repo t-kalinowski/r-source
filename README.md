@@ -37,6 +37,66 @@ mtlapply(4)     median=   0.232  speedup= 4.17x
 mtlapply(8)     median=   0.118  speedup= 8.19x
 ```
 
+### Same Benchmark As “Real R Code” (`bench::mark`)
+
+If you have the `bench` package installed, you can run essentially the same
+workflow directly from an R session:
+
+```r
+# install.packages("bench")
+library(bench)
+
+N <- 2e6L
+shards <- 64L
+ngroups <- 4096L
+feat_loops <- 40L
+
+# Deterministic data (no RNG, no strings).
+x <- (as.double(seq_len(N) %% 1000L) - 500) / 10
+y <- (as.double((seq_len(N) * 17L) %% 1000L) - 500) / 10
+w <- (as.double((seq_len(N) * 31L) %% 1000L) + 1) / 1000
+grp <- rep_len(seq_len(ngroups), N)
+
+idxs <- lapply(seq_len(shards), function(k) seq.int(k, N, by = shards))
+
+process_shard <- function(idx) {
+  z <- x[idx]
+  yy <- y[idx]
+  ww <- w[idx]
+  for (i in seq_len(feat_loops)) {
+    z <- log1p(abs(z)) + sin(yy + z) * ww + cos(z - yy)
+  }
+
+  g <- grp[idx]
+  s1 <- rowsum.default(z, g, reorder = FALSE)
+  cnt <- tabulate(g, ngroups)
+  top <- sort.int(z, decreasing = TRUE, method = "quick")[1:100]
+
+  list(s1 = as.double(s1), cnt = cnt, top = top)
+}
+
+reduce_results <- function(res) {
+  s1 <- Reduce(`+`, lapply(res, `[[`, "s1"))
+  cnt <- Reduce(`+`, lapply(res, `[[`, "cnt"))
+  mu <- s1 / cnt
+  top_all <- sort.int(unlist(lapply(res, `[[`, "top"), use.names = FALSE),
+                     decreasing = TRUE, method = "quick")[1:100]
+  list(mu = mu, top = top_all)
+}
+
+res <- bench::mark(
+  lapply = reduce_results(lapply(idxs, process_shard)),
+  mtl_2  = reduce_results(mtlapply(idxs, process_shard, threads = 2L)),
+  mtl_4  = reduce_results(mtlapply(idxs, process_shard, threads = 4L)),
+  mtl_8  = reduce_results(mtlapply(idxs, process_shard, threads = 8L)),
+  iterations = 5,
+  check = TRUE
+)
+
+print(res)
+plot(res)
+```
+
 ## Quick Demo
 
 In an R session built from this tree:
@@ -63,4 +123,3 @@ mtlapply(1:100, \(i) cos(seq_len(i)), threads = 8L)
 - `bench/mtlapply_etl.R`: the “real-ish” benchmark above.
 - `tests/mtlapply.R`: small regression tests for `mtlapply()`.
 - `tests/mtlstress.R`: randomized stress testing (not part of `make check`).
-
