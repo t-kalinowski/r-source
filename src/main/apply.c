@@ -247,15 +247,31 @@ static void mtl_pool_init_if_needed(void)
 #ifdef R_USE_SIGNALS
     /* begincontext() assumes R_GlobalContext is non-NULL. Install a
        per-thread dummy toplevel context as the base of the chain. */
-    if (R_GlobalContext == NULL) {
-	R_Toplevel.callflag = CTXT_TOPLEVEL;
-	R_Toplevel.nextcontext = NULL;
-	R_Toplevel.browserfinish = 0;
-	R_ToplevelContext = &R_Toplevel;
-	R_GlobalContext = &R_Toplevel;
-	R_SessionContext = &R_Toplevel;
-	R_ExitContext = NULL;
-    }
+    R_Toplevel.nextcontext = NULL;
+    R_Toplevel.callflag = CTXT_TOPLEVEL;
+    R_Toplevel.cstacktop = 0;
+    R_Toplevel.gcenabled = R_GCEnabled;
+    R_Toplevel.promargs = R_NilValue;
+    R_Toplevel.callfun = R_NilValue;
+    R_Toplevel.call = R_NilValue;
+    R_Toplevel.cloenv = R_BaseEnv;
+    R_Toplevel.sysparent = R_BaseEnv;
+    R_Toplevel.conexit = R_NilValue;
+    R_Toplevel.vmax = NULL;
+    R_Toplevel.nodestack = R_BCNodeStackTop;
+    R_Toplevel.bcprottop = R_BCProtTop;
+    R_Toplevel.cend = NULL;
+    R_Toplevel.cenddata = NULL;
+    R_Toplevel.intsusp = FALSE;
+    R_Toplevel.handlerstack = R_HandlerStack;
+    R_Toplevel.restartstack = R_RestartStack;
+    R_Toplevel.srcref = R_NilValue;
+    R_Toplevel.prstack = NULL;
+    R_Toplevel.returnValue = SEXP_TO_STACKVAL(NULL);
+    R_Toplevel.evaldepth = 0;
+    R_Toplevel.browserfinish = 0;
+    R_GlobalContext = R_ToplevelContext = R_SessionContext = &R_Toplevel;
+    R_ExitContext = NULL;
 #endif
 
 	    /* Disable stack checks in this thread; main's limits are unrelated. */
@@ -386,15 +402,21 @@ static void mtl_pool_init_if_needed(void)
 		    UNPROTECT(1);
 		}
 
-		UNPROTECT(3); /* tail, argcell, fcall */
+			UNPROTECT(3); /* tail, argcell, fcall */
 
-		/* Drop the job-global env so it won't be kept alive across adoption. */
-		w->interp.workerGlobalEnv = NULL;
+			/* Drop the job-global env so it won't be kept alive across adoption. */
+			w->interp.workerGlobalEnv = NULL;
 
-		pthread_mutex_lock(&p->mu);
-		if (p->job == job && p->gen == mygen) {
-		    p->job_done++;
-		    pthread_cond_broadcast(&p->cv);
+			/* Ensure all live worker nodes are moved out of New space before the
+			   main thread adopts this heap. Without this, adoption can move
+			   still-live New-space nodes into the main heap where they may be
+			   overwritten by subsequent allocations before a main GC runs. */
+			R_gc();
+
+			pthread_mutex_lock(&p->mu);
+			if (p->job == job && p->gen == mygen) {
+			    p->job_done++;
+			    pthread_cond_broadcast(&p->cv);
 	}
 	pthread_mutex_unlock(&p->mu);
     }
@@ -632,18 +654,36 @@ attribute_hidden SEXP do_mtlapply(SEXP call, SEXP op, SEXP args, SEXP rho)
 		error("%s", job.errmsg[0] ? job.errmsg : "mtlapply error");
 	    }
 
-	    /* Adopt all worker heaps into main before touching the results. */
-	    for (int t = 0; t < nthreads; t++)
-		R_mtl_adopt_worker_heap(&mtl_pool.workers[t]->interp);
+		    /* Adopt all worker heaps into main before touching the results. */
+		    const char *noadopt = getenv("R_MTL_NOADOPT");
+		    if (noadopt == NULL || *noadopt == '\0') {
+			for (int t = 0; t < nthreads; t++)
+			    R_mtl_adopt_worker_heap(&mtl_pool.workers[t]->interp);
+		    }
 
-	    for (R_xlen_t i = 0; i < n; i++)
-		SET_VECTOR_ELT(ans, i, job.results[i] ? job.results[i] : R_NilValue);
-	    free(job.results);
+		    for (R_xlen_t i = 0; i < n; i++)
+			SET_VECTOR_ELT(ans, i, job.results[i] ? job.results[i] : R_NilValue);
+		    free(job.results);
 
-	    UNPROTECT(nprotect);
-	    return ans;
-	#endif
-	}
+		    /* Optional debugging guard: if enabled, do a few cheap checks to
+		       fail-fast on common mtlapply() corruption modes. */
+		    if (getenv("R_MTL_SANITY")) {
+			if (R_GlobalEnv == NULL || TYPEOF(R_GlobalEnv) != ENVSXP)
+			    R_Suicide("mtlapply: corrupted R_GlobalEnv");
+			if (R_BaseEnv == NULL || TYPEOF(R_BaseEnv) != ENVSXP)
+			    R_Suicide("mtlapply: corrupted R_BaseEnv");
+			if (HASHTAB(R_GlobalEnv) != R_NilValue &&
+			    TYPEOF(HASHTAB(R_GlobalEnv)) != VECSXP)
+			    R_Suicide("mtlapply: corrupted R_GlobalEnv hashtab");
+			if (HASHTAB(R_BaseEnv) != R_NilValue &&
+			    TYPEOF(HASHTAB(R_BaseEnv)) != VECSXP)
+			    R_Suicide("mtlapply: corrupted R_BaseEnv hashtab");
+		    }
+
+		    UNPROTECT(nprotect);
+		    return ans;
+		#endif
+		}
 
 /* .Internal(mtlparallelmax()) : testing/debugging aid.
  *

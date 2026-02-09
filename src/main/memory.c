@@ -1179,7 +1179,27 @@ static R_INLINE R_mtl_heap_state *mtl_sexp_owner(SEXP s)
    to be in a local variable of the caller named named
    forwarded_nodes. */
 
-#define MTL_GC_OWNS_NODE(n) (!R_HEAP->isWorker || mtl_sexp_owner(n) == R_HEAP)
+static R_INLINE int mtl_gc_owns_node(SEXP n)
+{
+    /* In the multi-heap (mtlapply) experiment, a thread can hold pointers to
+       nodes from other heaps (e.g. a worker referencing main-heap nodes read-
+       only, or temporarily switching to the main heap to intern CHARSXPs).
+
+       The collector must never treat a node from another heap as collectible
+       state for the current heap.
+
+       For the main heap (isWorker==0), nodes not managed by the page-owner
+       mechanism (owner==NULL) are assumed to be main-heap owned.
+
+       For worker heaps, owner==NULL must be treated as "not owned": workers
+       may reference main-heap nodes that do not have an owner mapping. */
+    R_mtl_heap_state *owner = mtl_sexp_owner(n);
+    if (R_HEAP->isWorker)
+	return owner == R_HEAP;
+    return owner == NULL || owner == R_HEAP;
+}
+
+#define MTL_GC_OWNS_NODE(n) (mtl_gc_owns_node(n))
 
 #define MARK_AND_UNSNAP_NODE(s) do {		\
 	SEXP mu__n__ = (s);			\
@@ -1197,11 +1217,28 @@ static R_INLINE R_mtl_heap_state *mtl_sexp_owner(SEXP s)
   } \
 } while (0)
 
+/* When scanning roots on the main heap, worker interpreter stacks may still
+   contain worker-owned nodes (e.g. regular evaluation temporaries) even if a
+   worker temporarily switches its heap pointer to the main heap in order to
+   intern into global tables (CHARSXP cache, symbol table).
+
+   Forwarding a node from the wrong heap is unsafe. Use this wrapper for
+   interpreter-local stacks/contexts so we only forward nodes owned by the
+   heap currently being collected. */
+#define FORWARD_NODE_IN_CURRENT_HEAP(s) do {			\
+    SEXP fnh__n__ = (s);					\
+    if (fnh__n__) {						\
+	R_mtl_heap_state *fnh__owner__ = mtl_sexp_owner(fnh__n__);	\
+	if (fnh__owner__ == NULL || fnh__owner__ == R_HEAP)	\
+	    FORWARD_NODE(fnh__n__);				\
+    }								\
+} while (0)
+
 #define PROCESS_ONE_NODE(s) do {				\
-	SEXP pn__n__ = (s);					\
-	int __cls__ = NODE_CLASS(pn__n__);			\
-	int __gen__ = NODE_GENERATION(pn__n__);			\
-	SNAP_NODE(pn__n__, R_GenHeap[__cls__].Old[__gen__]);	\
+		SEXP pn__n__ = (s);					\
+		int __cls__ = NODE_CLASS(pn__n__);			\
+		int __gen__ = NODE_GENERATION(pn__n__);			\
+		SNAP_NODE(pn__n__, R_GenHeap[__cls__].Old[__gen__]);	\
 	R_GenHeap[__cls__].OldCount[__gen__]++;			\
     } while (0)
 
@@ -2310,15 +2347,15 @@ static int RunGenCollect(R_size_t size_needed)
 		   Independent mtlapply() worker heaps are collected separately. */
 		if (ist->heap != R_HEAP)
 		    continue;
-		FORWARD_NODE(ist->warnings);          /* Warnings, if any */
-		FORWARD_NODE(ist->returnedValue);
-		FORWARD_NODE(ist->handlerStack);      /* Condition handler stack */
-		FORWARD_NODE(ist->restartStack);      /* Available restarts stack */
-		FORWARD_NODE(ist->workerGlobalEnv);   /* Worker global env (may be NULL) */
-		FORWARD_NODE(ist->bcbody);            /* Current byte code object */
-		FORWARD_NODE(ist->parseErrorFile);    /* Parse error source file (may be NULL) */
+		FORWARD_NODE_IN_CURRENT_HEAP(ist->warnings);          /* Warnings, if any */
+		FORWARD_NODE_IN_CURRENT_HEAP(ist->returnedValue);
+		FORWARD_NODE_IN_CURRENT_HEAP(ist->handlerStack);      /* Condition handler stack */
+		FORWARD_NODE_IN_CURRENT_HEAP(ist->restartStack);      /* Available restarts stack */
+		FORWARD_NODE_IN_CURRENT_HEAP(ist->workerGlobalEnv);   /* Worker global env (may be NULL) */
+		FORWARD_NODE_IN_CURRENT_HEAP(ist->bcbody);            /* Current byte code object */
+		FORWARD_NODE_IN_CURRENT_HEAP(ist->parseErrorFile);    /* Parse error source file (may be NULL) */
 		if (ist->currentExpr)                 /* Current expression */
-		    FORWARD_NODE(ist->currentExpr);
+		    FORWARD_NODE_IN_CURRENT_HEAP(ist->currentExpr);
 	    }
 	    UNLOCK_INTERP_REGISTRY();
 
@@ -2344,26 +2381,26 @@ static int RunGenCollect(R_size_t size_needed)
 		    continue;
 #ifdef R_USE_SIGNALS
 		for (ctxt = ist->globalContext; ctxt != NULL; ctxt = ctxt->nextcontext) {
-		    FORWARD_NODE(ctxt->conexit);       /* on.exit expressions */
-		    FORWARD_NODE(ctxt->promargs);	   /* promises supplied to closure */
-		    FORWARD_NODE(ctxt->callfun);       /* the closure called */
-		    FORWARD_NODE(ctxt->sysparent);     /* calling environment */
-		    FORWARD_NODE(ctxt->call);          /* the call */
-		    FORWARD_NODE(ctxt->cloenv);        /* the closure environment */
-		    FORWARD_NODE(ctxt->bcbody);        /* the current byte code object */
-		    FORWARD_NODE(ctxt->handlerstack);  /* the condition handler stack */
-		    FORWARD_NODE(ctxt->restartstack);  /* the available restarts stack */
-		    FORWARD_NODE(ctxt->srcref);	   /* the current source reference */
+		    FORWARD_NODE_IN_CURRENT_HEAP(ctxt->conexit);       /* on.exit expressions */
+		    FORWARD_NODE_IN_CURRENT_HEAP(ctxt->promargs);	   /* promises supplied to closure */
+		    FORWARD_NODE_IN_CURRENT_HEAP(ctxt->callfun);       /* the closure called */
+		    FORWARD_NODE_IN_CURRENT_HEAP(ctxt->sysparent);     /* calling environment */
+		    FORWARD_NODE_IN_CURRENT_HEAP(ctxt->call);          /* the call */
+		    FORWARD_NODE_IN_CURRENT_HEAP(ctxt->cloenv);        /* the closure environment */
+		    FORWARD_NODE_IN_CURRENT_HEAP(ctxt->bcbody);        /* the current byte code object */
+		    FORWARD_NODE_IN_CURRENT_HEAP(ctxt->handlerstack);  /* the condition handler stack */
+		    FORWARD_NODE_IN_CURRENT_HEAP(ctxt->restartstack);  /* the available restarts stack */
+		    FORWARD_NODE_IN_CURRENT_HEAP(ctxt->srcref);	   /* the current source reference */
 		    if (ctxt->returnValue.tag == 0)    /* For on.exit calls */
-			FORWARD_NODE(ctxt->returnValue.u.sxpval);
+			FORWARD_NODE_IN_CURRENT_HEAP(ctxt->returnValue.u.sxpval);
 		}
 #endif
 
 		for (int j = 0; j < ist->ppStackTop; j++) /* Protected pointers */
-		    FORWARD_NODE(ist->ppStack[j]);
+		    FORWARD_NODE_IN_CURRENT_HEAP(ist->ppStack[j]);
 
-		FORWARD_NODE(ist->preciousList);
-		FORWARD_NODE(ist->vStack);	   /* R_alloc stack */
+		FORWARD_NODE_IN_CURRENT_HEAP(ist->preciousList);
+		FORWARD_NODE_IN_CURRENT_HEAP(ist->vStack);	   /* R_alloc stack */
 
 		if (ist->bcNodeStackBase && ist->bcNodeStackTop) {
 		    for (R_bcstack_t *sp = ist->bcNodeStackBase;
@@ -2372,7 +2409,7 @@ static int RunGenCollect(R_size_t size_needed)
 			if (sp->tag == RAWMEM_TAG)
 			    sp += sp->u.ival;
 			else if (sp->tag == 0 || IS_PARTIAL_SXP_TAG(sp->tag))
-			    FORWARD_NODE(sp->u.sxpval);
+			    FORWARD_NODE_IN_CURRENT_HEAP(sp->u.sxpval);
 		    }
 		}
 	    }
@@ -3032,9 +3069,8 @@ attribute_hidden void R_mtl_adopt_worker_heap(R_InterpreterState *st)
     if (!src->isWorker)
 	return;
 
-    /* NOTE: We currently avoid running a worker-local GC here.
-       The intended design is to run a worker-only GC first to drop garbage,
-       then splice. For now we only transfer and let the main GC clean up. */
+    /* The worker thread runs a worker-local GC at the end of each job to move
+       all live nodes out of New space before adoption. */
 
     /* Now splice lists into the main heap. */
     R_mtl_heap_lock();
