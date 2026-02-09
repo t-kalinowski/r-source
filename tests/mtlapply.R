@@ -26,6 +26,21 @@ stopifnot(grepl("superassignment is not allowed", conditionMessage(attr(e_sup, "
 tf <- unlist(mtlapply(1:20, function(i) tempfile(pattern = "mtl"), threads = 4L), use.names = FALSE)
 stopifnot(length(unique(tf)) == length(tf))
 
+## CHARSXP creation/interning must be safe from workers.
+x_chr <- unlist(mtlapply(1:50, \(i) paste0("s", i), threads = 4L), use.names = FALSE)
+y_chr <- unlist(lapply(1:50, \(i) paste0("s", i)), use.names = FALSE)
+stopifnot(identical(x_chr, y_chr))
+
+## Symbol interning must be safe from workers.
+x_sym <- mtlapply(1:50, \(i) as.name(paste0("sym", i)), threads = 4L)
+y_sym <- lapply(1:50, \(i) as.name(paste0("sym", i)))
+stopifnot(identical(vapply(x_sym, as.character, ""), vapply(y_sym, as.character, "")))
+
+## Weak references/finalizers are not supported from workers (yet).
+e_fin <- try(mtlapply(1:1, \(i) { e <- new.env(); reg.finalizer(e, \(x) NULL); NULL }, threads = 2L), silent = TRUE)
+stopifnot(inherits(e_fin, "try-error"))
+stopifnot(grepl("weak references/finalizers are not supported", conditionMessage(attr(e_fin, "condition"))))
+
 ## Errors in workers should not leave shared internal locks in a stuck state.
 e2 <- try(mtlapply(1:4, \(i) if (i == 2L) stop("boom") else i, threads = 2L), silent = TRUE)
 stopifnot(inherits(e2, "try-error"))

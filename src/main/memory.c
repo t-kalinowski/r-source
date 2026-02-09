@@ -847,6 +847,27 @@ struct R_mtl_heap_state_ {
 
 static R_mtl_heap_state R_MainHeapState;
 
+/* Some global intern tables (symbols, CHARSXP cache) must only contain
+ * main-heap nodes, since the main GC traces them. For worker threads we
+ * temporarily switch the current interpreter heap pointer to the main heap
+ * while holding the heap lock, so any nodes allocated for those tables are
+ * main-owned. */
+attribute_hidden struct R_mtl_heap_state_ *R_mtl_switch_to_main_heap(R_InterpreterState *st)
+{
+    if (st == NULL)
+	return NULL;
+    struct R_mtl_heap_state_ *saved = st->heap;
+    st->heap = &R_MainHeapState;
+    return saved;
+}
+
+attribute_hidden void R_mtl_restore_heap(R_InterpreterState *st, struct R_mtl_heap_state_ *saved)
+{
+    if (st == NULL)
+	return;
+    st->heap = saved;
+}
+
 #define R_HEAP (R_Interpreter->heap)
 #define R_GenHeap (R_HEAP->GenHeap)
 #define R_NodesInUse (R_HEAP->NodesInUse)
@@ -1825,6 +1846,9 @@ static SEXP MakeCFinalizer(R_CFinalizer_t cfun);
 static SEXP NewWeakRef(SEXP key, SEXP val, SEXP fin, Rboolean onexit)
 {
     SEXP w;
+
+    if (R_Interpreter != NULL && R_Interpreter->isMTLWorker)
+	error(_("weak references/finalizers are not supported on mtlapply() worker threads"));
 
     switch (TYPEOF(key)) {
     case NILSXP:
@@ -3005,28 +3029,21 @@ attribute_hidden void R_mtl_adopt_worker_heap(R_InterpreterState *st)
 #endif
 	}
 
-	/* Move any remaining nodes in New space (typically free nodes/pages). */
-	if (NEXT_NODE(src->GenHeap[i].New) != src->GenHeap[i].New) {
-	    if (i >= CUSTOM_NODE_CLASS) {
-		for (SEXP s = NEXT_NODE(src->GenHeap[i].New);
-		     s != src->GenHeap[i].New;
-		     s = NEXT_NODE(s))
-		    mtl_large_owner_set(s, dst);
-	    }
-	    BULK_MOVE(src->GenHeap[i].New, dst->GenHeap[i].New);
-	    /* If the main heap had no free nodes, enable allocation from the
-	       newly-added free nodes without forcing a new page. */
-#ifdef HAVE_PTHREAD
-	    if (atomic_load_explicit(&dst->GenHeap[i].Free, memory_order_relaxed) ==
-		dst->GenHeap[i].New)
-		atomic_store_explicit(&dst->GenHeap[i].Free,
-				      NEXT_NODE(dst->GenHeap[i].New),
-				      memory_order_relaxed);
-#else
-	    if (dst->GenHeap[i].Free == dst->GenHeap[i].New)
-		dst->GenHeap[i].Free = NEXT_NODE(dst->GenHeap[i].New);
-#endif
-	}
+		/* Move any nodes still linked in New space (may include both allocated
+		   and free nodes, depending on whether a GC has run in the worker).
+		   We intentionally do not try to merge Free cursors here: the New-space
+		   free boundary is defined relative to the heap's peg node, and mixing
+		   cursors across pegs is subtle. Free nodes transferred this way will
+		   become available after the next main-heap GC resets the Free cursor. */
+		if (NEXT_NODE(src->GenHeap[i].New) != src->GenHeap[i].New) {
+		    if (i >= CUSTOM_NODE_CLASS) {
+			for (SEXP s = NEXT_NODE(src->GenHeap[i].New);
+			     s != src->GenHeap[i].New;
+			     s = NEXT_NODE(s))
+			    mtl_large_owner_set(s, dst);
+		    }
+		    BULK_MOVE(src->GenHeap[i].New, dst->GenHeap[i].New);
+		}
 
 	/* AllocCount is a heuristic; keep the larger of the two. */
 	if (dst->GenHeap[i].AllocCount < src->GenHeap[i].AllocCount)

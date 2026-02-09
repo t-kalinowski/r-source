@@ -4300,7 +4300,7 @@ static void reportInvalidString(SEXP cval, int actionWhenInvalid)
    the global CHARSXP cache, R_StringHash, it is returned.  Otherwise,
    a new CHARSXP is created, added to the cache and then returned. */
 
-SEXP mkCharLenCE(const char *name, int len, cetype_t enc)
+static SEXP mkCharLenCE_impl(const char *name, int len, cetype_t enc)
 {
     SEXP cval, chain;
     unsigned int hashcode;
@@ -4469,6 +4469,47 @@ SEXP mkCharLenCE(const char *name, int len, cetype_t enc)
 	UNPROTECT(1);
     }
     return cval;
+}
+
+typedef struct {
+    const char *name;
+    int len;
+    cetype_t enc;
+    R_InterpreterState *st;
+    struct R_mtl_heap_state_ *saved_heap;
+} mtl_mkchar_mainheap_data_t;
+
+static SEXP mtl_mkCharLenCE_on_main_heap(void *data)
+{
+    mtl_mkchar_mainheap_data_t *d = (mtl_mkchar_mainheap_data_t *) data;
+    d->saved_heap = R_mtl_switch_to_main_heap(d->st);
+    return mkCharLenCE_impl(d->name, d->len, d->enc);
+}
+
+static void mtl_mkCharLenCE_on_main_heap_cleanup(void *data)
+{
+    mtl_mkchar_mainheap_data_t *d = (mtl_mkchar_mainheap_data_t *) data;
+    R_mtl_restore_heap(d->st, d->saved_heap);
+    R_mtl_heap_unlock();
+}
+
+SEXP mkCharLenCE(const char *name, int len, cetype_t enc)
+{
+    if (R_Interpreter != NULL && R_Interpreter->isMTLWorker) {
+	/* The CHARSXP cache (R_StringHash) is global and traced by the main GC,
+	   so it must only contain main-heap nodes. */
+	R_mtl_heap_lock();
+	mtl_mkchar_mainheap_data_t d = {
+	    .name = name,
+	    .len = len,
+	    .enc = enc,
+	    .st = R_Interpreter,
+	    .saved_heap = NULL,
+	};
+	return R_ExecWithCleanup(mtl_mkCharLenCE_on_main_heap, &d,
+				 mtl_mkCharLenCE_on_main_heap_cleanup, &d);
+    }
+    return mkCharLenCE_impl(name, len, enc);
 }
 
 

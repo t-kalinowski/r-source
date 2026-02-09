@@ -1644,6 +1644,10 @@ attribute_hidden void R_mtl_global_lock(void);
 attribute_hidden void R_mtl_global_unlock(void);
 attribute_hidden void R_mtl_global_unlock_all(void);
 
+/* Temporarily route allocations to the main heap (for global intern tables). */
+attribute_hidden struct R_mtl_heap_state_ *R_mtl_switch_to_main_heap(R_InterpreterState *st);
+attribute_hidden void R_mtl_restore_heap(R_InterpreterState *st, struct R_mtl_heap_state_ *saved);
+
 attribute_hidden void R_mtl_adopt_worker_heap(R_InterpreterState *st);
 
 /* Thread-local storage (TLS) support for internal multi-threading work. */

@@ -1256,7 +1256,7 @@ attribute_hidden void InitNames(void)
 /*  If "name" is not found, it is installed in the symbol table.
     The symbol corresponding to the string "name" is returned. */
 
-SEXP install(const char *name)
+static SEXP install_impl(const char *name)
 {
     SEXP sym;
     int i, hashcode;
@@ -1279,11 +1279,74 @@ SEXP install(const char *name)
     return (sym);
 }
 
+typedef struct {
+    const char *name;
+    R_InterpreterState *st;
+    struct R_mtl_heap_state_ *saved_heap;
+} mtl_install_mainheap_data_t;
+
+static SEXP mtl_install_on_main_heap(void *data)
+{
+    mtl_install_mainheap_data_t *d = (mtl_install_mainheap_data_t *) data;
+    d->saved_heap = R_mtl_switch_to_main_heap(d->st);
+    return install_impl(d->name);
+}
+
+static void mtl_install_on_main_heap_cleanup(void *data)
+{
+    mtl_install_mainheap_data_t *d = (mtl_install_mainheap_data_t *) data;
+    R_mtl_restore_heap(d->st, d->saved_heap);
+    R_mtl_heap_unlock();
+}
+
+static SEXP installNoTrChar_impl(SEXP charSXP);
+
+typedef struct {
+    SEXP charSXP;
+    R_InterpreterState *st;
+    struct R_mtl_heap_state_ *saved_heap;
+} mtl_installnotr_mainheap_data_t;
+
+static SEXP mtl_installNoTrChar_on_main_heap(void *data)
+{
+    mtl_installnotr_mainheap_data_t *d = (mtl_installnotr_mainheap_data_t *) data;
+    d->saved_heap = R_mtl_switch_to_main_heap(d->st);
+    /* Ensure the symbol printname (a CHARSXP) is main-heap owned, since the
+       symbol is interned in the global symbol table traced by the main GC. */
+    PROTECT(d->charSXP);
+    SEXP mainChar = mkCharLenCE(CHAR(d->charSXP), LENGTH(d->charSXP), getCharCE(d->charSXP));
+    SEXP ans = installNoTrChar_impl(mainChar);
+    UNPROTECT(1);
+    return ans;
+}
+
+static void mtl_installNoTrChar_on_main_heap_cleanup(void *data)
+{
+    mtl_installnotr_mainheap_data_t *d = (mtl_installnotr_mainheap_data_t *) data;
+    R_mtl_restore_heap(d->st, d->saved_heap);
+    R_mtl_heap_unlock();
+}
+
+SEXP install(const char *name)
+{
+    if (R_Interpreter != NULL && R_Interpreter->isMTLWorker) {
+	R_mtl_heap_lock();
+	mtl_install_mainheap_data_t d = {
+	    .name = name,
+	    .st = R_Interpreter,
+	    .saved_heap = NULL,
+	};
+	return R_ExecWithCleanup(mtl_install_on_main_heap, &d,
+				 mtl_install_on_main_heap_cleanup, &d);
+    }
+    return install_impl(name);
+}
+
 /* This function is equivalent to install(CHAR(charSXP)), but faster.
    Like the equivalent code pattern, it discards the encoding information,
    hence in almost all cases installTrChar should be used, instead. */
 attribute_hidden
-SEXP installNoTrChar(SEXP charSXP)
+static SEXP installNoTrChar_impl(SEXP charSXP)
 {
     SEXP sym;
     int i, hashcode;
@@ -1321,6 +1384,22 @@ SEXP installNoTrChar(SEXP charSXP)
 
     R_SymbolTable[i] = CONS(sym, R_SymbolTable[i]);
     return (sym);
+}
+
+attribute_hidden
+SEXP installNoTrChar(SEXP charSXP)
+{
+    if (R_Interpreter != NULL && R_Interpreter->isMTLWorker) {
+	R_mtl_heap_lock();
+	mtl_installnotr_mainheap_data_t d = {
+	    .charSXP = charSXP,
+	    .st = R_Interpreter,
+	    .saved_heap = NULL,
+	};
+	return R_ExecWithCleanup(mtl_installNoTrChar_on_main_heap, &d,
+				 mtl_installNoTrChar_on_main_heap_cleanup, &d);
+    }
+    return installNoTrChar_impl(charSXP);
 }
 
 #define maxLength 512
