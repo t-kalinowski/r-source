@@ -1219,6 +1219,13 @@ static R_INLINE SEXP findGlobalVar(SEXP symbol)
 }
 #endif
 
+static R_INLINE SEXP mtl_translate_globalenv(SEXP rho)
+{
+    if (R_Interpreter != NULL && R_Interpreter->isMTLWorker && rho == R_GlobalEnv)
+	return R_Interpreter->workerGlobalEnv;
+    return rho;
+}
+
 attribute_hidden SEXP R_findVar(SEXP symbol, SEXP rho)
 {
     SEXP vl;
@@ -1228,6 +1235,8 @@ attribute_hidden SEXP R_findVar(SEXP symbol, SEXP rho)
 
     if (!isEnvironment(rho))
 	error(_("argument to '%s' is not an environment"), "findVar");
+
+    rho = mtl_translate_globalenv(rho);
 
 #ifdef USE_GLOBAL_CACHE
     /* This first loop handles local frames, if there are any.  It
@@ -1266,6 +1275,8 @@ static SEXP findVarLoc(SEXP symbol, SEXP rho)
 
     if (!isEnvironment(rho))
 	error(_("argument to '%s' is not an environment"), "findVarLoc");
+
+    rho = mtl_translate_globalenv(rho);
 
 #ifdef USE_GLOBAL_CACHE
     /* This first loop handles local frames, if there are any.  It
@@ -1624,6 +1635,8 @@ void defineVar(SEXP symbol, SEXP value, SEXP rho)
     int hashcode;
     SEXP frame, c;
 
+    rho = mtl_translate_globalenv(rho);
+
     if (value == R_UnboundValue)
 	error("attempt to bind a variable to R_UnboundValue");
     /* R_DirtyImage should only be set if assigning to R_GlobalEnv. */
@@ -1827,12 +1840,13 @@ static SEXP setVarInFrame(SEXP rho, SEXP symbol, SEXP value)
 void setVar(SEXP symbol, SEXP value, SEXP rho)
 {
     SEXP vl;
+    rho = mtl_translate_globalenv(rho);
     while (rho != R_EmptyEnv) {
 	vl = setVarInFrame(rho, symbol, value);
 	if (vl != R_NilValue) return;
 	rho = ENCLOS(rho);
     }
-    defineVar(symbol, value, R_GlobalEnv);
+    defineVar(symbol, value, mtl_translate_globalenv(R_GlobalEnv));
 }
 
 
