@@ -1186,9 +1186,19 @@ static SEXP findGlobalVarLoc(SEXP symbol)
 {
     SEXP vl, rho;
     Rboolean canCache = TRUE;
-    vl = R_GetGlobalCacheLoc(symbol);
-    if (vl != R_UnboundValue)
-	return vl;
+    /* The global cache is a mutable global hash table (R_GlobalCache).  A
+       worker thread must never mutate it, since that would allocate and splice
+       worker-heap nodes into a structure traced by the main GC, corrupting the
+       session once the worker heap is collected/adopted.  For now, workers
+       simply bypass the cache. */
+    if (R_Interpreter != NULL && R_Interpreter->isMTLWorker) {
+	vl = R_UnboundValue;
+	canCache = FALSE;
+    } else {
+	vl = R_GetGlobalCacheLoc(symbol);
+	if (vl != R_UnboundValue)
+	    return vl;
+    }
     for (rho = R_GlobalEnv; rho != R_EmptyEnv; rho = ENCLOS(rho)) {
 	if (rho != R_BaseEnv) { /* we won't have R_BaseNamespace */
 	    vl = findVarLocInFrame(rho, symbol, &canCache);
@@ -1199,7 +1209,7 @@ static SEXP findGlobalVarLoc(SEXP symbol)
 	    }
 	}
 	else {
-	    if (SYMVALUE(symbol) != R_UnboundValue)
+	    if (canCache && SYMVALUE(symbol) != R_UnboundValue)
 		R_AddGlobalCache(symbol, symbol);
 	    return symbol;
 	}
@@ -4491,18 +4501,25 @@ typedef struct {
     cetype_t enc;
     R_InterpreterState *st;
     struct R_mtl_heap_state_ *saved_heap;
+    int saved_gc_enabled;
 } mtl_mkchar_mainheap_data_t;
 
 static SEXP mtl_mkCharLenCE_on_main_heap(void *data)
 {
     mtl_mkchar_mainheap_data_t *d = (mtl_mkchar_mainheap_data_t *) data;
     d->saved_heap = R_mtl_switch_to_main_heap(d->st);
+    /* Avoid running the main GC on a worker thread while interning into the
+       global CHARSXP cache. This is a temporary safety measure: the main GC
+       is not yet able to safely stop/synchronize all interpreter threads. */
+    d->saved_gc_enabled = R_GCEnabled;
+    R_GCEnabled = FALSE;
     return mkCharLenCE_impl(d->name, d->len, d->enc);
 }
 
 static void mtl_mkCharLenCE_on_main_heap_cleanup(void *data)
 {
     mtl_mkchar_mainheap_data_t *d = (mtl_mkchar_mainheap_data_t *) data;
+    R_GCEnabled = d->saved_gc_enabled;
     R_mtl_restore_heap(d->st, d->saved_heap);
     R_mtl_heap_unlock();
 }
@@ -4519,6 +4536,7 @@ SEXP mkCharLenCE(const char *name, int len, cetype_t enc)
 	    .enc = enc,
 	    .st = R_Interpreter,
 	    .saved_heap = NULL,
+	    .saved_gc_enabled = 1,
 	};
 	return R_ExecWithCleanup(mtl_mkCharLenCE_on_main_heap, &d,
 				 mtl_mkCharLenCE_on_main_heap_cleanup, &d);
