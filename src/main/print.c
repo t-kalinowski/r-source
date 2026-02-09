@@ -73,8 +73,16 @@
 #include <trioremap.h> /* for %lld */
 #endif
 
-/* Global print parameter struct: */
-R_PrintData R_print;
+/* Global print parameter struct:
+ *
+ * In a multi-threaded interpreter experiment (mtlapply), many primitives
+ * (e.g. paste/paste0) call PrintDefaults()/PrintInit() to set printing
+ * defaults before formatting. Keeping this state global causes data races and
+ * occasional crashes when evaluated concurrently in worker threads.
+ *
+ * Make it thread-local so each interpreter thread has its own printing state.
+ */
+R_THREAD_LOCAL R_PrintData R_print;
 
 static void printAttributes(SEXP, R_PrintData *, bool);
 static void PrintObject(SEXP, R_PrintData *);
@@ -82,7 +90,7 @@ static void PrintObject(SEXP, R_PrintData *);
 
 #define TAGBUFLEN 256
 #define TAGBUFLEN0 (TAGBUFLEN + 6)
-static char tagbuf[TAGBUFLEN0 * 2]; /* over-allocate to allow overflow check */
+static R_THREAD_LOCAL char tagbuf[TAGBUFLEN0 * 2]; /* over-allocate to allow overflow check */
 
 attribute_hidden void PrintInit(R_PrintData *data, SEXP env)
 {

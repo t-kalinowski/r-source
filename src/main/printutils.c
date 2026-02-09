@@ -1011,7 +1011,7 @@ void Rvprintf(const char *format, va_list arg)
 attribute_hidden
 int REvprintf_internal(const char *format, va_list arg)
 {
-    static char *malloc_buf = NULL;
+    static R_THREAD_LOCAL char *malloc_buf = NULL;
     int res;
 
     if (malloc_buf) {

@@ -280,7 +280,7 @@ LDOUBLE private_nearbyintl(LDOUBLE x)
 #define NB 1000
 static void format_via_sprintf(double r, int d, int *kpower, int *nsig)
 {
-    static char buff[NB];
+    static R_THREAD_LOCAL char buff[NB];
     int i;
     snprintf(buff, NB, "%#.*e", d - 1, r);
     *kpower = (int) strtol(buff + (d + 2), NULL, 10);

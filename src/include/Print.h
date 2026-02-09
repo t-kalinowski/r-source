@@ -43,7 +43,7 @@
 /* For backward compatibility */
 #define R_print_par_t R_PrintData
 
-extern R_print_par_t R_print;
+extern R_THREAD_LOCAL R_print_par_t R_print;
 
 /* Computation of printing formats */
 void formatRaw(const Rbyte *, R_xlen_t, int *);

@@ -513,13 +513,13 @@ attribute_hidden SEXP do_format(SEXP call, SEXP op, SEXP args, SEXP env)
     char *my_OutDec;
     if(STRING_ELT(CAR(args), 0) == NA_STRING)
 	my_OutDec = OutDec; // default
-    else {
-	static char sdec[11];
+	    else {
+		static R_THREAD_LOCAL char sdec[11];
 #undef  _WARN_decimal_mark_non_1 /* as we now warn in EncodeReal0() */
 #ifdef  _WARN_decimal_mark_non_1
- 	if(R_nchar(STRING_ELT(CAR(args), 0), Chars,
-		   /* allowNA = */ FALSE, /* keepNA = */ FALSE,
-		   "decimal.mark") != 1) // will become an error
+	 	if(R_nchar(STRING_ELT(CAR(args), 0), Chars,
+			   /* allowNA = */ FALSE, /* keepNA = */ FALSE,
+			   "decimal.mark") != 1) // will become an error
 	    warning(_("'decimal.mark' must be a string of one character"));
 #endif
 	strncpy(sdec, CHAR(STRING_ELT(CAR(args), 0)), 10);
