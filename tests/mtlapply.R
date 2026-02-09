@@ -22,7 +22,7 @@ stopifnot(inherits(e_sup, "try-error"))
 stopifnot(identical(g, 0L))
 stopifnot(grepl("superassignment is not allowed", conditionMessage(attr(e_sup, "condition"))))
 
-## tempfile() must be safe to call from workers (serializes via global lock).
+## tempfile() must be safe to call from workers.
 tf <- unlist(mtlapply(1:20, function(i) tempfile(pattern = "mtl"), threads = 4L), use.names = FALSE)
 stopifnot(length(unique(tf)) == length(tf))
 
@@ -53,3 +53,34 @@ invisible(.Internal(mtlparallelmax()))
 invisible(mtlapply(rep(100000L, 8L), \(i) cos(seq(i)), threads = 4L))
 m <- .Internal(mtlparallelmax())
 stopifnot(m >= 2L)
+
+## .Call() from worker threads is supported, but serialized under the global lock.
+## Build a tiny shared library in a tempdir on the main thread, then call it from workers.
+td <- tempfile("mtlcall-")
+dir.create(td)
+ofile <- file.path(td, "mtlcall.c")
+writeLines(c(
+  "#include <R.h>",
+  "#include <Rinternals.h>",
+  "",
+  "SEXP mtlcall_alloc_int(SEXP x) {",
+  "  SEXP ans = PROTECT(allocVector(INTSXP, 1));",
+  "  INTEGER(ans)[0] = asInteger(x) + 1;",
+  "  UNPROTECT(1);",
+  "  return ans;",
+  "}"
+), ofile)
+oldwd <- getwd()
+setwd(td)
+on.exit(setwd(oldwd), add = TRUE)
+cmd <- file.path(R.home("bin"), "R")
+out <- system2(cmd, c("CMD", "SHLIB", basename(ofile)), stdout = TRUE, stderr = TRUE)
+st <- attr(out, "status")
+if (!is.null(st) && st != 0)
+    stop(paste(out, collapse = "\n"))
+dynlib <- Sys.glob(paste0("mtlcall", .Platform$dynlib.ext))
+stopifnot(length(dynlib) == 1)
+dyn.load(dynlib)
+x_call <- mtlapply(1:50, \(i) .Call("mtlcall_alloc_int", i), threads = 4L)
+y_call <- lapply(1:50, \(i) .Call("mtlcall_alloc_int", i))
+stopifnot(identical(x_call, y_call))
