@@ -1710,7 +1710,7 @@ R_FindNativeSymbolFromDLL(char *name, DllReference *dll,
 #define FILL 0xee
 #define NG 64
 
-attribute_hidden SEXP do_dotCode(SEXP call, SEXP op, SEXP args, SEXP env)
+static SEXP do_dotCode_impl(SEXP call, SEXP op, SEXP args, SEXP env)
 {
     void **cargs, **cargs0 = NULL /* -Wall */;
     int naok, na, nargs, Fort;
@@ -2787,4 +2787,30 @@ attribute_hidden SEXP do_dotCode(SEXP call, SEXP op, SEXP args, SEXP env)
     UNPROTECT(1);
     vmaxset(vmax);
     return ans;
+}
+
+typedef struct {
+    SEXP call, op, args, env;
+} mtl_dotcode_data_t;
+
+static SEXP mtl_dotcode_run(void *data)
+{
+    mtl_dotcode_data_t *d = (mtl_dotcode_data_t *) data;
+    return do_dotCode_impl(d->call, d->op, d->args, d->env);
+}
+
+static void mtl_dotcode_cleanup(void *data)
+{
+    (void) data;
+    R_mtl_global_unlock();
+}
+
+attribute_hidden SEXP do_dotCode(SEXP call, SEXP op, SEXP args, SEXP env)
+{
+    if (R_Interpreter != NULL && R_Interpreter->isMTLWorker) {
+	R_mtl_global_lock();
+	mtl_dotcode_data_t d = { .call = call, .op = op, .args = args, .env = env };
+	return R_ExecWithCleanup(mtl_dotcode_run, &d, mtl_dotcode_cleanup, &d);
+    }
+    return do_dotCode_impl(call, op, args, env);
 }
