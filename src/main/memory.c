@@ -4259,6 +4259,13 @@ static void R_gc_internal(R_size_t size_needed)
 	  R_VSize += expand;
       }
 
+      /* Keep the main heap's trigger sizes in sync if we adjusted them while
+         GC was disabled/in progress. */
+      if (R_Interpreter != NULL && R_Interpreter->heap != NULL && !R_HEAP->isWorker) {
+	  R_NSize_heap = R_NSize;
+	  R_VSize_heap = R_VSize;
+      }
+
       gc_pending = TRUE;
       return;
     }
