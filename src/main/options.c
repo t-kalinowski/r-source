@@ -565,7 +565,8 @@ attribute_hidden SEXP do_options(SEXP call, SEXP op, SEXP args, SEXP rho)
     }
 
     if (R_Interpreter != NULL && !R_Interpreter->allowOptionsSet &&
-	options_wants_set(args))
+	options_wants_set(args) &&
+	!(R_Interpreter->isMTLWorker && R_mtl_global_is_locked()))
 	errorcall(call, _("cannot set options from mtlapply() worker threads"));
 
     /* The arguments to "options" can either be a sequence of

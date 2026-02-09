@@ -326,6 +326,11 @@ attribute_hidden void R_mtl_global_unlock(void)
 	pthread_mutex_unlock(&R_global_mutex);
 }
 
+attribute_hidden int R_mtl_global_is_locked(void)
+{
+    return R_global_lock_depth > 0;
+}
+
 attribute_hidden void R_mtl_global_unlock_all(void)
 {
     if (R_global_lock_depth > 0) {
@@ -337,6 +342,7 @@ attribute_hidden void R_mtl_global_unlock_all(void)
 attribute_hidden void R_mtl_global_lock(void) {}
 attribute_hidden void R_mtl_global_unlock(void) {}
 attribute_hidden void R_mtl_global_unlock_all(void) {}
+attribute_hidden int R_mtl_global_is_locked(void) { return 0; }
 #endif
 
 #ifdef PROTECTCHECK
