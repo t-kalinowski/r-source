@@ -22,6 +22,11 @@ stopifnot(inherits(e_sup, "try-error"))
 stopifnot(identical(g, 0L))
 stopifnot(grepl("superassignment is not allowed", conditionMessage(attr(e_sup, "condition"))))
 
+## Dynamic loading is not supported from workers (package loading must happen on the main thread).
+e_dl <- try(mtlapply(1:1, \(i) dyn.load("mtlapply-nope"), threads = 2L), silent = TRUE)
+stopifnot(inherits(e_dl, "try-error"))
+stopifnot(grepl("dyn\\.load is not supported", conditionMessage(attr(e_dl, "condition"))))
+
 ## tempfile() must be safe to call from workers.
 tf <- unlist(mtlapply(1:20, function(i) tempfile(pattern = "mtl"), threads = 4L), use.names = FALSE)
 stopifnot(length(unique(tf)) == length(tf))
