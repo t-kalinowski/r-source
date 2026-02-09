@@ -543,7 +543,7 @@ static SEXP check_retval(SEXP call, SEXP val)
     return val;
 }
 
-attribute_hidden SEXP do_External(SEXP call, SEXP op, SEXP args, SEXP env)
+static SEXP do_External_impl(SEXP call, SEXP op, SEXP args, SEXP env)
 {
     DL_FUNC ofun = NULL;
     SEXP retval;
@@ -580,6 +580,32 @@ attribute_hidden SEXP do_External(SEXP call, SEXP op, SEXP args, SEXP env)
 
     vmaxset(vmax);
     return check_retval(call, retval);
+}
+
+typedef struct {
+    SEXP call, op, args, env;
+} mtl_external_data_t;
+
+static SEXP mtl_external_run(void *data)
+{
+    mtl_external_data_t *d = (mtl_external_data_t *) data;
+    return do_External_impl(d->call, d->op, d->args, d->env);
+}
+
+static void mtl_external_cleanup(void *data)
+{
+    (void) data;
+    R_mtl_global_unlock();
+}
+
+attribute_hidden SEXP do_External(SEXP call, SEXP op, SEXP args, SEXP env)
+{
+    if (R_Interpreter != NULL && R_Interpreter->isMTLWorker) {
+	R_mtl_global_lock();
+	mtl_external_data_t d = { .call = call, .op = op, .args = args, .env = env };
+	return R_ExecWithCleanup(mtl_external_run, &d, mtl_external_cleanup, &d);
+    }
+    return do_External_impl(call, op, args, env);
 }
 
 #define R_FUNTYPES(R, N, A)                                                   \
