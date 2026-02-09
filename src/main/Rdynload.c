@@ -1239,6 +1239,9 @@ attribute_hidden SEXP do_dynload(SEXP call, SEXP op, SEXP args, SEXP env)
     char buf[2 * R_PATH_MAX];
     DllInfo *info;
 
+    if (R_Interpreter != NULL && R_Interpreter->isMTLWorker)
+	errorcall(call, _("dyn.load is not supported in mtlapply() worker threads"));
+
     checkArity(op,args);
     if (!isString(CAR(args)) || LENGTH(CAR(args)) != 1)
 	error(_("character argument expected"));
@@ -1255,6 +1258,9 @@ attribute_hidden SEXP do_dynload(SEXP call, SEXP op, SEXP args, SEXP env)
 attribute_hidden SEXP do_dynunload(SEXP call, SEXP op, SEXP args, SEXP env)
 {
     char buf[2 * R_PATH_MAX];
+
+    if (R_Interpreter != NULL && R_Interpreter->isMTLWorker)
+	errorcall(call, _("dyn.unload is not supported in mtlapply() worker threads"));
 
     checkArity(op,args);
     if (!isString(CAR(args)) || LENGTH(CAR(args)) != 1)
