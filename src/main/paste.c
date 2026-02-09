@@ -35,7 +35,7 @@
 
 #include "Print.h"
 #include "RBufferUtils.h"
-static R_StringBuffer cbuff = {NULL, 0, MAXELTSIZE};
+static R_THREAD_LOCAL R_StringBuffer cbuff = {NULL, 0, MAXELTSIZE};
 
 #ifndef HAVE_STPCPY
 static char *R_stpcpy(char *dest, const char *src)

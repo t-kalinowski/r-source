@@ -132,7 +132,7 @@ const char *EncodeLogical(int x, int w)
     } else
 	if(w == 5) return "FALSE";
     /* general case */
-    static char buff[NB];
+    static R_THREAD_LOCAL char buff[NB];
     if(x == NA_LOGICAL) snprintf(buff, NB, "%*s", min(w, (NB-1)), CHAR(R_print.na_string));
     else if(x) snprintf(buff, NB, "%*s", min(w, (NB-1)), "TRUE");
     else snprintf(buff, NB, "%*s", min(w, (NB-1)), "FALSE");
@@ -142,7 +142,7 @@ const char *EncodeLogical(int x, int w)
 
 const char *EncodeInteger(int x, int w)
 {
-    static char buff[NB];
+    static R_THREAD_LOCAL char buff[NB];
     if(x == NA_INTEGER) snprintf(buff, NB, "%*s", min(w, (NB-1)), CHAR(R_print.na_string));
     else snprintf(buff, NB, "%*d", min(w, (NB-1)), x);
     buff[NB-1] = '\0';
@@ -152,7 +152,7 @@ const char *EncodeInteger(int x, int w)
 attribute_hidden
 const char *EncodeRaw(Rbyte x, const char * prefix)
 {
-    static char buff[10];
+    static R_THREAD_LOCAL char buff[10];
     snprintf(buff, 10, "%s%02x", prefix, x);
     return buff;
 }
@@ -161,7 +161,7 @@ attribute_hidden
 const char *EncodeEnvironment(SEXP x)
 {
     const void *vmax = vmaxget();
-    static char ch[1000];
+    static R_THREAD_LOCAL char ch[1000];
     if (x == R_GlobalEnv)
 	snprintf(ch, 1000,  "<environment: R_GlobalEnv>");
     else if (x == R_BaseEnv)
@@ -183,7 +183,7 @@ const char *EncodeEnvironment(SEXP x)
 attribute_hidden
 const char *EncodeExtptr(SEXP x)
 {
-    static char buf[1000];
+    static R_THREAD_LOCAL char buf[1000];
     snprintf(buf, 1000, "<pointer: %p>", R_ExternalPtrAddr(x));
     return buf;
 }
@@ -201,7 +201,7 @@ const char *EncodeReal(double x, int w, int d, int e, char cdec)
 
 const char *EncodeReal0(double x, int w, int d, int e, const char *dec)
 {
-    static char buff[NB], buff2[2*NB];
+    static R_THREAD_LOCAL char buff[NB], buff2[2*NB];
     char fmt[20], *out = buff;
 
     /* IEEE allows signed zeros (yuck!) */
@@ -249,7 +249,7 @@ const char *EncodeReal0(double x, int w, int d, int e, const char *dec)
 static const char
 *EncodeRealDrop0(double x, int w, int d, int e, const char *dec)
 {
-    static char buff[NB], buff2[2*NB];
+    static R_THREAD_LOCAL char buff[NB], buff2[2*NB];
     char fmt[20], *out = buff;
 
     /* IEEE allows signed zeros (yuck!) */
@@ -319,7 +319,7 @@ attribute_hidden SEXP StringFromReal(double x, int *warn)
 attribute_hidden
 const char *EncodeReal2(double x, int w, int d, int e)
 {
-    static char buff[NB];
+    static R_THREAD_LOCAL char buff[NB];
     char fmt[20];
 
     /* IEEE allows signed zeros (yuck!) */
@@ -353,7 +353,7 @@ const char
 *EncodeComplex(Rcomplex x, int wr, int dr, int er, int wi, int di, int ei,
 	       const char *dec)
 {
-    static char buff[NB3];
+    static R_THREAD_LOCAL char buff[NB3];
 
     /* IEEE allows signed zeros; strip these here */
     if (x.r == 0.0) x.r = 0.0;
@@ -575,7 +575,7 @@ const char *EncodeString(SEXP s, int w, int quote, Rprt_adj justify)
        passed on by EncodeElement -- so no way could be end user be
        responsible for freeing it.  However, this is not thread-safe. */
 
-    static R_StringBuffer gBuffer = {NULL, 0, BUFSIZE};
+    static R_THREAD_LOCAL R_StringBuffer gBuffer = {NULL, 0, BUFSIZE};
     R_StringBuffer *buffer = &gBuffer;
 
     if (s == NA_STRING) {
