@@ -1280,7 +1280,9 @@ static void mtl_worker_gc(R_size_t size_needed);
 # define LARGE_VALLOC_STORE(v) (R_LargeVallocSize = (v))
 #endif
 
-#define NO_FREE_NODES() (NODES_IN_USE_LOAD() >= R_NSize)
+/* The allocation fast paths must use the current heap's thresholds:
+   mtlapply() worker threads have independent heaps with their own NSize/VSize. */
+#define NO_FREE_NODES() (NODES_IN_USE_LOAD() >= R_NSize_heap)
 #define CLASS_NEED_NEW_PAGE(c) (GENHEAP_FREE_LOAD(c) == R_GenHeap[c].New)
 #define NEED_NEW_PAGE() CLASS_NEED_NEW_PAGE(0)
 
@@ -1320,6 +1322,31 @@ static R_INLINE void mtl_gc(R_size_t size_needed)
     heap_alloc_suspend();
     if (R_HEAP->isWorker) {
 	mtl_worker_gc(size_needed);
+	/* Worker heaps do not currently run the main AdjustHeapSize() logic.
+	   Ensure the per-worker GC trigger sizes can accommodate the live set. */
+	{
+	    R_size_t ninuse = NODES_IN_USE_LOAD();
+	    if (ninuse >= R_NSize_heap) {
+		/* Keep some headroom to reduce thrash. */
+		R_size_t grow = (R_size_t) (R_NSize_heap * R_MinFreeFrac);
+		if (grow < 1000) grow = 1000;
+		R_size_t target = ninuse + grow;
+		if (target < ninuse + 1) target = ninuse + 1; /* overflow paranoia */
+		if (R_MaxNSize < R_SIZE_T_MAX && target > R_MaxNSize)
+		    target = R_MaxNSize;
+		R_NSize_heap = target;
+	    }
+	    if (size_needed > 0) {
+		R_size_t used = SMALL_VALLOC_LOAD() + LARGE_VALLOC_LOAD();
+		R_size_t minfree = (R_size_t) (R_VSize_heap * R_MinFreeFrac);
+		R_size_t target = used + size_needed + minfree;
+		if (target < used + size_needed) target = used + size_needed; /* overflow paranoia */
+		if (R_MaxVSize < R_SIZE_T_MAX && target > R_MaxVSize)
+		    target = R_MaxVSize;
+		if (R_VSize_heap < target)
+		    R_VSize_heap = target;
+	    }
+	}
     } else {
 	R_mtl_heap_lock();
 	R_gc_internal(size_needed);
@@ -2523,6 +2550,12 @@ static int RunGenCollect(R_size_t size_needed)
 	SortNodes();
 #endif
 
+    /* Keep the main heap's per-interpreter trigger sizes in sync with the
+       global GC tuning parameters (R_NSize/R_VSize). Allocation fast paths
+       use R_NSize_heap/R_VSize_heap via the current heap. */
+    R_NSize_heap = R_NSize;
+    R_VSize_heap = R_VSize;
+
     return gens_collected;
 }
 
@@ -2999,7 +3032,7 @@ attribute_hidden void R_mtl_adopt_worker_heap(R_InterpreterState *st)
     if (!src->isWorker)
 	return;
 
-    /* NOTE: We currently avoid running worker-local GC here.
+    /* NOTE: We currently avoid running a worker-local GC here.
        The intended design is to run a worker-only GC first to drop garbage,
        then splice. For now we only transfer and let the main GC clean up. */
 
@@ -4643,18 +4676,51 @@ static SEXP DeleteFromList(SEXP object, SEXP list)
 #define PHASH_SIZE 1069
 #define PTRHASH(obj) (((R_size_t) (obj)) >> 3)
 
+#ifdef HAVE_PTHREAD
+/* R_PreserveObject/R_ReleaseObject can be called from mtlapply() worker
+   threads, so initialization of the precious-hash mode must be thread-safe. */
+static atomic_int precious_init_state = 0; /* 0=uninit, 1=initing, 2=done */
+static atomic_int use_precious_hash = 0;
+
+static R_INLINE void precious_hash_init_once(void)
+{
+    int st = atomic_load_explicit(&precious_init_state, memory_order_acquire);
+    if (st == 2)
+	return;
+    if (st == 0) {
+	int expected = 0;
+	if (atomic_compare_exchange_strong_explicit(&precious_init_state, &expected, 1,
+						   memory_order_acq_rel, memory_order_acquire)) {
+	    if (getenv("R_HASH_PRECIOUS"))
+		atomic_store_explicit(&use_precious_hash, 1, memory_order_release);
+	    atomic_store_explicit(&precious_init_state, 2, memory_order_release);
+	    return;
+	}
+    }
+    while (atomic_load_explicit(&precious_init_state, memory_order_acquire) != 2) {
+	/* spin: initialization is fast and happens at most once */
+    }
+}
+#else
 static int use_precious_hash = FALSE;
 static int precious_inited = FALSE;
+#endif
 
 void R_PreserveObject(SEXP object)
 {
     R_CHECK_THREAD;
+#ifdef HAVE_PTHREAD
+    precious_hash_init_once();
+    int use_hash = atomic_load_explicit(&use_precious_hash, memory_order_acquire);
+#else
     if (! precious_inited) {
 	precious_inited = TRUE;
 	if (getenv("R_HASH_PRECIOUS"))
 	    use_precious_hash = TRUE;
     }
-    if (use_precious_hash) {
+    int use_hash = use_precious_hash;
+#endif
+    if (use_hash) {
 	if (R_PreciousList == R_NilValue)
 	    R_PreciousList = allocVector(VECSXP, PHASH_SIZE);
 	int bin = PTRHASH(object) % PHASH_SIZE;
@@ -4668,9 +4734,16 @@ void R_PreserveObject(SEXP object)
 void R_ReleaseObject(SEXP object)
 {
     R_CHECK_THREAD;
-    if (! precious_inited)
+    /* When HASH mode is enabled it is process-wide, so init before checking. */
+#ifdef HAVE_PTHREAD
+    precious_hash_init_once();
+    int use_hash = atomic_load_explicit(&use_precious_hash, memory_order_acquire);
+#else
+    int use_hash = use_precious_hash;
+#endif
+    if (R_PreciousList == R_NilValue)
 	return; /* can't be anything to delete yet */
-    if (use_precious_hash) {
+    if (use_hash) {
 	int bin = PTRHASH(object) % PHASH_SIZE;
 	SET_VECTOR_ELT(R_PreciousList, bin,
 		       DeleteFromList(object,
