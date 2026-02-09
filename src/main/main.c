@@ -649,6 +649,22 @@ static void sigactionSegv(int signum, siginfo_t *ip, void *context)
 	    }
 	REprintf("address %p, cause '%s'\n", ip->si_addr, s);
     }
+
+    /* Debugging aid for the multi-threaded interpreter (mtlapply) experiment:
+       allow emitting a best-effort C backtrace on fatal signals.
+       Not async-signal-safe, but this is for experimentation only. */
+#ifdef __APPLE__
+    {
+	const char *bt = getenv("R_MTL_CBT");
+	if (bt && *bt) {
+#include <execinfo.h>
+	    void *frames[128];
+	    int nframes = backtrace(frames, (int)(sizeof(frames) / sizeof(frames[0])));
+	    REprintf("\nC backtrace:\n");
+	    backtrace_symbols_fd(frames, nframes, 2);
+	}
+    }
+#endif
     {   /* A simple customized print of the traceback */
 	SEXP trace, p, q;
 	int line = 1, i;
