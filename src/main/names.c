@@ -1283,18 +1283,22 @@ typedef struct {
     const char *name;
     R_InterpreterState *st;
     struct R_mtl_heap_state_ *saved_heap;
+    int saved_gc_enabled;
 } mtl_install_mainheap_data_t;
 
 static SEXP mtl_install_on_main_heap(void *data)
 {
     mtl_install_mainheap_data_t *d = (mtl_install_mainheap_data_t *) data;
     d->saved_heap = R_mtl_switch_to_main_heap(d->st);
+    d->saved_gc_enabled = R_GCEnabled;
+    R_GCEnabled = FALSE;
     return install_impl(d->name);
 }
 
 static void mtl_install_on_main_heap_cleanup(void *data)
 {
     mtl_install_mainheap_data_t *d = (mtl_install_mainheap_data_t *) data;
+    R_GCEnabled = d->saved_gc_enabled;
     R_mtl_restore_heap(d->st, d->saved_heap);
     R_mtl_heap_unlock();
 }
@@ -1305,12 +1309,15 @@ typedef struct {
     SEXP charSXP;
     R_InterpreterState *st;
     struct R_mtl_heap_state_ *saved_heap;
+    int saved_gc_enabled;
 } mtl_installnotr_mainheap_data_t;
 
 static SEXP mtl_installNoTrChar_on_main_heap(void *data)
 {
     mtl_installnotr_mainheap_data_t *d = (mtl_installnotr_mainheap_data_t *) data;
     d->saved_heap = R_mtl_switch_to_main_heap(d->st);
+    d->saved_gc_enabled = R_GCEnabled;
+    R_GCEnabled = FALSE;
     /* Ensure the symbol printname (a CHARSXP) is main-heap owned, since the
        symbol is interned in the global symbol table traced by the main GC. */
     PROTECT(d->charSXP);
@@ -1323,6 +1330,7 @@ static SEXP mtl_installNoTrChar_on_main_heap(void *data)
 static void mtl_installNoTrChar_on_main_heap_cleanup(void *data)
 {
     mtl_installnotr_mainheap_data_t *d = (mtl_installnotr_mainheap_data_t *) data;
+    R_GCEnabled = d->saved_gc_enabled;
     R_mtl_restore_heap(d->st, d->saved_heap);
     R_mtl_heap_unlock();
 }
@@ -1335,6 +1343,7 @@ SEXP install(const char *name)
 	    .name = name,
 	    .st = R_Interpreter,
 	    .saved_heap = NULL,
+	    .saved_gc_enabled = 1,
 	};
 	return R_ExecWithCleanup(mtl_install_on_main_heap, &d,
 				 mtl_install_on_main_heap_cleanup, &d);
@@ -1395,6 +1404,7 @@ SEXP installNoTrChar(SEXP charSXP)
 	    .charSXP = charSXP,
 	    .st = R_Interpreter,
 	    .saved_heap = NULL,
+	    .saved_gc_enabled = 1,
 	};
 	return R_ExecWithCleanup(mtl_installNoTrChar_on_main_heap, &d,
 				 mtl_installNoTrChar_on_main_heap_cleanup, &d);
