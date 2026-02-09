@@ -34,10 +34,15 @@ Type 'q()' to quit R.
 > stopifnot(length(x) == 100L)
 > stopifnot(isTRUE(all.equal(x[[3]]$v, cos(1:3))))
 > 
+> # Ensure we got actual overlap in worker evaluation.
+> invisible(.Internal(mtlparallelmax()))
+> invisible(mtlapply(rep(20000L, 8L), function(i) cos(seq_len(i)), threads = 4L))
+> m <- .Internal(mtlparallelmax())
+> stopifnot(m >= 2L)
+> 
 > # The critical regression: a GC after mtlapply() must not wedge the interpreter.
 > invisible(gc())
 > 
 > cat("mtlapply ok\n")
 mtlapply ok
-> 
 > 
