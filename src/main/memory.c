@@ -172,10 +172,17 @@ static R_THREAD_LOCAL int R_heap_inflight_suspended = 0;
 
 static R_INLINE void heap_alloc_suspend(void)
 {
+    /* Worker heaps are private: they do not participate in main-heap GC sync.
+       Workers only switch to the main heap while holding the heap lock, so
+       main-heap allocation there is already excluded from concurrent GC. */
+    if (R_Interpreter != NULL && R_Interpreter->isMTLWorker)
+	return;
     if (R_heap_inflight_held && !R_heap_inflight_suspended) {
-	atomic_fetch_sub_explicit(&R_heap_inflight, 1, memory_order_relaxed);
+	unsigned long prev = atomic_fetch_sub_explicit(&R_heap_inflight, 1, memory_order_relaxed);
 	R_heap_inflight_suspended = 1;
-	if (atomic_load_explicit(&R_heap_exclusive, memory_order_relaxed)) {
+	/* If we were the last inflight allocator, wake any exclusive waiter.
+	   Use the mutex to avoid lost wakeups between check and wait. */
+	if (prev == 1) {
 	    pthread_mutex_lock(&R_heap_excl_mutex);
 	    pthread_cond_broadcast(&R_heap_excl_cond);
 	    pthread_mutex_unlock(&R_heap_excl_mutex);
@@ -185,6 +192,9 @@ static R_INLINE void heap_alloc_suspend(void)
 
 static R_INLINE void heap_alloc_resume(void)
 {
+    /* See heap_alloc_suspend(). */
+    if (R_Interpreter != NULL && R_Interpreter->isMTLWorker)
+	return;
     if (R_heap_inflight_held && R_heap_inflight_suspended) {
 	atomic_fetch_add_explicit(&R_heap_inflight, 1, memory_order_relaxed);
 	R_heap_inflight_suspended = 0;
@@ -193,6 +203,9 @@ static R_INLINE void heap_alloc_resume(void)
 
 static R_INLINE void heap_alloc_enter(void)
 {
+    /* See heap_alloc_suspend(). */
+    if (R_Interpreter != NULL && R_Interpreter->isMTLWorker)
+	return;
     if (R_heap_excl_depth > 0) {
 	R_heap_alloc_depth++;
 	return;
@@ -212,9 +225,10 @@ static R_INLINE void heap_alloc_enter(void)
 	atomic_fetch_add_explicit(&R_heap_inflight, 1, memory_order_acq_rel);
 	/* Re-check: if exclusivity raced with us, back out and retry. */
 	if (atomic_load_explicit(&R_heap_exclusive, memory_order_acquire)) {
-	    atomic_fetch_sub_explicit(&R_heap_inflight, 1, memory_order_relaxed);
+	    unsigned long prev = atomic_fetch_sub_explicit(&R_heap_inflight, 1, memory_order_relaxed);
 	    pthread_mutex_lock(&R_heap_excl_mutex);
-	    pthread_cond_broadcast(&R_heap_excl_cond);
+	    if (prev == 1)
+		pthread_cond_broadcast(&R_heap_excl_cond);
 	    while (atomic_load_explicit(&R_heap_exclusive, memory_order_relaxed))
 		pthread_cond_wait(&R_heap_excl_cond, &R_heap_excl_mutex);
 	    pthread_mutex_unlock(&R_heap_excl_mutex);
@@ -228,6 +242,9 @@ static R_INLINE void heap_alloc_enter(void)
 
 static R_INLINE void heap_alloc_exit(void)
 {
+    /* See heap_alloc_suspend(). */
+    if (R_Interpreter != NULL && R_Interpreter->isMTLWorker)
+	return;
     if (R_heap_excl_depth > 0) {
 	R_heap_alloc_depth--;
 	return;
@@ -238,16 +255,17 @@ static R_INLINE void heap_alloc_exit(void)
 	return;
 
     if (!R_heap_inflight_suspended)
-	atomic_fetch_sub_explicit(&R_heap_inflight, 1, memory_order_relaxed);
+    {
+	unsigned long prev = atomic_fetch_sub_explicit(&R_heap_inflight, 1, memory_order_relaxed);
+	/* If we were the last inflight allocator, wake any exclusive waiter. */
+	if (prev == 1) {
+	    pthread_mutex_lock(&R_heap_excl_mutex);
+	    pthread_cond_broadcast(&R_heap_excl_cond);
+	    pthread_mutex_unlock(&R_heap_excl_mutex);
+	}
+    }
     R_heap_inflight_held = 0;
     R_heap_inflight_suspended = 0;
-
-    /* Wake any waiter for inflight==0. */
-    if (atomic_load_explicit(&R_heap_exclusive, memory_order_relaxed)) {
-	pthread_mutex_lock(&R_heap_excl_mutex);
-	pthread_cond_broadcast(&R_heap_excl_cond);
-	pthread_mutex_unlock(&R_heap_excl_mutex);
-    }
 }
 
 attribute_hidden void R_mtl_heap_lock(void)
@@ -4057,8 +4075,18 @@ SEXP allocFormalsList6(SEXP sym1, SEXP sym2, SEXP sym3, SEXP sym4,
 
 void R_gc(void)
 {
+    /* Worker interpreters have independent heaps and run a worker-local GC. */
+    if (R_Interpreter != NULL && R_Interpreter->heap != NULL && R_HEAP->isWorker) {
+	mtl_worker_gc(0);
+	return;
+    }
+
     num_old_gens_to_collect = NUM_OLD_GENERATIONS;
+    heap_alloc_suspend();
+    R_mtl_heap_lock();
     R_gc_internal(0);
+    R_mtl_heap_unlock();
+    heap_alloc_resume();
 #ifndef IMMEDIATE_FINALIZERS
     R_RunPendingFinalizers();
 #endif
@@ -4066,7 +4094,17 @@ void R_gc(void)
 
 void R_gc_lite(void)
 {
+    /* Worker interpreters have independent heaps and run a worker-local GC. */
+    if (R_Interpreter != NULL && R_Interpreter->heap != NULL && R_HEAP->isWorker) {
+	mtl_worker_gc(0);
+	return;
+    }
+
+    heap_alloc_suspend();
+    R_mtl_heap_lock();
     R_gc_internal(0);
+    R_mtl_heap_unlock();
+    heap_alloc_resume();
 #ifndef IMMEDIATE_FINALIZERS
     R_RunPendingFinalizers();
 #endif
@@ -4074,8 +4112,18 @@ void R_gc_lite(void)
 
 static void R_gc_no_finalizers(R_size_t size_needed)
 {
+    /* Worker interpreters have independent heaps and run a worker-local GC. */
+    if (R_Interpreter != NULL && R_Interpreter->heap != NULL && R_HEAP->isWorker) {
+	mtl_worker_gc(size_needed);
+	return;
+    }
+
     num_old_gens_to_collect = NUM_OLD_GENERATIONS;
+    heap_alloc_suspend();
+    R_mtl_heap_lock();
     R_gc_internal(size_needed);
+    R_mtl_heap_unlock();
+    heap_alloc_resume();
 }
 
 static double gctimes[5], gcstarttimes[5];
