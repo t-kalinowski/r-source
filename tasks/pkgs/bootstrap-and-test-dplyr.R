@@ -47,7 +47,9 @@ install_cran("remotes")
 remotes::install_github(
   devtools_repo,
   lib = lib,
-  dependencies = TRUE,
+  # Avoid pulling devtools Suggests by default (very large); dplyr's test deps
+  # are installed explicitly below.
+  dependencies = NA,
   upgrade = "never",
   build = FALSE,
   quiet = FALSE
@@ -69,4 +71,3 @@ remotes::install_deps(
 cat("\n== Running devtools::test() ==\n")
 res <- devtools::test(dplyr_dir, reporter = "summary")
 print(res)
-
