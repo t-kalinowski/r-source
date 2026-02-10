@@ -218,7 +218,7 @@ legend("topleft", legend = u, col = cols[u], lty = 1, pch = 19, bty = "n")
 cat("\nbench::mark (mtl build, same workload; plotted):\n")
 suppressPackageStartupMessages(library(bench))
 print(bm$bench)
-plot(bm$bench)
+plot(bm$bench, type = "boxplot")
 ```
 
 ## Notes / Limitations
