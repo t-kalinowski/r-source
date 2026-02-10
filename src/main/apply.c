@@ -660,13 +660,14 @@ attribute_hidden void R_mtlpool_shutdown(void)
 	    return R_NilValue;
 	}
 
-	static void mtlapply_run_cleanup(void *vp)
+	static void mtlapply_run_cleanup(void *vp, Rboolean jump)
 	{
 	    mtlapply_run_data_t *d = (mtlapply_run_data_t *) vp;
 
-	    /* Ensure serial mode is restored on error/unwind. */
+	    /* Always restore serial mode. On unwind, also signal workers to stop
+	       consuming indices from a stack-allocated job structure. */
 	    R_mtl_threading_active = 0;
-	    if (d->job)
+	    if (jump && d->job)
 		atomic_store_explicit(&d->job->error, 1, memory_order_relaxed);
 	    R_Interpreter->workerGlobalEnv = d->saved_worker_env;
 	    R_Interpreter->mtlGlobalEnvRedirect = d->saved_redirect;
@@ -834,8 +835,13 @@ attribute_hidden SEXP do_mtlapply(SEXP call, SEXP op, SEXP args, SEXP rho)
 			    run_data.saved_redirect = R_Interpreter->mtlGlobalEnvRedirect;
 			    run_data.saved_worker_env = R_Interpreter->workerGlobalEnv;
 			    run_data.mu_locked = 0;
-			    R_ExecWithCleanup(mtlapply_run, &run_data,
-					      mtlapply_run_cleanup, &run_data);
+				    /* R_UnwindProtect tells the cleanup whether we are unwinding due
+				       to an error/non-local jump. We need that to safely stop worker
+				       threads on error; R_ExecWithCleanup runs its cleanup
+				       unconditionally and would mark every job as failed. */
+				    R_UnwindProtect(mtlapply_run, &run_data,
+						    mtlapply_run_cleanup, &run_data,
+						    NULL);
 
 			    pthread_mutex_destroy(&job.err_mutex);
 
