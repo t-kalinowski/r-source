@@ -1,0 +1,139 @@
+## README benchmark runner for experimental mtlapply()
+##
+## This script is base-R-only so it can be run by:
+## - the system R (no mtlapply)
+## - the experimental build in this repo (has mtlapply)
+##
+## It writes an RDS artifact with timings that can be loaded by README.Rmd.
+##
+## Usage:
+##   R --vanilla -q -f bench/readme_bench_run.R --args bench/results/system.rds
+##   ./build-mtl/bin/R --vanilla -q -f bench/readme_bench_run.R --args bench/results/mtl.rds
+##
+## Controls (env vars):
+## - README_N: rows, default 2000000
+## - README_SHARDS: tasks, default 64
+## - README_GROUPS: groups, default 4096
+## - README_FEAT_LOOPS: feature loops, default 40
+## - README_ITERS: timing iterations, default 3
+## - README_THREADS: comma-separated thread counts (mtlapply only), default "1,2,4,8"
+
+parse_int <- function(x, default) {
+  if (!nzchar(x)) return(default)
+  as.integer(x)
+}
+
+parse_int_vec <- function(x, default) {
+  if (!nzchar(x)) return(default)
+  as.integer(strsplit(x, ",", fixed = TRUE)[[1L]])
+}
+
+args <- commandArgs(trailingOnly = TRUE)
+if (length(args) != 1L) {
+  stop("expected exactly one argument: output .rds path", call. = FALSE)
+}
+out_path <- args[[1L]]
+
+N <- parse_int(Sys.getenv("README_N"), 2000000L)
+nshards <- parse_int(Sys.getenv("README_SHARDS"), 64L)
+ngroups <- parse_int(Sys.getenv("README_GROUPS"), 4096L)
+feat_loops <- parse_int(Sys.getenv("README_FEAT_LOOPS"), 40L)
+iters <- parse_int(Sys.getenv("README_ITERS"), 3L)
+threads <- parse_int_vec(Sys.getenv("README_THREADS"), c(1L, 2L, 4L, 8L))
+
+stopifnot(N >= 1L, nshards >= 1L, ngroups >= 1L, feat_loops >= 1L, iters >= 1L)
+stopifnot(all(is.finite(threads)), all(threads >= 1L))
+
+has_mtlapply <- exists("mtlapply")
+
+## Deterministic data in the main heap (no RNG, no strings).
+x <- (as.double(seq_len(N) %% 1000L) - 500) / 10
+y <- (as.double((seq_len(N) * 17L) %% 1000L) - 500) / 10
+w <- (as.double((seq_len(N) * 31L) %% 1000L) + 1) / 1000
+grp <- rep_len(seq_len(ngroups), N)
+
+worker <- function(shard_id) {
+  idx <- seq.int(shard_id, N, by = nshards)
+  z <- x[idx]
+  yy <- y[idx]
+  ww <- w[idx]
+  for (i in seq_len(feat_loops)) {
+    z <- log1p(abs(z)) + sin(yy + z) * ww + cos(z - yy)
+  }
+  g <- grp[idx]
+
+  ## Avoid S3 dispatch and internal helpers inside workers for now.
+  n <- tabulate(g, ngroups)
+  s <- numeric(ngroups)
+  for (j in seq_along(z)) {
+    gj <- g[[j]]
+    s[[gj]] <- s[[gj]] + z[[j]]
+  }
+
+  list(sum = s, n = n)
+}
+
+reduce <- function(parts) {
+  s <- Reduce(`+`, lapply(parts, `[[`, "sum"))
+  n <- Reduce(`+`, lapply(parts, `[[`, "n"))
+  s / n
+}
+
+time_median <- function(expr, iters) {
+  exprq <- substitute(expr)
+  ts <- numeric(iters)
+  for (i in seq_len(iters)) {
+    invisible(gc())
+    ts[[i]] <- unname(system.time(eval(exprq, parent.frame()))[["elapsed"]])
+  }
+  median(ts)
+}
+
+ids <- seq_len(nshards)
+
+## Correctness check (small).
+ref <- reduce(lapply(ids[1:min(4L, nshards)], worker))
+if (has_mtlapply) {
+  cur <- reduce(mtlapply(ids[1:min(4L, nshards)], worker, threads = max(threads)))
+  stopifnot(isTRUE(all.equal(ref, cur, tolerance = 0)))
+}
+
+results <- data.frame(
+  method = character(),
+  threads = integer(),
+  median_seconds = double(),
+  stringsAsFactors = FALSE
+)
+
+base <- time_median(reduce(lapply(ids, worker)), iters)
+results <- rbind(
+  results,
+  data.frame(method = "lapply", threads = 0L, median_seconds = base)
+)
+
+if (has_mtlapply) {
+  for (t in threads) {
+    m <- time_median(reduce(mtlapply(ids, worker, threads = t)), iters)
+    results <- rbind(
+      results,
+      data.frame(method = "mtlapply", threads = t, median_seconds = m)
+    )
+  }
+}
+
+meta <- list(
+  r_version = R.version.string,
+  r_platform = R.version$platform,
+  r_home = R.home(),
+  has_mtlapply = has_mtlapply,
+  settings = list(
+    N = N, nshards = nshards, ngroups = ngroups, feat_loops = feat_loops,
+    iters = iters, threads = threads
+  )
+)
+
+dir.create(dirname(out_path), recursive = TRUE, showWarnings = FALSE)
+saveRDS(list(meta = meta, results = results), out_path)
+
+cat("wrote: ", out_path, "\n", sep = "")
+

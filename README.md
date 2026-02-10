@@ -1,53 +1,27 @@
+
 # R Multi-Threaded Interpreter Experiment (`mtlapply`)
 
-This repo is an experimental R runtime that can evaluate *pure R* closures concurrently on multiple OS threads, in a single R process, using `mtlapply()` (modeled after `lapply()`/`mclapply()`).
+This repo is an experimental R runtime that can evaluate *pure R*
+closures concurrently on multiple OS threads, in a single R process,
+using `mtlapply()` (modeled after `lapply()`/`mclapply()`).
 
-The “hook”: you can run a fairly realistic “ETL / feature engineering / group-summarise” pipeline with near-linear speedups, without forking and without serializing return values.
+The hook is simple: when your workload is “a lot of independent R work”
+(feature engineering, per-shard transforms, per-group summaries),
+`mtlapply()` can give near-linear speedups without forking and without
+serializing return values.
 
-## Benchmark: “Shard -> Mutate -> Summarise -> Top-k -> Reduce”
+## A Benchmark You Can Read (And Reproduce)
 
-This benchmark is base-R-only, but deliberately shaped like a dplyr workflow:
+The “unit of parallelism” here is a shard id. There is no up-front
+“pre-splitting”; the `mtlapply()` call is what shards the work.
 
-1. shard rows into tasks
-2. `mutate`: vectorized feature engineering (alloc-heavy numeric transforms)
-3. `summarise`: group-wise aggregation
-4. `slice_max`: compute a small per-shard top-k
-5. reduce results back on the main thread
-
-Run it (from repo root, using the `build-mtl` build):
-
-```sh
-MTL_ETL_N=2000000 \
-MTL_ETL_SHARDS=64 \
-MTL_ETL_GROUPS=4096 \
-MTL_ETL_FEAT_LOOPS=40 \
-MTL_ETL_ITERS=3 \
-MTL_ETL_THREADS=1,2,4,8 \
-./build-mtl/bin/R --vanilla -q -f bench/mtlapply_etl.R
-```
-
-Example output (this machine):
-
-```text
-== ETL pipeline: shard -> mutate -> summarise -> top-k -> reduce ==
-lapply          median=   0.967
-mtlapply(1)     median=   0.929  speedup= 1.04x
-mtlapply(2)     median=   0.464  speedup= 2.08x
-mtlapply(4)     median=   0.232  speedup= 4.17x
-mtlapply(8)     median=   0.118  speedup= 8.19x
-```
-
-### Same Benchmark As “Real R Code” (`bench::mark`)
-
-If you have the `bench` package installed, you can run essentially the same
-workflow directly from an R session:
-
-```r
-# install.packages("bench")
-library(bench)
+``` r
+# This is the actual benchmark code (identical in shape to bench/readme_bench_run.R).
+# The key idea: mtlapply() shards work by shard id; the worker computes its own
+# row indices deterministically. No up-front "split" required.
 
 N <- 2e6L
-shards <- 64L
+nshards <- 64L
 ngroups <- 4096L
 feat_loops <- 40L
 
@@ -57,69 +31,110 @@ y <- (as.double((seq_len(N) * 17L) %% 1000L) - 500) / 10
 w <- (as.double((seq_len(N) * 31L) %% 1000L) + 1) / 1000
 grp <- rep_len(seq_len(ngroups), N)
 
-idxs <- lapply(seq_len(shards), function(k) seq.int(k, N, by = shards))
-
-process_shard <- function(idx) {
+worker <- function(shard_id) {
+  idx <- seq.int(shard_id, N, by = nshards)
   z <- x[idx]
-  yy <- y[idx]
-  ww <- w[idx]
   for (i in seq_len(feat_loops)) {
-    z <- log1p(abs(z)) + sin(yy + z) * ww + cos(z - yy)
+    z <- log1p(abs(z)) + sin(y[idx] + z) * w[idx] + cos(z - y[idx])
   }
-
-  g <- grp[idx]
-  s1 <- rowsum.default(z, g, reorder = FALSE)
-  cnt <- tabulate(g, ngroups)
-  top <- sort.int(z, decreasing = TRUE, method = "quick")[1:100]
-
-  list(s1 = as.double(s1), cnt = cnt, top = top)
+  g <- grp[idx]  # groups for summarise
+  # summarise: group-wise sum, plus counts
+  n <- tabulate(g, ngroups)
+  s <- numeric(ngroups)
+  for (j in seq_along(z)) {
+    gj <- g[[j]]
+    s[[gj]] <- s[[gj]] + z[[j]]
+  }
+  list(sum = s, n = n)
 }
 
-reduce_results <- function(res) {
-  s1 <- Reduce(`+`, lapply(res, `[[`, "s1"))
-  cnt <- Reduce(`+`, lapply(res, `[[`, "cnt"))
-  mu <- s1 / cnt
-  top_all <- sort.int(unlist(lapply(res, `[[`, "top"), use.names = FALSE),
-                     decreasing = TRUE, method = "quick")[1:100]
-  list(mu = mu, top = top_all)
+reduce <- function(parts) {
+  s <- Reduce(`+`, lapply(parts, `[[`, "sum"))
+  n <- Reduce(`+`, lapply(parts, `[[`, "n"))
+  s / n
 }
 
-res <- bench::mark(
-  lapply = reduce_results(lapply(idxs, process_shard)),
-  mtl_2  = reduce_results(mtlapply(idxs, process_shard, threads = 2L)),
-  mtl_4  = reduce_results(mtlapply(idxs, process_shard, threads = 4L)),
-  mtl_8  = reduce_results(mtlapply(idxs, process_shard, threads = 8L)),
-  iterations = 5,
-  check = TRUE
-)
+ids <- seq_len(nshards)
 
-print(res)
-plot(res)
+# baseline
+system.time(reduce(lapply(ids, worker)))[["elapsed"]]
+
+# parallel (in the experimental build)
+system.time(reduce(mtlapply(ids, worker, threads = 8L)))[["elapsed"]]
 ```
 
-## Quick Demo
+## Real Numbers (Loaded From Artifacts)
 
-In an R session built from this tree:
+The benchmark is run as a standalone base-R script under:
 
-```r
-mtlapply(1:100, \(i) cos(seq_len(i)), threads = 8L)
+- the system `R` (to check for single-threaded regressions)
+- `./build-mtl/bin/R` from this tree (to measure `mtlapply()` scaling)
+
+Generate the timing artifacts:
+
+``` sh
+mkdir -p bench/results
+
+# system R (no mtlapply)
+R --vanilla -q -f bench/readme_bench_run.R --args bench/results/system.rds
+
+# experimental build (has mtlapply)
+R_HOME= ./build-mtl/bin/R --vanilla -q -f bench/readme_bench_run.R --args bench/results/mtl.rds
 ```
 
-## What This Tries To Be
+Then render this README, which loads those artifacts and summarizes
+them:
 
-- One R process.
-- A thread pool of worker “sub-interpreters”.
-- Workers evaluate R bytecode/interpreter code in parallel for most pure R work.
-- Workers allocate into worker-local heaps/GC, and results are transferred back without serialization.
+    ## Settings:
 
-## Current Limitations (Important)
+    ## $N
+    ## [1] 2000000
+    ## 
+    ## $nshards
+    ## [1] 64
+    ## 
+    ## $ngroups
+    ## [1] 4096
+    ## 
+    ## $feat_loops
+    ## [1] 40
+    ## 
+    ## $iters
+    ## [1] 3
+    ## 
+    ## $threads
+    ## [1] 1 2 4 8
 
-- Workloads that *hammer global mutable runtime structures* (notably string/symbol interning) may scale poorly.
-- Some operations are explicitly serialized under a global lock when run from workers (notably `.External` and selected native interfaces), to avoid corrupting global process state.
-- This is experimental runtime work: correctness and safety come before “make everything parallel”.
+    ## 
+    ## R versions:
 
-## Files
+    ## - system: R version 4.5.2 (2025-10-31)
 
-- `bench/mtlapply_etl.R`: the “real-ish” benchmark above.
-- `tests/mtlapply.R`: small regression tests for `mtlapply()`.
-- `tests/mtlstress.R`: randomized stress testing (not part of `make check`).
+    ## - mtl:    R version 4.6.0 Under development (unstable) (1970-01-01)
+
+    ## 
+    ## Timings:
+
+| build | label | median_seconds | speedup_vs_sys_lapply | speedup_vs_mtl_lapply |
+|:---|:---|---:|---:|---:|
+| mtl | lapply | 0.999 | 0.958 | 1.000 |
+| mtl | mtlapply(1) | 0.945 | 1.013 | 1.057 |
+| mtl | mtlapply(2) | 0.475 | 2.015 | 2.103 |
+| mtl | mtlapply(4) | 0.239 | 4.004 | 4.180 |
+| mtl | mtlapply(8) | 0.120 | 7.975 | 8.325 |
+| system | lapply | 0.957 | 1.000 | 1.044 |
+
+    ## 
+    ## Single-thread overhead check:
+
+    ## mtl lapply / system lapply = 1.044x
+
+## Notes / Limitations
+
+- Workloads that hammer global mutable runtime structures (notably
+  string/symbol interning) may scale poorly.
+- Some operations are still serialized under a global lock when run from
+  workers (notably selected native interfaces), to avoid corrupting
+  global process state.
+- This is runtime work: correctness and safety come before “make
+  everything parallel”.
