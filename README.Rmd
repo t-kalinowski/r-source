@@ -14,7 +14,7 @@ The hook is simple: when your workload is "a lot of independent R work" (feature
 
 The "unit of parallelism" here is a shard id. There is no up-front "pre-splitting"; the `mtlapply()` call is what shards the work.
 
-```r
+```{r benchmark-code, eval=FALSE}
 # This is the actual benchmark code (identical in shape to bench/readme_bench_run.R).
 # The key idea: mtlapply() shards work by shard id; the worker computes its own
 # row indices deterministically. No up-front "split" required.
