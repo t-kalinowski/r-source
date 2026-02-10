@@ -160,6 +160,8 @@ attribute_hidden int R_gc_running(void) { return R_in_gc; }
 #ifdef HAVE_PTHREAD
 # include <stdatomic.h>
 
+static void mtl_large_owner_init(void);
+
 /* Global: enabled only while mtlapply() workers are evaluating.
  *
  * Keep a visible symbol for internal shared objects compiled with
@@ -170,6 +172,11 @@ attribute_hidden int R_mtl_threading_active_hidden = 0;
 
 attribute_hidden void R_mtl_set_threading_active(int active)
 {
+    if (active) {
+	/* Ensure owner maps are initialized before worker threads can allocate
+	   large nodes or be adopted into the main heap. */
+	mtl_large_owner_init();
+    }
     R_mtl_threading_active = active;
     R_mtl_threading_active_hidden = active;
 }
@@ -851,12 +858,12 @@ typedef struct PAGE_HEADER {
   uint64_t magic;
   struct PAGE_HEADER *next;
   R_mtl_heap_state *owner;
-  /* Ensure PAGE_DATA(p) is suitably aligned for SEXPREC writes.
-     On aarch64, the compiler can use paired stores (stp) for adjacent
-     pointer fields in SEXPREC, which faults on misaligned addresses. */
-  uintptr_t pad;
+  /* Padding to keep PAGE_DATA(p) reasonably aligned and leave room for
+     future header extensions without changing page size rounding. */
+  uint32_t pad;
 } PAGE_HEADER;
-_Static_assert(sizeof(PAGE_HEADER) % 16 == 0, "PAGE_HEADER size must preserve 16-byte alignment");
+
+_Static_assert(sizeof(PAGE_HEADER) % 16 == 0, "PAGE_HEADER size should be 16-byte aligned");
 
 #if ( SIZEOF_SIZE_T > 4 )
 # define BASE_PAGE_SIZE 8000
@@ -1228,7 +1235,10 @@ static R_INLINE int mtl_gc_owns_node(SEXP n)
     return owner == NULL || owner == R_HEAP;
 }
 
-#define MTL_GC_OWNS_NODE(n) (mtl_gc_owns_node(n))
+/* Ownership checks are only needed while mtlapply workers are active.
+   In pure serial execution, all nodes belong to the single main heap, and
+   consulting page headers / the large-owner map is wasted work. */
+#define MTL_GC_OWNS_NODE(n) (__builtin_expect(!R_MTL_THREADING_ACTIVE, 1) ? 1 : mtl_gc_owns_node(n))
 
 #define MARK_AND_UNSNAP_NODE(s) do {		\
 	SEXP mu__n__ = (s);			\
@@ -1255,13 +1265,17 @@ static R_INLINE int mtl_gc_owns_node(SEXP n)
    interpreter-local stacks/contexts so we only forward nodes owned by the
    heap currently being collected. */
 #define FORWARD_NODE_IN_CURRENT_HEAP(s) do {			\
-    SEXP fnh__n__ = (s);					\
-    if (fnh__n__) {						\
-	R_mtl_heap_state *fnh__owner__ = mtl_sexp_owner(fnh__n__);	\
-	if (fnh__owner__ == NULL || fnh__owner__ == R_HEAP)	\
-	    FORWARD_NODE(fnh__n__);				\
-    }								\
-} while (0)
+	    SEXP fnh__n__ = (s);					\
+	    if (fnh__n__) {						\
+		if (__builtin_expect(!R_MTL_THREADING_ACTIVE, 1)) {	\
+		    FORWARD_NODE(fnh__n__);				\
+		} else {						\
+		R_mtl_heap_state *fnh__owner__ = mtl_sexp_owner(fnh__n__);	\
+		if (fnh__owner__ == NULL || fnh__owner__ == R_HEAP)	\
+		    FORWARD_NODE(fnh__n__);				\
+		}							\
+	    }								\
+	} while (0)
 
 #define PROCESS_ONE_NODE(s) do {				\
 		SEXP pn__n__ = (s);					\
@@ -1308,6 +1322,60 @@ static R_INLINE int mtl_gc_owns_node(SEXP n)
 
 static void GetNewPage(int node_class);
 static void mtl_worker_gc(R_size_t size_needed);
+
+#ifdef HAVE_PTHREAD
+/* Serial fast-path helpers.
+ *
+ * When mtl threading is inactive, we want the core allocator to be as close to
+ * stock as possible: no CAS loops and minimal extra indirections/checks.
+ *
+ * Use the main heap state directly to avoid repeatedly going through
+ * R_Interpreter (which is a macro with a runtime branch for MTL). */
+static R_INLINE R_mtl_heap_state *mtl_serial_heap(void)
+{
+    return &R_MainHeapState;
+}
+
+static R_INLINE int mtl_serial_no_free_nodes(R_mtl_heap_state *heap)
+{
+    return heap->NodesInUse >= heap->NSize;
+}
+
+static R_INLINE R_size_t mtl_serial_vheap_free(R_mtl_heap_state *heap)
+{
+    return heap->VSize - heap->LargeVallocSize - heap->SmallVallocSize;
+}
+
+static void GetNewPageInHeap(R_mtl_heap_state *heap, int node_class);
+
+static R_INLINE void mtl_serial_class_get_free_node(R_mtl_heap_state *heap, int c, SEXP *out)
+{
+    SEXP n = heap->GenHeap[c].Free;
+    if (n == heap->GenHeap[c].New) {
+	GetNewPageInHeap(heap, c);
+	n = heap->GenHeap[c].Free;
+    }
+    heap->GenHeap[c].Free = NEXT_NODE(n);
+    heap->NodesInUse++;
+    *out = n;
+}
+
+static R_INLINE void mtl_serial_class_quick_get_free_node(R_mtl_heap_state *heap, int c, SEXP *out)
+{
+    SEXP n = heap->GenHeap[c].Free;
+    if (n == heap->GenHeap[c].New)
+	error("need new page - should not happen");
+    heap->GenHeap[c].Free = NEXT_NODE(n);
+    heap->NodesInUse++;
+    *out = n;
+}
+
+static R_INLINE int mtl_serial_class_need_new_page(R_mtl_heap_state *heap, int c)
+{
+    return heap->GenHeap[c].Free == heap->GenHeap[c].New;
+}
+
+#endif /* HAVE_PTHREAD */
 
 #ifdef HAVE_PTHREAD
 static R_INLINE SEXP mtl_genheap_free_load(int c)
@@ -1602,8 +1670,84 @@ static void DEBUG_RELEASE_PRINT(int rel_pages, int maxrel_pages, int i)
 
 /* Page Allocation and Release. */
 
+#ifdef HAVE_PTHREAD
+static void GetNewPageInHeap(R_mtl_heap_state *heap, int node_class)
+{
+    SEXP s, base;
+    char *data;
+    PAGE_HEADER *page;
+    int node_size, page_count, i;  // FIXME: longer type?
+
+    node_size = NODE_SIZE(node_class);
+    page_count = (R_PAGE_SIZE - sizeof(PAGE_HEADER)) / node_size;
+
+    /* Allocate an R_PAGE_SIZE region aligned to R_mtl_pagesize.
+       We keep alignment so mtl_page_header_from_ptr() can mask pointers back
+       to their containing PAGE_HEADER, but avoid the overhead of
+       posix_memalign() on hot paths by doing a simple over-allocation. */
+    size_t align = R_mtl_pagesize;
+    size_t extra = (align - 1) + sizeof(void *);
+
+    void *raw = malloc((size_t) R_PAGE_SIZE + extra);
+    void *pmem = NULL;
+    if (raw != NULL) {
+	uintptr_t p = (uintptr_t) raw + sizeof(void *);
+	uintptr_t a = (p + (align - 1)) & ~(uintptr_t)(align - 1);
+	pmem = (void *) a;
+	((void **) pmem)[-1] = raw;
+    }
+    page = (PAGE_HEADER *) pmem;
+    if (page == NULL) {
+	R_gc_no_finalizers(0);
+	raw = malloc((size_t) R_PAGE_SIZE + extra);
+	pmem = NULL;
+	if (raw != NULL) {
+	    uintptr_t p = (uintptr_t) raw + sizeof(void *);
+	    uintptr_t a = (p + (align - 1)) & ~(uintptr_t)(align - 1);
+	    pmem = (void *) a;
+	    ((void **) pmem)[-1] = raw;
+	}
+	page = (PAGE_HEADER *) pmem;
+	if (page == NULL)
+	    mem_err_malloc((R_size_t) R_PAGE_SIZE);
+    }
+#ifdef R_MEMORY_PROFILING
+    R_ReportNewPage();
+#endif
+    page->magic = R_MTL_PAGE_MAGIC;
+    page->owner = heap;
+    page->next = heap->GenHeap[node_class].pages;
+    heap->GenHeap[node_class].pages = page;
+    heap->GenHeap[node_class].PageCount++;
+
+    data = PAGE_DATA(page);
+    base = heap->GenHeap[node_class].New;
+    for (i = 0; i < page_count; i++, data += node_size) {
+	s = (SEXP) data;
+	heap->GenHeap[node_class].AllocCount++;
+	SNAP_NODE(s, base);
+#if  VALGRIND_LEVEL > 1
+	if (NodeClassSize[node_class] > 0)
+	    VALGRIND_MAKE_MEM_NOACCESS(STDVEC_DATAPTR(s), NodeClassSize[node_class]*sizeof(VECREC));
+#endif
+	s->sxpinfo = UnmarkedNodeTemplate.sxpinfo;
+	INIT_REFCNT(s);
+	SET_NODE_CLASS(s, node_class);
+#ifdef PROTECTCHECK
+	SET_TYPEOF(s, NEWSXP);
+#endif
+	base = s;
+	heap->GenHeap[node_class].Free = s;
+    }
+}
+#endif
+
 static void GetNewPage(int node_class)
 {
+#ifdef HAVE_PTHREAD
+    GetNewPageInHeap(R_HEAP, node_class);
+#else
+    /* Non-pthread builds keep the original, global-heap layout. */
     SEXP s, base;
     char *data;
     PAGE_HEADER *page;
@@ -1653,6 +1797,7 @@ static void GetNewPage(int node_class)
 	base = s;
 	R_GenHeap[node_class].Free = s;
     }
+#endif
 }
 
 static void ReleasePage(PAGE_HEADER *page, int node_class)
@@ -1671,7 +1816,13 @@ static void ReleasePage(PAGE_HEADER *page, int node_class)
 	R_GenHeap[node_class].AllocCount--;
     }
     R_GenHeap[node_class].PageCount--;
+#ifdef HAVE_PTHREAD
+    /* See GetNewPageInHeap(): the allocation is an over-allocated malloc()
+       and the original base pointer is stored immediately before PAGE_HEADER. */
+    free(((void **) page)[-1]);
+#else
     free(page);
+#endif
 }
 
 static void TryToReleasePages(void)
@@ -3264,7 +3415,7 @@ attribute_hidden void InitMemory(void)
 	    R_Suicide("InitMemory: page size is not a power of two");
 	R_mtl_pagesize_mask = (uintptr_t) (R_mtl_pagesize - 1);
     }
-    mtl_large_owner_init();
+    /* Owner maps are initialized lazily when threaded regions start. */
 
     init_gctorture();
     init_gc_grow_settings();
@@ -3494,8 +3645,34 @@ void *R_realloc_gc(void *p, size_t n)
 
 SEXP allocSExp(SEXPTYPE t)
 {
+    if (__builtin_expect(!R_MTL_THREADING_ACTIVE, 1)) {
+#ifdef HAVE_PTHREAD
+	/* Stock-like serial path (no heap sync instrumentation). */
+	if (t == NILSXP)
+	    return R_NilValue;
+	R_mtl_heap_state *heap = mtl_serial_heap();
+	if (FORCE_GC || mtl_serial_no_free_nodes(heap)) {
+	    R_gc_internal(0);
+	    if (mtl_serial_no_free_nodes(heap))
+		mem_err_cons();
+	}
+	SEXP s;
+	mtl_serial_class_get_free_node(heap, 0, &s);
+	s->sxpinfo = UnmarkedNodeTemplate.sxpinfo;
+	INIT_REFCNT(s);
+	SET_TYPEOF(s, t);
+	CAR0(s) = R_NilValue;
+	CDR(s) = R_NilValue;
+	TAG(s) = R_NilValue;
+	ATTRIB(s) = R_NilValue;
+	return s;
+#else
+	/* Non-pthread builds: fall through to the existing implementation. */
+#endif
+    }
+
+    /* Threaded/worker path. */
     if (t == NILSXP)
-	/* R_NilValue should be the only NILSXP object */
 	return R_NilValue;
     heap_alloc_enter();
     for (;;) {
@@ -3524,6 +3701,27 @@ SEXP allocSExp(SEXPTYPE t)
 
 static SEXP allocSExpNonCons(SEXPTYPE t)
 {
+    if (__builtin_expect(!R_MTL_THREADING_ACTIVE, 1)) {
+#ifdef HAVE_PTHREAD
+	R_mtl_heap_state *heap = mtl_serial_heap();
+	if (FORCE_GC || mtl_serial_no_free_nodes(heap)) {
+	    R_gc_internal(0);
+	    if (mtl_serial_no_free_nodes(heap))
+		mem_err_cons();
+	}
+	SEXP s;
+	mtl_serial_class_get_free_node(heap, 0, &s);
+	s->sxpinfo = UnmarkedNodeTemplate.sxpinfo;
+	INIT_REFCNT(s);
+	SET_TYPEOF(s, t);
+	TAG(s) = R_NilValue;
+	ATTRIB(s) = R_NilValue;
+	return s;
+#else
+	/* Non-pthread builds: fall through. */
+#endif
+    }
+
     heap_alloc_enter();
     for (;;) {
 	if (FORCE_GC || NO_FREE_NODES()) {
@@ -3551,6 +3749,41 @@ static SEXP allocSExpNonCons(SEXPTYPE t)
    unless a GC will actually occur. */
 SEXP cons(SEXP car, SEXP cdr)
 {
+    if (__builtin_expect(!R_MTL_THREADING_ACTIVE, 1)) {
+#ifdef HAVE_PTHREAD
+	R_mtl_heap_state *heap = mtl_serial_heap();
+	SEXP s;
+	if (FORCE_GC || mtl_serial_no_free_nodes(heap)) {
+	    PROTECT(car);
+	    PROTECT(cdr);
+	    R_gc_internal(0);
+	    UNPROTECT(2);
+	    if (mtl_serial_no_free_nodes(heap))
+		mem_err_cons();
+	}
+
+	if (mtl_serial_class_need_new_page(heap, 0)) {
+	    PROTECT(car);
+	    PROTECT(cdr);
+	    mtl_serial_class_get_free_node(heap, 0, &s);
+	    UNPROTECT(2);
+	} else {
+	    mtl_serial_class_quick_get_free_node(heap, 0, &s);
+	}
+
+	s->sxpinfo = UnmarkedNodeTemplate.sxpinfo;
+	INIT_REFCNT(s);
+	SET_TYPEOF(s, LISTSXP);
+	CAR0(s) = CHK(car); if (car) INCREMENT_REFCNT(car);
+	CDR(s) = CHK(cdr); if (cdr) INCREMENT_REFCNT(cdr);
+	TAG(s) = R_NilValue;
+	ATTRIB(s) = R_NilValue;
+	return s;
+#else
+	/* Non-pthread builds: fall through. */
+#endif
+    }
+
     heap_alloc_enter();
     for (;;) {
 	if (FORCE_GC || NO_FREE_NODES()) {
@@ -3586,6 +3819,42 @@ SEXP cons(SEXP car, SEXP cdr)
 
 attribute_hidden SEXP CONS_NR(SEXP car, SEXP cdr)
 {
+    if (__builtin_expect(!R_MTL_THREADING_ACTIVE, 1)) {
+#ifdef HAVE_PTHREAD
+	R_mtl_heap_state *heap = mtl_serial_heap();
+	SEXP s;
+	if (FORCE_GC || mtl_serial_no_free_nodes(heap)) {
+	    PROTECT(car);
+	    PROTECT(cdr);
+	    R_gc_internal(0);
+	    UNPROTECT(2);
+	    if (mtl_serial_no_free_nodes(heap))
+		mem_err_cons();
+	}
+
+	if (mtl_serial_class_need_new_page(heap, 0)) {
+	    PROTECT(car);
+	    PROTECT(cdr);
+	    mtl_serial_class_get_free_node(heap, 0, &s);
+	    UNPROTECT(2);
+	} else {
+	    mtl_serial_class_quick_get_free_node(heap, 0, &s);
+	}
+
+	s->sxpinfo = UnmarkedNodeTemplate.sxpinfo;
+	INIT_REFCNT(s);
+	DISABLE_REFCNT(s);
+	SET_TYPEOF(s, LISTSXP);
+	CAR0(s) = CHK(car);
+	CDR(s) = CHK(cdr);
+	TAG(s) = R_NilValue;
+	ATTRIB(s) = R_NilValue;
+	return s;
+#else
+	/* Non-pthread builds: fall through. */
+#endif
+    }
+
     heap_alloc_enter();
     for (;;) {
 	if (FORCE_GC || NO_FREE_NODES()) {
@@ -3640,6 +3909,52 @@ attribute_hidden SEXP CONS_NR(SEXP car, SEXP cdr)
 */
 SEXP NewEnvironment(SEXP namelist, SEXP valuelist, SEXP rho)
 {
+    if (__builtin_expect(!R_MTL_THREADING_ACTIVE, 1)) {
+#ifdef HAVE_PTHREAD
+	R_mtl_heap_state *heap = mtl_serial_heap();
+	SEXP v, n, newrho;
+
+	if (FORCE_GC || mtl_serial_no_free_nodes(heap)) {
+	    PROTECT(namelist);
+	    PROTECT(valuelist);
+	    PROTECT(rho);
+	    R_gc_internal(0);
+	    UNPROTECT(3);
+	    if (mtl_serial_no_free_nodes(heap))
+		mem_err_cons();
+	}
+
+	if (mtl_serial_class_need_new_page(heap, 0)) {
+	    PROTECT(namelist);
+	    PROTECT(valuelist);
+	    PROTECT(rho);
+	    mtl_serial_class_get_free_node(heap, 0, &newrho);
+	    UNPROTECT(3);
+	} else {
+	    mtl_serial_class_quick_get_free_node(heap, 0, &newrho);
+	}
+
+	newrho->sxpinfo = UnmarkedNodeTemplate.sxpinfo;
+	INIT_REFCNT(newrho);
+	SET_TYPEOF(newrho, ENVSXP);
+	FRAME(newrho) = valuelist; INCREMENT_REFCNT(valuelist);
+	ENCLOS(newrho) = CHK(rho); if (rho != NULL) INCREMENT_REFCNT(rho);
+	HASHTAB(newrho) = R_NilValue;
+	ATTRIB(newrho) = R_NilValue;
+
+	v = CHK(valuelist);
+	n = CHK(namelist);
+	while (v != R_NilValue && n != R_NilValue) {
+	    SET_TAG(v, TAG(n));
+	    v = CDR(v);
+	    n = CDR(n);
+	}
+	return newrho;
+#else
+	/* Non-pthread builds: fall through. */
+#endif
+    }
+
     heap_alloc_enter();
     for (;;) {
 	if (FORCE_GC || NO_FREE_NODES()) {
@@ -3688,6 +4003,44 @@ SEXP NewEnvironment(SEXP namelist, SEXP valuelist, SEXP rho)
    unless a GC will actually occur. */
 attribute_hidden SEXP mkPROMISE(SEXP expr, SEXP rho)
 {
+    if (__builtin_expect(!R_MTL_THREADING_ACTIVE, 1)) {
+#ifdef HAVE_PTHREAD
+	R_mtl_heap_state *heap = mtl_serial_heap();
+	SEXP s;
+	if (FORCE_GC || mtl_serial_no_free_nodes(heap)) {
+	    PROTECT(expr);
+	    PROTECT(rho);
+	    R_gc_internal(0);
+	    UNPROTECT(2);
+	    if (mtl_serial_no_free_nodes(heap))
+		mem_err_cons();
+	}
+
+	if (mtl_serial_class_need_new_page(heap, 0)) {
+	    PROTECT(expr);
+	    PROTECT(rho);
+	    mtl_serial_class_get_free_node(heap, 0, &s);
+	    UNPROTECT(2);
+	} else {
+	    mtl_serial_class_quick_get_free_node(heap, 0, &s);
+	}
+
+	ENSURE_NAMEDMAX(expr);
+
+	s->sxpinfo = UnmarkedNodeTemplate.sxpinfo;
+	INIT_REFCNT(s);
+	SET_TYPEOF(s, PROMSXP);
+	PRCODE(s) = CHK(expr); INCREMENT_REFCNT(expr);
+	PRENV(s) = CHK(rho); INCREMENT_REFCNT(rho);
+	PRVALUE0(s) = R_UnboundValue;
+	PRSEEN(s) = 0;
+	ATTRIB(s) = R_NilValue;
+	return s;
+#else
+	/* Non-pthread builds: fall through. */
+#endif
+    }
+
     heap_alloc_enter();
     for (;;) {
 	if (FORCE_GC || NO_FREE_NODES()) {
@@ -3775,6 +4128,309 @@ static void custom_node_free(void *ptr) {
 
 SEXP allocVector3(SEXPTYPE type, R_xlen_t length, R_allocator_t *allocator)
 {
+#ifdef HAVE_PTHREAD
+    if (__builtin_expect(!R_MTL_THREADING_ACTIVE, 1)) {
+	/* Stock-like serial allocator path on the main heap. */
+	R_mtl_heap_state *heap = mtl_serial_heap();
+	SEXP s;     /* For the generational collector it would be safer to
+		       work in terms of a VECSXP here, but that would
+		       require several casts below... */
+	R_size_t size = 0, alloc_size, old_R_VSize;
+	int node_class;
+#if VALGRIND_LEVEL > 0
+	R_size_t actual_size = 0;
+#endif
+
+	/* Handle some scalars directly to improve speed. */
+	if (length == 1) {
+	    switch(type) {
+	    case REALSXP:
+	    case INTSXP:
+	    case LGLSXP:
+		node_class = 1;
+		alloc_size = NodeClassSize[1];
+		if (FORCE_GC || mtl_serial_no_free_nodes(heap) ||
+		    mtl_serial_vheap_free(heap) < alloc_size) {
+		    R_gc_internal(alloc_size);
+		    if (mtl_serial_no_free_nodes(heap))
+			mem_err_cons();
+		    if (mtl_serial_vheap_free(heap) < alloc_size)
+			mem_err_heap(size);
+		}
+
+		mtl_serial_class_get_free_node(heap, node_class, &s);
+#if VALGRIND_LEVEL > 1
+		switch(type) {
+		case REALSXP: actual_size = sizeof(double); break;
+		case INTSXP: actual_size = sizeof(int); break;
+		case LGLSXP: actual_size = sizeof(int); break;
+		}
+		VALGRIND_MAKE_MEM_UNDEFINED(STDVEC_DATAPTR(s), actual_size);
+#endif
+		s->sxpinfo = UnmarkedNodeTemplate.sxpinfo;
+		SETSCALAR(s, 1);
+		SET_NODE_CLASS(s, node_class);
+		heap->SmallVallocSize += alloc_size;
+		/* Note that we do not include the header size into VallocSize,
+		   but it is counted into memory usage via NodesInUse. */
+		ATTRIB(s) = R_NilValue;
+		SET_TYPEOF(s, type);
+		SET_STDVEC_LENGTH(s, (R_len_t) length); /* is 1 */
+		SET_STDVEC_TRUELENGTH(s, 0);
+		INIT_REFCNT(s);
+		return(s);
+	    default:
+		break;
+	    }
+	}
+
+	if (length > R_XLEN_T_MAX)
+	    error(_("cannot allocate vector of length %lld"), (long long)length);
+	else if (length < 0 )
+	    error(_("negative length vectors are not allowed"));
+	/* number of vector cells to allocate */
+	switch (type) {
+	case NILSXP:
+	    return R_NilValue;
+	case RAWSXP:
+	    size = BYTE2VEC(length);
+#if VALGRIND_LEVEL > 0
+	    actual_size = length;
+#endif
+	    break;
+	case CHARSXP:
+	    error("use of allocVector(CHARSXP ...) is defunct\n");
+	case intCHARSXP:
+	    type = CHARSXP;
+	    size = BYTE2VEC(length + 1);
+#if VALGRIND_LEVEL > 0
+	    actual_size = length + 1;
+#endif
+	    break;
+	case LGLSXP:
+	case INTSXP:
+	    if (length <= 0)
+		size = 0;
+	    else {
+		if (length > R_SIZE_T_MAX / sizeof(int))
+		    error(_("cannot allocate vector of length %lld"),
+			  (long long)length);
+		size = INT2VEC(length);
+#if VALGRIND_LEVEL > 0
+		actual_size = length*sizeof(int);
+#endif
+	    }
+	    break;
+	case REALSXP:
+	    if (length <= 0)
+		size = 0;
+	    else {
+		if (length > R_SIZE_T_MAX / sizeof(double))
+		    error(_("cannot allocate vector of length %lld"),
+			  (long long)length);
+		size = FLOAT2VEC(length);
+#if VALGRIND_LEVEL > 0
+		actual_size = length * sizeof(double);
+#endif
+	    }
+	    break;
+	case CPLXSXP:
+	    if (length <= 0)
+		size = 0;
+	    else {
+		if (length > R_SIZE_T_MAX / sizeof(Rcomplex))
+		    error(_("cannot allocate vector of length %lld"),
+			  (long long)length);
+		size = COMPLEX2VEC(length);
+#if VALGRIND_LEVEL > 0
+		actual_size = length * sizeof(Rcomplex);
+#endif
+	    }
+	    break;
+	case STRSXP:
+	case EXPRSXP:
+	case VECSXP:
+	    if (length <= 0)
+		size = 0;
+	    else {
+		if (length > R_SIZE_T_MAX / sizeof(SEXP))
+		    error(_("cannot allocate vector of length %lld"),
+			  (long long)length);
+		size = PTR2VEC(length);
+#if VALGRIND_LEVEL > 0
+		actual_size = length * sizeof(SEXP);
+#endif
+	    }
+	    break;
+	case LANGSXP:
+	    if(length == 0) return R_NilValue;
+#ifdef LONG_VECTOR_SUPPORT
+	    if (length > R_SHORT_LEN_MAX) error("invalid length for pairlist");
+#endif
+	    s = allocList((int) length);
+	    SET_TYPEOF(s, LANGSXP);
+	    return s;
+	case LISTSXP:
+#ifdef LONG_VECTOR_SUPPORT
+	    if (length > R_SHORT_LEN_MAX) error("invalid length for pairlist");
+#endif
+	    return allocList((int) length);
+	default:
+	    error(_("invalid type/length (%s/%lld) in vector allocation"),
+		  type2char(type), (long long)length);
+	}
+
+	if (allocator) {
+	    node_class = CUSTOM_NODE_CLASS;
+	    alloc_size = size;
+	} else {
+	    if (size <= NodeClassSize[1]) {
+		node_class = 1;
+		alloc_size = NodeClassSize[1];
+	    }
+	    else {
+		node_class = LARGE_NODE_CLASS;
+		alloc_size = size;
+		for (int i = 2; i < NUM_SMALL_NODE_CLASSES; i++) {
+		    if (size <= NodeClassSize[i]) {
+			node_class = i;
+			alloc_size = NodeClassSize[i];
+			break;
+		    }
+		}
+	    }
+	}
+
+	/* save current R_VSize to roll back adjustment if malloc fails */
+	old_R_VSize = R_VSize;
+
+	/* we need to do the gc here so allocSExp doesn't! */
+	if (FORCE_GC || mtl_serial_no_free_nodes(heap) ||
+	    mtl_serial_vheap_free(heap) < alloc_size) {
+	    R_gc_internal(alloc_size);
+	    if (mtl_serial_no_free_nodes(heap))
+		mem_err_cons();
+	    if (mtl_serial_vheap_free(heap) < alloc_size)
+		mem_err_heap(size);
+	}
+
+	if (size > 0) {
+	    if (node_class < NUM_SMALL_NODE_CLASSES) {
+		mtl_serial_class_get_free_node(heap, node_class, &s);
+#if VALGRIND_LEVEL > 1
+		VALGRIND_MAKE_MEM_UNDEFINED(STDVEC_DATAPTR(s), actual_size);
+#endif
+		s->sxpinfo = UnmarkedNodeTemplate.sxpinfo;
+		INIT_REFCNT(s);
+		SET_NODE_CLASS(s, node_class);
+		heap->SmallVallocSize += alloc_size;
+		SET_STDVEC_LENGTH(s, (R_len_t) length);
+	    }
+	    else {
+		Rboolean success = FALSE;
+		R_size_t hdrsize = sizeof(SEXPREC_ALIGN);
+		void *mem = NULL; /* initialize to suppress warning */
+		if (size < (R_SIZE_T_MAX / sizeof(VECREC)) - hdrsize) { /*** not sure this test is quite right -- why subtract the header? LT */
+		    mem = allocator ?
+			custom_node_alloc(allocator, hdrsize + size * sizeof(VECREC)) :
+			malloc(hdrsize + size * sizeof(VECREC));
+		    if (mem == NULL) {
+			R_gc_no_finalizers(alloc_size);
+			mem = allocator ?
+			    custom_node_alloc(allocator, hdrsize + size * sizeof(VECREC)) :
+			    malloc(hdrsize + size * sizeof(VECREC));
+		    }
+		    if (mem != NULL) {
+			s = mem;
+			SET_STDVEC_LENGTH(s, length);
+			success = TRUE;
+		    }
+		    else s = NULL;
+#ifdef R_MEMORY_PROFILING
+		    R_ReportAllocation(hdrsize + size * sizeof(VECREC));
+#endif
+		} else s = NULL; /* suppress warning */
+		if (! success) {
+		    double dsize = (double)size * sizeof(VECREC)/1024.0;
+		    /* reset the vector heap limit */
+		    R_VSize = old_R_VSize;
+		    if(dsize > 1024.0*1024.0)
+			errorcall(R_NilValue,
+				  _("cannot allocate vector of size %0.1f %s"),
+				  dsize/1024.0/1024.0, "Gb");
+		    if(dsize > 1024.0)
+			errorcall(R_NilValue,
+				  _("cannot allocate vector of size %0.1f %s"),
+				  dsize/1024.0, "Mb");
+		    else
+			errorcall(R_NilValue,
+				  _("cannot allocate vector of size %0.f %s"),
+				  dsize, "Kb");
+		}
+		s->sxpinfo = UnmarkedNodeTemplate.sxpinfo;
+		INIT_REFCNT(s);
+		SET_NODE_CLASS(s, node_class);
+		if (!allocator) heap->LargeVallocSize += size;
+		    heap->GenHeap[node_class].AllocCount++;
+		    heap->NodesInUse++;
+		    SNAP_NODE(s, heap->GenHeap[node_class].New);
+		    /* In pure serial execution, GC ownership checks are disabled, so
+		       tracking malloc-node ownership is wasted work (and hot under
+		       allocation-heavy workloads). */
+		    }
+		    ATTRIB(s) = R_NilValue;
+		    SET_TYPEOF(s, type);
+		}
+	else {
+	    GC_PROT(s = allocSExpNonCons(type));
+	    SET_STDVEC_LENGTH(s, (R_len_t) length);
+	}
+	SETALTREP(s, 0);
+	SET_STDVEC_TRUELENGTH(s, 0);
+	INIT_REFCNT(s);
+
+	/* The following prevents disaster in the case */
+	/* that an uninitialised string vector is marked */
+	/* Direct assignment is OK since the node was just allocated and */
+	/* so is at least as new as R_NilValue and R_BlankString */
+	if (type == EXPRSXP || type == VECSXP) {
+	    SEXP *data = STRING_PTR(s);
+#if VALGRIND_LEVEL > 1
+	    VALGRIND_MAKE_MEM_DEFINED(STRING_PTR(s), actual_size);
+#endif
+	    for (R_xlen_t i = 0; i < length; i++)
+		data[i] = R_NilValue;
+	}
+	else if(type == STRSXP) {
+	    SEXP *data = STRING_PTR(s);
+#if VALGRIND_LEVEL > 1
+	    VALGRIND_MAKE_MEM_DEFINED(STRING_PTR(s), actual_size);
+#endif
+	    for (R_xlen_t i = 0; i < length; i++)
+		data[i] = R_BlankString;
+	}
+	else if (type == CHARSXP || type == intCHARSXP) {
+#if VALGRIND_LEVEL > 0
+	    VALGRIND_MAKE_MEM_UNDEFINED(CHAR(s), actual_size);
+#endif
+	    CHAR_RW(s)[length] = 0;
+	}
+#if VALGRIND_LEVEL > 0
+	else if (type == REALSXP)
+	    VALGRIND_MAKE_MEM_UNDEFINED(REAL(s), actual_size);
+	else if (type == INTSXP)
+	    VALGRIND_MAKE_MEM_UNDEFINED(INTEGER(s), actual_size);
+	else if (type == LGLSXP)
+	    VALGRIND_MAKE_MEM_UNDEFINED(LOGICAL(s), actual_size);
+	else if (type == CPLXSXP)
+	    VALGRIND_MAKE_MEM_UNDEFINED(COMPLEX(s), actual_size);
+	else if (type == RAWSXP)
+	    VALGRIND_MAKE_MEM_UNDEFINED(RAW(s), actual_size);
+#endif
+	return s;
+    }
+#endif /* HAVE_PTHREAD */
+
     if (type == NILSXP)
 	return R_NilValue;
 
