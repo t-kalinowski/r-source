@@ -1641,6 +1641,11 @@ attribute_hidden void R_mtl_heap_lock(void);
 attribute_hidden void R_mtl_heap_unlock(void);
 attribute_hidden void R_mtl_heap_unlock_all(void);
 
+/* Set to non-zero once R has spawned MTL worker threads. Used to keep
+   single-threaded performance close to stock R by avoiding heavyweight
+   heap synchronization until it is actually needed. */
+attribute_hidden extern int R_mtl_threading_active;
+
 attribute_hidden void R_mtl_global_lock(void);
 attribute_hidden void R_mtl_global_unlock(void);
 attribute_hidden void R_mtl_global_unlock_all(void);

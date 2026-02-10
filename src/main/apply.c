@@ -444,6 +444,10 @@ static void mtl_pool_ensure_threads(int nthreads)
     if (nthreads <= mtl_pool.nthreads)
 	return;
 
+    /* From this point on the runtime may have multiple OS threads executing.
+       Enable heavier heap synchronization needed for worker/main-heap interop. */
+    R_mtl_threading_active = 1;
+
     int old = mtl_pool.nthreads;
     pthread_t *new_threads = (pthread_t *) calloc((size_t) nthreads, sizeof(pthread_t));
     mtl_worker_t **new_workers = (mtl_worker_t **) calloc((size_t) nthreads, sizeof(mtl_worker_t *));

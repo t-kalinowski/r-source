@@ -160,6 +160,9 @@ attribute_hidden int R_gc_running(void) { return R_in_gc; }
 #ifdef HAVE_PTHREAD
 # include <stdatomic.h>
 
+/* Set to non-zero once R has spawned MTL worker threads. */
+attribute_hidden int R_mtl_threading_active = 0;
+
 static pthread_mutex_t R_heap_excl_mutex = PTHREAD_MUTEX_INITIALIZER;
 static pthread_cond_t  R_heap_excl_cond  = PTHREAD_COND_INITIALIZER;
 static atomic_int      R_heap_exclusive  = 0; /* set while in exclusive region */
@@ -172,6 +175,8 @@ static R_THREAD_LOCAL int R_heap_inflight_suspended = 0;
 
 static R_INLINE void heap_alloc_suspend(void)
 {
+    if (!R_mtl_threading_active)
+	return;
     /* Worker heaps are private: they do not participate in main-heap GC sync.
        Workers only switch to the main heap while holding the heap lock, so
        main-heap allocation there is already excluded from concurrent GC. */
@@ -192,6 +197,8 @@ static R_INLINE void heap_alloc_suspend(void)
 
 static R_INLINE void heap_alloc_resume(void)
 {
+    if (!R_mtl_threading_active)
+	return;
     /* See heap_alloc_suspend(). */
     if (R_Interpreter != NULL && R_Interpreter->isMTLWorker)
 	return;
@@ -203,6 +210,8 @@ static R_INLINE void heap_alloc_resume(void)
 
 static R_INLINE void heap_alloc_enter(void)
 {
+    if (!R_mtl_threading_active)
+	return;
     /* See heap_alloc_suspend(). */
     if (R_Interpreter != NULL && R_Interpreter->isMTLWorker)
 	return;
@@ -242,6 +251,8 @@ static R_INLINE void heap_alloc_enter(void)
 
 static R_INLINE void heap_alloc_exit(void)
 {
+    if (!R_mtl_threading_active)
+	return;
     /* See heap_alloc_suspend(). */
     if (R_Interpreter != NULL && R_Interpreter->isMTLWorker)
 	return;
@@ -270,6 +281,8 @@ static R_INLINE void heap_alloc_exit(void)
 
 attribute_hidden void R_mtl_heap_lock(void)
 {
+    if (!R_mtl_threading_active)
+	return;
     if (R_heap_excl_depth++ > 0)
 	return;
 
@@ -286,6 +299,8 @@ attribute_hidden void R_mtl_heap_lock(void)
 
 attribute_hidden void R_mtl_heap_unlock(void)
 {
+    if (!R_mtl_threading_active)
+	return;
     if (--R_heap_excl_depth > 0)
 	return;
 
@@ -297,6 +312,8 @@ attribute_hidden void R_mtl_heap_unlock(void)
 
 attribute_hidden void R_mtl_heap_unlock_all(void)
 {
+    if (!R_mtl_threading_active)
+	return;
     /* Drop allocator inflight accounting if we are unwinding mid-allocation. */
     if (R_heap_inflight_held) {
 	heap_alloc_suspend();
@@ -842,11 +859,7 @@ typedef struct PAGE_HEADER {
 struct R_mtl_heap_state_ {
     struct {
 	SEXP Old[NUM_OLD_GENERATIONS], New;
-#ifdef HAVE_PTHREAD
-	_Atomic(SEXP) Free;
-#else
 	SEXP Free;
-#endif
 	SEXPREC OldPeg[NUM_OLD_GENERATIONS], NewPeg;
 #ifndef EXPEL_OLD_TO_NEW
 	SEXP OldToNew[NUM_OLD_GENERATIONS];
@@ -856,15 +869,9 @@ struct R_mtl_heap_state_ {
 	PAGE_HEADER *pages;
     } GenHeap[NUM_NODE_CLASSES];
 
-#ifdef HAVE_PTHREAD
-    _Atomic(R_size_t) NodesInUse;
-    _Atomic(R_size_t) LargeVallocSize;
-    _Atomic(R_size_t) SmallVallocSize;
-#else
     R_size_t NodesInUse;
     R_size_t LargeVallocSize;
     R_size_t SmallVallocSize;
-#endif
 
     R_size_t NSize; /* node limit for this heap (cons cells) */
     R_size_t VSize; /* vector heap limit for this heap (in VECRECs) */
@@ -1281,28 +1288,59 @@ static void GetNewPage(int node_class);
 static void mtl_worker_gc(R_size_t size_needed);
 
 #ifdef HAVE_PTHREAD
-# define GENHEAP_FREE_LOAD(c) \
-    atomic_load_explicit(&R_GenHeap[c].Free, memory_order_acquire)
-# define GENHEAP_FREE_STORE(c, v) \
-    atomic_store_explicit(&R_GenHeap[c].Free, (v), memory_order_release)
-# define NODES_IN_USE_LOAD() \
-    atomic_load_explicit(&R_NodesInUse, memory_order_relaxed)
-# define NODES_IN_USE_STORE(v) \
-    atomic_store_explicit(&R_NodesInUse, (v), memory_order_relaxed)
-# define NODES_IN_USE_ADD(n) \
-    atomic_fetch_add_explicit(&R_NodesInUse, (n), memory_order_relaxed)
-# define SMALL_VALLOC_LOAD() \
-    atomic_load_explicit(&R_SmallVallocSize, memory_order_relaxed)
-# define LARGE_VALLOC_LOAD() \
-    atomic_load_explicit(&R_LargeVallocSize, memory_order_relaxed)
-# define SMALL_VALLOC_ADD(n) \
-    atomic_fetch_add_explicit(&R_SmallVallocSize, (n), memory_order_relaxed)
-# define LARGE_VALLOC_ADD(n) \
-    atomic_fetch_add_explicit(&R_LargeVallocSize, (n), memory_order_relaxed)
-# define SMALL_VALLOC_STORE(v) \
-    atomic_store_explicit(&R_SmallVallocSize, (v), memory_order_relaxed)
-# define LARGE_VALLOC_STORE(v) \
-    atomic_store_explicit(&R_LargeVallocSize, (v), memory_order_relaxed)
+static R_INLINE SEXP mtl_genheap_free_load(int c)
+{
+    if (R_mtl_threading_active)
+	return __atomic_load_n(&R_GenHeap[c].Free, __ATOMIC_ACQUIRE);
+    return R_GenHeap[c].Free;
+}
+
+static R_INLINE void mtl_genheap_free_store(int c, SEXP v)
+{
+    if (R_mtl_threading_active) {
+	__atomic_store_n(&R_GenHeap[c].Free, v, __ATOMIC_RELEASE);
+    } else {
+	R_GenHeap[c].Free = v;
+    }
+}
+
+# define GENHEAP_FREE_LOAD(c) mtl_genheap_free_load((c))
+# define GENHEAP_FREE_STORE(c, v) mtl_genheap_free_store((c), (v))
+
+static R_INLINE R_size_t mtl_r_size_t_load(R_size_t *p)
+{
+    if (R_mtl_threading_active)
+	return __atomic_load_n(p, __ATOMIC_RELAXED);
+    return *p;
+}
+
+static R_INLINE void mtl_r_size_t_store(R_size_t *p, R_size_t v)
+{
+    if (R_mtl_threading_active)
+	__atomic_store_n(p, v, __ATOMIC_RELAXED);
+    else
+	*p = v;
+}
+
+static R_INLINE void mtl_r_size_t_add(R_size_t *p, R_size_t n)
+{
+    if (R_mtl_threading_active) {
+	__atomic_fetch_add(p, n, __ATOMIC_RELAXED);
+    } else {
+	*p += n;
+    }
+}
+
+# define NODES_IN_USE_LOAD() mtl_r_size_t_load(&R_NodesInUse)
+# define NODES_IN_USE_STORE(v) mtl_r_size_t_store(&R_NodesInUse, (v))
+# define NODES_IN_USE_ADD(n) mtl_r_size_t_add(&R_NodesInUse, (R_size_t) (n))
+
+# define SMALL_VALLOC_LOAD() mtl_r_size_t_load(&R_SmallVallocSize)
+# define LARGE_VALLOC_LOAD() mtl_r_size_t_load(&R_LargeVallocSize)
+# define SMALL_VALLOC_ADD(n) mtl_r_size_t_add(&R_SmallVallocSize, (R_size_t) (n))
+# define LARGE_VALLOC_ADD(n) mtl_r_size_t_add(&R_LargeVallocSize, (R_size_t) (n))
+# define SMALL_VALLOC_STORE(v) mtl_r_size_t_store(&R_SmallVallocSize, (v))
+# define LARGE_VALLOC_STORE(v) mtl_r_size_t_store(&R_LargeVallocSize, (v))
 #else
 # define GENHEAP_FREE_LOAD(c) (R_GenHeap[c].Free)
 # define GENHEAP_FREE_STORE(c, v) (R_GenHeap[c].Free = (v))
@@ -1331,15 +1369,26 @@ static R_INLINE R_size_t VHEAP_FREE_MTL(void)
 static R_INLINE SEXP try_get_free_node(int node_class)
 {
 #ifdef HAVE_PTHREAD
+    if (!R_mtl_threading_active) {
+	/* Single-threaded fast path: avoid CAS loops and atomic RMW ops. */
+	SEXP s = GENHEAP_FREE_LOAD(node_class);
+	if (s == R_GenHeap[node_class].New)
+	    return NULL;
+	GENHEAP_FREE_STORE(node_class, NEXT_NODE(s));
+	NODES_IN_USE_ADD(1);
+	return s;
+    }
+
     for (;;) {
 	SEXP expected = GENHEAP_FREE_LOAD(node_class);
 	if (expected == R_GenHeap[node_class].New)
 	    return NULL;
 	SEXP desired = NEXT_NODE(expected);
-	if (atomic_compare_exchange_weak_explicit(&R_GenHeap[node_class].Free,
-						 &expected, desired,
-						 memory_order_acq_rel,
-						 memory_order_acquire)) {
+	if (__atomic_compare_exchange_n(&R_GenHeap[node_class].Free,
+				       &expected, desired,
+				       1,
+				       __ATOMIC_ACQ_REL,
+				       __ATOMIC_ACQUIRE)) {
 	    NODES_IN_USE_ADD(1);
 	    return expected;
 	}
@@ -1385,9 +1434,13 @@ static R_INLINE void mtl_gc(R_size_t size_needed)
 	    }
 	}
     } else {
-	R_mtl_heap_lock();
-	R_gc_internal(size_needed);
-	R_mtl_heap_unlock();
+	if (R_mtl_threading_active) {
+	    R_mtl_heap_lock();
+	    R_gc_internal(size_needed);
+	    R_mtl_heap_unlock();
+	} else {
+	    R_gc_internal(size_needed);
+	}
     }
     heap_alloc_resume();
 }
@@ -1399,10 +1452,15 @@ static R_INLINE void mtl_get_new_page(int node_class)
 	if (CLASS_NEED_NEW_PAGE(node_class))
 	    GetNewPage(node_class);
     } else {
-	R_mtl_heap_lock();
-	if (CLASS_NEED_NEW_PAGE(node_class))
-	    GetNewPage(node_class);
-	R_mtl_heap_unlock();
+	if (R_mtl_threading_active) {
+	    R_mtl_heap_lock();
+	    if (CLASS_NEED_NEW_PAGE(node_class))
+		GetNewPage(node_class);
+	    R_mtl_heap_unlock();
+	} else {
+	    if (CLASS_NEED_NEW_PAGE(node_class))
+		GetNewPage(node_class);
+	}
     }
     heap_alloc_resume();
 }
@@ -3147,27 +3205,12 @@ attribute_hidden void R_mtl_adopt_worker_heap(R_InterpreterState *st)
     }
 
     /* Transfer heap usage counters. */
-#ifdef HAVE_PTHREAD
-    atomic_fetch_add_explicit(&dst->NodesInUse,
-			      atomic_load_explicit(&src->NodesInUse, memory_order_relaxed),
-			      memory_order_relaxed);
-    atomic_fetch_add_explicit(&dst->SmallVallocSize,
-			      atomic_load_explicit(&src->SmallVallocSize, memory_order_relaxed),
-			      memory_order_relaxed);
-    atomic_fetch_add_explicit(&dst->LargeVallocSize,
-			      atomic_load_explicit(&src->LargeVallocSize, memory_order_relaxed),
-			      memory_order_relaxed);
-    atomic_store_explicit(&src->NodesInUse, 0, memory_order_relaxed);
-    atomic_store_explicit(&src->SmallVallocSize, 0, memory_order_relaxed);
-    atomic_store_explicit(&src->LargeVallocSize, 0, memory_order_relaxed);
-#else
     dst->NodesInUse += src->NodesInUse;
     dst->SmallVallocSize += src->SmallVallocSize;
     dst->LargeVallocSize += src->LargeVallocSize;
     src->NodesInUse = 0;
     src->SmallVallocSize = 0;
     src->LargeVallocSize = 0;
-#endif
 
     R_mtl_heap_unlock();
 
@@ -3992,8 +4035,11 @@ SEXP allocVector3(SEXPTYPE type, R_xlen_t length, R_allocator_t *allocator)
 			R_mtl_heap_unlock();
 			heap_alloc_resume();
 		    }
-		    mtl_large_owner_set(s, R_HEAP);
-		}
+			    /* Only worker heaps need explicit owner tracking for malloc nodes.
+			       Main-heap ownership is the default (owner == NULL). */
+			    if (R_HEAP->isWorker)
+				mtl_large_owner_set(s, R_HEAP);
+			}
 		ATTRIB(s) = R_NilValue;
 		SET_TYPEOF(s, type);
 	    }
