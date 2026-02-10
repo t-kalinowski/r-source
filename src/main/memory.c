@@ -160,7 +160,7 @@ attribute_hidden int R_gc_running(void) { return R_in_gc; }
 #ifdef HAVE_PTHREAD
 # include <stdatomic.h>
 
-/* Set to non-zero once R has spawned MTL worker threads. */
+/* Global: enabled only while mtlapply() workers are evaluating. */
 attribute_hidden int R_mtl_threading_active = 0;
 
 static pthread_mutex_t R_heap_excl_mutex = PTHREAD_MUTEX_INITIALIZER;

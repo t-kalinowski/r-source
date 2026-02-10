@@ -241,8 +241,8 @@ static void mtl_pool_init_if_needed(void)
 
     R_RegisterInterpreterState(&w->interp);
 
-    R_InterpreterState *saved_interp = R_Interpreter;
-    R_Interpreter = &w->interp;
+    R_InterpreterState *saved_interp = R_InterpreterTLS;
+    R_InterpreterTLS = &w->interp;
 
 #ifdef R_USE_SIGNALS
     /* begincontext() assumes R_GlobalContext is non-NULL. Install a
@@ -258,26 +258,26 @@ static void mtl_pool_init_if_needed(void)
     R_Toplevel.sysparent = R_BaseEnv;
     R_Toplevel.conexit = R_NilValue;
     R_Toplevel.vmax = NULL;
-    R_Toplevel.nodestack = R_BCNodeStackTop;
-    R_Toplevel.bcprottop = R_BCProtTop;
+    R_Toplevel.nodestack = w->interp.bcNodeStackTop;
+    R_Toplevel.bcprottop = w->interp.bcProtTop;
     R_Toplevel.cend = NULL;
     R_Toplevel.cenddata = NULL;
     R_Toplevel.intsusp = FALSE;
-    R_Toplevel.handlerstack = R_HandlerStack;
-    R_Toplevel.restartstack = R_RestartStack;
+    R_Toplevel.handlerstack = w->interp.handlerStack;
+    R_Toplevel.restartstack = w->interp.restartStack;
     R_Toplevel.srcref = R_NilValue;
     R_Toplevel.prstack = NULL;
     R_Toplevel.returnValue = SEXP_TO_STACKVAL(NULL);
     R_Toplevel.evaldepth = 0;
     R_Toplevel.browserfinish = 0;
-    R_GlobalContext = R_ToplevelContext = R_SessionContext = &R_Toplevel;
-    R_ExitContext = NULL;
+    w->interp.globalContext = w->interp.toplevelContext = w->interp.sessionContext = &R_Toplevel;
+    w->interp.exitContext = NULL;
 #endif
 
-	    /* Disable stack checks in this thread; main's limits are unrelated. */
-	    R_CStackStart = (uintptr_t) -1;
-	    R_CStackLimit = (uintptr_t) -1;
-	    R_OldCStackLimit = (uintptr_t) 0;
+    /* Disable stack checks in this thread; main's limits are unrelated. */
+    w->interp.cStackStart = (uintptr_t) -1;
+    w->interp.cStackLimit = (uintptr_t) -1;
+    w->interp.oldCStackLimit = (uintptr_t) 0;
 
 	    for (;;) {
 		pthread_mutex_lock(&p->mu);
@@ -421,7 +421,7 @@ static void mtl_pool_init_if_needed(void)
 	pthread_mutex_unlock(&p->mu);
     }
 
-    R_Interpreter = saved_interp;
+    R_InterpreterTLS = saved_interp;
 
 	    /* Worker interpreter stacks are not reused; free its protection stack. */
 	    R_UnregisterInterpreterState(&w->interp);
@@ -443,10 +443,6 @@ static void mtl_pool_ensure_threads(int nthreads)
 {
     if (nthreads <= mtl_pool.nthreads)
 	return;
-
-    /* From this point on the runtime may have multiple OS threads executing.
-       Enable heavier heap synchronization needed for worker/main-heap interop. */
-    R_mtl_threading_active = 1;
 
     int old = mtl_pool.nthreads;
     pthread_t *new_threads = (pthread_t *) calloc((size_t) nthreads, sizeof(pthread_t));
@@ -497,6 +493,67 @@ attribute_hidden void R_mtlpool_shutdown(void)
     pthread_mutex_destroy(&mtl_pool.mu);
     pthread_cond_destroy(&mtl_pool.cv);
     memset(&mtl_pool, 0, sizeof(mtl_pool));
+}
+
+typedef struct {
+    mtl_job_t *job;
+    int nthreads;
+    int mu_locked;
+} mtlapply_run_data_t;
+
+static SEXP mtlapply_run(void *vp)
+{
+    mtlapply_run_data_t *d = (mtlapply_run_data_t *) vp;
+
+    pthread_mutex_lock(&mtl_pool.mu);
+    d->mu_locked = 1;
+
+    /* mtlapply() is restricted to the main thread; concurrent jobs are fatal. */
+    if (mtl_pool.job != NULL) {
+	pthread_mutex_unlock(&mtl_pool.mu);
+	d->mu_locked = 0;
+	R_Suicide("mtlapply internal error: concurrent job");
+    }
+
+    /* Enable threaded allocator/GC fast paths only while workers evaluate. */
+    R_mtl_threading_active = 1;
+
+    mtl_pool.job = d->job;
+    mtl_pool.job_nthreads = d->nthreads;
+    mtl_pool.job_done = 0;
+    mtl_pool.gen++;
+    pthread_cond_broadcast(&mtl_pool.cv);
+
+    while (mtl_pool.job_done < d->nthreads)
+	pthread_cond_wait(&mtl_pool.cv, &mtl_pool.mu);
+
+    mtl_pool.job = NULL;
+    pthread_cond_broadcast(&mtl_pool.cv);
+
+    R_mtl_threading_active = 0;
+
+    pthread_mutex_unlock(&mtl_pool.mu);
+    d->mu_locked = 0;
+
+    return R_NilValue;
+}
+
+static void mtlapply_run_cleanup(void *vp)
+{
+    mtlapply_run_data_t *d = (mtlapply_run_data_t *) vp;
+
+    /* Ensure serial mode is restored on error/unwind. */
+    R_mtl_threading_active = 0;
+
+    if (d->mu_locked) {
+	/* Best-effort: ensure workers aren't stuck waiting for job==NULL. */
+	if (mtl_pool.job == d->job) {
+	    mtl_pool.job = NULL;
+	    pthread_cond_broadcast(&mtl_pool.cv);
+	}
+	pthread_mutex_unlock(&mtl_pool.mu);
+	d->mu_locked = 0;
+    }
 }
 #endif /* HAVE_PTHREAD */
 
@@ -631,25 +688,16 @@ attribute_hidden SEXP do_mtlapply(SEXP call, SEXP op, SEXP args, SEXP rho)
 	    if (job.results == NULL)
 		error(_("cannot allocate memory"));
 
-	    pthread_mutex_lock(&mtl_pool.mu);
-	    if (mtl_pool.job != NULL) {
-		pthread_mutex_unlock(&mtl_pool.mu);
-		error("mtlapply internal error: concurrent job");
-	    }
-    mtl_pool.job = &job;
-	    mtl_pool.job_nthreads = nthreads;
-	    mtl_pool.job_done = 0;
-	    mtl_pool.gen++;
-	    pthread_cond_broadcast(&mtl_pool.cv);
-	    while (mtl_pool.job_done < nthreads)
-		pthread_cond_wait(&mtl_pool.cv, &mtl_pool.mu);
-	    mtl_pool.job = NULL;
-	    pthread_cond_broadcast(&mtl_pool.cv);
-	    pthread_mutex_unlock(&mtl_pool.mu);
+		    mtlapply_run_data_t run_data;
+		    run_data.job = &job;
+		    run_data.nthreads = nthreads;
+		    run_data.mu_locked = 0;
+		    R_ExecWithCleanup(mtlapply_run, &run_data,
+				      mtlapply_run_cleanup, &run_data);
 
-	    pthread_mutex_destroy(&job.err_mutex);
+		    pthread_mutex_destroy(&job.err_mutex);
 
-	    if (atomic_load_explicit(&job.error, memory_order_relaxed)) {
+		    if (atomic_load_explicit(&job.error, memory_order_relaxed)) {
 		/* Ensure worker heaps don't keep partial results rooted. */
 		for (int t = 0; t < nthreads; t++)
 		    mtl_pool.workers[t]->interp.preciousList = R_NilValue;

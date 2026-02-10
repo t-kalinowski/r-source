@@ -1641,9 +1641,8 @@ attribute_hidden void R_mtl_heap_lock(void);
 attribute_hidden void R_mtl_heap_unlock(void);
 attribute_hidden void R_mtl_heap_unlock_all(void);
 
-/* Set to non-zero once R has spawned MTL worker threads. Used to keep
-   single-threaded performance close to stock R by avoiding heavyweight
-   heap synchronization until it is actually needed. */
+/* Global flag enabling the multi-threaded allocation/GC fast paths.
+   Keep it off outside of mtlapply() to preserve serial performance. */
 attribute_hidden extern int R_mtl_threading_active;
 
 attribute_hidden void R_mtl_global_lock(void);
@@ -1677,7 +1676,19 @@ extern R_InterpreterState R_Interpreter0;
  * Must be visible for internal shared objects (e.g. grDevices.so) that are
  * built against Defn.h and use macros like R_Visible.
  */
-extern R_THREAD_LOCAL R_InterpreterState *R_Interpreter INI_as(&R_Interpreter0);
+extern0 R_InterpreterState *R_InterpreterMain INI_as(&R_Interpreter0);
+extern0 R_THREAD_LOCAL R_InterpreterState *R_InterpreterTLS INI_as(NULL);
+
+static R_INLINE R_InterpreterState *R_mtl_interpreter_ptr(void)
+{
+    /* Keep serial performance close to stock: avoid TLS access unless a
+       parallel region is active. */
+    if (__builtin_expect(!R_mtl_threading_active, 1))
+	return R_InterpreterMain;
+    return R_InterpreterTLS ? R_InterpreterTLS : R_InterpreterMain;
+}
+
+#define R_Interpreter (R_mtl_interpreter_ptr())
 
 #define R_CurrentExpr   (R_Interpreter->currentExpr)
 #define R_ReturnedValue (R_Interpreter->returnedValue)
