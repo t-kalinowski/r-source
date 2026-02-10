@@ -9,6 +9,7 @@ README_files/
 tasks/pkgs/mtl-lib/
 tasks/pkgs/downloads/
 tasks/pkgs/dplyr-test.log
+tasks/pkgs/*.log
 
 # built during tests/Pkgs runs
 tests/Pkgs/**/src/*.o
