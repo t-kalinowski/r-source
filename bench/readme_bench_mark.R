@@ -11,6 +11,10 @@
 ## - README_SHARDS
 ## - README_GROUPS
 ## - README_FEAT_LOOPS
+## - README_COS_M
+## - README_COS_K
+## - README_ALLOC_M
+## - README_ALLOC_K
 ## - README_ITERS
 ## - README_THREADS (comma-separated; default "1,2,4,8")
 
@@ -37,10 +41,18 @@ N <- parse_int(Sys.getenv("README_N"), 2000000L)
 nshards <- parse_int(Sys.getenv("README_SHARDS"), 64L)
 ngroups <- parse_int(Sys.getenv("README_GROUPS"), 4096L)
 feat_loops <- parse_int(Sys.getenv("README_FEAT_LOOPS"), 40L)
+cos_m <- parse_int(Sys.getenv("README_COS_M"), 200000L)
+cos_k <- parse_int(Sys.getenv("README_COS_K"), 256L)
+alloc_m <- parse_int(Sys.getenv("README_ALLOC_M"), 50000L)
+alloc_k <- parse_int(Sys.getenv("README_ALLOC_K"), 128L)
 iters <- parse_int(Sys.getenv("README_ITERS"), 3L)
 threads <- parse_int_vec(Sys.getenv("README_THREADS"), c(1L, 2L, 4L, 8L))
 
-stopifnot(N >= 1L, nshards >= 1L, ngroups >= 1L, feat_loops >= 1L, iters >= 1L)
+stopifnot(
+  N >= 1L, nshards >= 1L, ngroups >= 1L, feat_loops >= 1L,
+  cos_m >= 1L, cos_k >= 1L, alloc_m >= 1L, alloc_k >= 1L,
+  iters >= 1L
+)
 stopifnot(all(is.finite(threads)), all(threads >= 1L))
 
 ## Deterministic data in the main heap (no RNG, no strings).
@@ -105,6 +117,7 @@ meta <- list(
   r_home = R.home(),
   settings = list(
     N = N, nshards = nshards, ngroups = ngroups, feat_loops = feat_loops,
+    cos_m = cos_m, cos_k = cos_k, alloc_m = alloc_m, alloc_k = alloc_k,
     iters = iters, threads = threads
   )
 )
@@ -112,4 +125,3 @@ meta <- list(
 dir.create(dirname(out_path), recursive = TRUE, showWarnings = FALSE)
 saveRDS(list(meta = meta, bench = res), out_path)
 cat("wrote: ", out_path, "\n", sep = "")
-

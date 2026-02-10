@@ -15,6 +15,10 @@
 ## - README_SHARDS: tasks, default 64
 ## - README_GROUPS: groups, default 4096
 ## - README_FEAT_LOOPS: feature loops, default 40
+## - README_COS_M: workload B outer loop, default 200000
+## - README_COS_K: workload B inner loop, default 256
+## - README_ALLOC_M: workload C outer loop, default 50000
+## - README_ALLOC_K: workload C inner loop, default 128
 ## - README_ITERS: timing iterations, default 3
 ## - README_THREADS: comma-separated thread counts (mtlapply only), default "1,2,4,8"
 
@@ -54,10 +58,18 @@ N <- parse_int(Sys.getenv("README_N"), 2000000L)
 nshards <- parse_int(Sys.getenv("README_SHARDS"), 64L)
 ngroups <- parse_int(Sys.getenv("README_GROUPS"), 4096L)
 feat_loops <- parse_int(Sys.getenv("README_FEAT_LOOPS"), 40L)
+cos_m <- parse_int(Sys.getenv("README_COS_M"), 200000L)
+cos_k <- parse_int(Sys.getenv("README_COS_K"), 256L)
+alloc_m <- parse_int(Sys.getenv("README_ALLOC_M"), 50000L)
+alloc_k <- parse_int(Sys.getenv("README_ALLOC_K"), 128L)
 iters <- parse_int(Sys.getenv("README_ITERS"), 3L)
 threads <- parse_int_vec(Sys.getenv("README_THREADS"), c(1L, 2L, 4L, 8L))
 
-stopifnot(N >= 1L, nshards >= 1L, ngroups >= 1L, feat_loops >= 1L, iters >= 1L)
+stopifnot(
+  N >= 1L, nshards >= 1L, ngroups >= 1L, feat_loops >= 1L,
+  cos_m >= 1L, cos_k >= 1L, alloc_m >= 1L, alloc_k >= 1L,
+  iters >= 1L
+)
 stopifnot(all(is.finite(threads)), all(threads >= 1L))
 
 has_mtlapply <- exists("mtlapply")
@@ -104,8 +116,8 @@ workloads[["etl_group_mean"]] <- local({
 
 ## Workload B: closure-heavy math with lots of temporary allocations.
 workloads[["cos_seq"]] <- local({
-  m <- 200000L
-  k <- 256L
+  m <- cos_m
+  k <- cos_k
 
   worker <- function(shard_id) {
     is <- seq.int(shard_id, m, by = nshards)
@@ -122,8 +134,8 @@ workloads[["cos_seq"]] <- local({
 
 ## Workload C: allocator/GC pressure without returning big objects.
 workloads[["alloc_pressure"]] <- local({
-  m <- 50000L
-  k <- 128L
+  m <- alloc_m
+  k <- alloc_k
 
   worker <- function(shard_id) {
     is <- seq.int(shard_id, m, by = nshards)
@@ -192,6 +204,7 @@ meta <- list(
   has_mtlapply = has_mtlapply,
   settings = list(
     N = N, nshards = nshards, ngroups = ngroups, feat_loops = feat_loops,
+    cos_m = cos_m, cos_k = cos_k, alloc_m = alloc_m, alloc_k = alloc_k,
     iters = iters, threads = threads
   ),
   workloads = lapply(workloads, function(wl) {
