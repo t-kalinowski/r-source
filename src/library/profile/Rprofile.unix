@@ -9,6 +9,17 @@
 local({
     libs <- Sys.getenv("R_LIBS_USER") # This is set in Renviron.
     libs <- if(libs == "NULL") character() else unlist(strsplit(libs, ":"))
+    ## Experimental MTL builds may default R_LIBS_USER to a directory under
+    ## R.home() (e.g. ".../site-library-mtl"). Ensure it exists so
+    ## install.packages() works out of the box and we don't accidentally pick
+    ## up user libraries compiled against another libR (common on macOS).
+    for (p in libs) {
+        if (nzchar(p) && endsWith(p, "site-library-mtl") &&
+            startsWith(normalizePath(p, winslash = "/", mustWork = FALSE),
+                       normalizePath(R.home(), winslash = "/", mustWork = TRUE))) {
+            dir.create(p, recursive = TRUE, showWarnings = FALSE)
+        }
+    }
     ## .libPaths filters on existence.
     invisible(.libPaths(c(unlist(strsplit(Sys.getenv("R_LIBS"), ":")),
                           libs)))
