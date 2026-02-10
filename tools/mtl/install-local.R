@@ -44,6 +44,7 @@ dir.create(lib, recursive = TRUE, showWarnings = FALSE)
 # Ensure subprocesses spawned by package installation (e.g. configure scripts)
 # do not pick up user/site libraries built against a different R.
 Sys.setenv(R_LIBS_USER = lib, R_LIBS_SITE = "")
+.libPaths(c(lib, .Library))
 
 desc_field <- function(desc, field) {
   x <- grep(paste0("^", field, ":"), desc, value = TRUE)
