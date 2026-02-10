@@ -119,14 +119,16 @@ static mtl_pool_t mtl_pool;
 static atomic_int mtl_pool_threads_created = 0;
 static SEXP mtl_dotGlobalEnvSym = NULL;
 
-	static void mtl_interp_init_from_main(R_InterpreterState *st)
-	{
-	    st->heap = NULL;
-	    st->currentExpr = NULL;
-	    st->returnedValue = R_NilValue;
-	    st->handlerStack = R_NilValue;
-	    st->restartStack = R_NilValue;
-	    st->visible = TRUE;
+		static void mtl_interp_init_from_main(R_InterpreterState *st)
+		{
+		    st->heap = NULL;
+		    st->gcEnabled = 1;
+		    st->in_gc = 0;
+		    st->currentExpr = NULL;
+		    st->returnedValue = R_NilValue;
+		    st->handlerStack = R_NilValue;
+		    st->restartStack = R_NilValue;
+		    st->visible = TRUE;
 	    st->showErrorMessages = 1;
 	    st->allowOptionsSet = 0;
 	    st->isMTLWorker = 1;
@@ -243,6 +245,7 @@ static void mtl_pool_init_if_needed(void)
 
     R_InterpreterState *saved_interp = R_InterpreterTLS;
     R_InterpreterTLS = &w->interp;
+    R_InterpreterState *saved_compat = R_mtl_set_compat_interpreter(&w->interp);
 
 #ifdef R_USE_SIGNALS
     /* begincontext() assumes R_GlobalContext is non-NULL. Install a
@@ -422,6 +425,7 @@ static void mtl_pool_init_if_needed(void)
     }
 
     R_InterpreterTLS = saved_interp;
+    R_mtl_set_compat_interpreter(saved_compat);
 
 	    /* Worker interpreter stacks are not reused; free its protection stack. */
 	    R_UnregisterInterpreterState(&w->interp);

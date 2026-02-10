@@ -24,3 +24,9 @@
 
 attribute_visible R_THREAD_LOCAL R_InterpreterState *R_Interpreter = &R_Interpreter0;
 
+attribute_hidden R_InterpreterState *R_mtl_set_compat_interpreter(R_InterpreterState *st)
+{
+    R_InterpreterState *old = R_Interpreter;
+    R_Interpreter = st ? st : &R_Interpreter0;
+    return old;
+}

@@ -58,6 +58,8 @@ attribute_hidden void nl_Rdummy(void)
  */
 attribute_hidden R_InterpreterState R_Interpreter0 = {
     .heap = NULL,
+    .gcEnabled = 1,
+    .in_gc = 0,
     .visible = TRUE,
     .showErrorMessages = 1,
     .allowOptionsSet = 1,

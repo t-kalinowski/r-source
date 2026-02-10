@@ -1543,9 +1543,6 @@ LibExtern char *R_Home;		    /* Root of the R tree */
 /* Memory Management */
 extern0 R_size_t R_NSize  INI_as(R_NSIZE);/* Size of cons cell heap */
 extern0 R_size_t R_VSize  INI_as(R_VSIZE);/* Size of the vector heap */
-/* GC enable/in-progress flags are per-interpreter state. */
-extern0 R_THREAD_LOCAL int	R_GCEnabled INI_as(1);
-extern0 R_THREAD_LOCAL int	R_in_gc INI_as(0);
 extern0 SEXP	R_NHeap;	    /* Start of the cons cell heap */
 extern0 SEXP	R_FreeSEXP;	    /* Cons cell free list */
 extern0 R_size_t R_Collected;	    /* Number of free cons cells (after gc) */
@@ -1577,6 +1574,8 @@ extern0 SEXP*	R_SymbolTable;	    /* The symbol table */
  */
 typedef struct R_InterpreterState_ {
     struct R_mtl_heap_state_ *heap; /* per-interpreter heap/GC state (memory.c) */
+    int gcEnabled;           /* whether GC is enabled for this interpreter */
+    int in_gc;               /* whether this interpreter is currently in GC */
     SEXP currentExpr;        /* Currently evaluating expression */
     SEXP returnedValue;      /* Slot for return-ing values */
     SEXP handlerStack;       /* Condition handler stack */
@@ -1637,6 +1636,10 @@ attribute_hidden void R_DestroyInterpreterHeap(R_InterpreterState *st);
 attribute_hidden void R_RegisterInterpreterState(R_InterpreterState *st);
 attribute_hidden void R_UnregisterInterpreterState(R_InterpreterState *st);
 
+/* Set the legacy TLS symbol `R_Interpreter` used by internal shared objects.
+   Returns the previous value for this thread. */
+attribute_hidden R_InterpreterState *R_mtl_set_compat_interpreter(R_InterpreterState *st);
+
 attribute_hidden void R_mtl_heap_lock(void);
 attribute_hidden void R_mtl_heap_unlock(void);
 attribute_hidden void R_mtl_heap_unlock_all(void);
@@ -1695,6 +1698,8 @@ static R_INLINE R_InterpreterState *R_mtl_interpreter_ptr(void)
 #define R_HandlerStack  (R_Interpreter->handlerStack)
 #define R_RestartStack  (R_Interpreter->restartStack)
 #define R_Visible       (R_Interpreter->visible)
+#define R_GCEnabled     (R_Interpreter->gcEnabled)
+#define R_in_gc         (R_Interpreter->in_gc)
 #define R_ShowErrorMessages (R_Interpreter->showErrorMessages)
 #define R_AllowOptionsSet (R_Interpreter->allowOptionsSet)
 #define R_CollectWarnings (R_Interpreter->collectWarnings)

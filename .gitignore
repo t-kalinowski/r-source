@@ -1,5 +1,6 @@
 .codex/
 build-mtl/
+build-mtl-clang/
 bench/results/
 README.html
 README_files/

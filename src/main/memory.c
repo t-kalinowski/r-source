@@ -175,7 +175,7 @@ static R_THREAD_LOCAL int R_heap_inflight_suspended = 0;
 
 static R_INLINE void heap_alloc_suspend(void)
 {
-    if (!R_mtl_threading_active)
+    if (__builtin_expect(!R_mtl_threading_active, 1))
 	return;
     /* Worker heaps are private: they do not participate in main-heap GC sync.
        Workers only switch to the main heap while holding the heap lock, so
@@ -197,7 +197,7 @@ static R_INLINE void heap_alloc_suspend(void)
 
 static R_INLINE void heap_alloc_resume(void)
 {
-    if (!R_mtl_threading_active)
+    if (__builtin_expect(!R_mtl_threading_active, 1))
 	return;
     /* See heap_alloc_suspend(). */
     if (R_Interpreter != NULL && R_Interpreter->isMTLWorker)
@@ -210,7 +210,7 @@ static R_INLINE void heap_alloc_resume(void)
 
 static R_INLINE void heap_alloc_enter(void)
 {
-    if (!R_mtl_threading_active)
+    if (__builtin_expect(!R_mtl_threading_active, 1))
 	return;
     /* See heap_alloc_suspend(). */
     if (R_Interpreter != NULL && R_Interpreter->isMTLWorker)
@@ -251,7 +251,7 @@ static R_INLINE void heap_alloc_enter(void)
 
 static R_INLINE void heap_alloc_exit(void)
 {
-    if (!R_mtl_threading_active)
+    if (__builtin_expect(!R_mtl_threading_active, 1))
 	return;
     /* See heap_alloc_suspend(). */
     if (R_Interpreter != NULL && R_Interpreter->isMTLWorker)
@@ -1290,18 +1290,17 @@ static void mtl_worker_gc(R_size_t size_needed);
 #ifdef HAVE_PTHREAD
 static R_INLINE SEXP mtl_genheap_free_load(int c)
 {
-    if (R_mtl_threading_active)
-	return __atomic_load_n(&R_GenHeap[c].Free, __ATOMIC_ACQUIRE);
-    return R_GenHeap[c].Free;
+    if (__builtin_expect(!R_mtl_threading_active, 1))
+	return R_GenHeap[c].Free;
+    return __atomic_load_n(&R_GenHeap[c].Free, __ATOMIC_ACQUIRE);
 }
 
 static R_INLINE void mtl_genheap_free_store(int c, SEXP v)
 {
-    if (R_mtl_threading_active) {
-	__atomic_store_n(&R_GenHeap[c].Free, v, __ATOMIC_RELEASE);
-    } else {
+    if (__builtin_expect(!R_mtl_threading_active, 1))
 	R_GenHeap[c].Free = v;
-    }
+    else
+	__atomic_store_n(&R_GenHeap[c].Free, v, __ATOMIC_RELEASE);
 }
 
 # define GENHEAP_FREE_LOAD(c) mtl_genheap_free_load((c))
@@ -1309,26 +1308,25 @@ static R_INLINE void mtl_genheap_free_store(int c, SEXP v)
 
 static R_INLINE R_size_t mtl_r_size_t_load(R_size_t *p)
 {
-    if (R_mtl_threading_active)
-	return __atomic_load_n(p, __ATOMIC_RELAXED);
-    return *p;
+    if (__builtin_expect(!R_mtl_threading_active, 1))
+	return *p;
+    return __atomic_load_n(p, __ATOMIC_RELAXED);
 }
 
 static R_INLINE void mtl_r_size_t_store(R_size_t *p, R_size_t v)
 {
-    if (R_mtl_threading_active)
-	__atomic_store_n(p, v, __ATOMIC_RELAXED);
-    else
+    if (__builtin_expect(!R_mtl_threading_active, 1))
 	*p = v;
+    else
+	__atomic_store_n(p, v, __ATOMIC_RELAXED);
 }
 
 static R_INLINE void mtl_r_size_t_add(R_size_t *p, R_size_t n)
 {
-    if (R_mtl_threading_active) {
-	__atomic_fetch_add(p, n, __ATOMIC_RELAXED);
-    } else {
+    if (__builtin_expect(!R_mtl_threading_active, 1))
 	*p += n;
-    }
+    else
+	__atomic_fetch_add(p, n, __ATOMIC_RELAXED);
 }
 
 # define NODES_IN_USE_LOAD() mtl_r_size_t_load(&R_NodesInUse)
@@ -1371,11 +1369,11 @@ static R_INLINE SEXP try_get_free_node(int node_class)
 #ifdef HAVE_PTHREAD
     if (!R_mtl_threading_active) {
 	/* Single-threaded fast path: avoid CAS loops and atomic RMW ops. */
-	SEXP s = GENHEAP_FREE_LOAD(node_class);
+	SEXP s = R_GenHeap[node_class].Free;
 	if (s == R_GenHeap[node_class].New)
 	    return NULL;
-	GENHEAP_FREE_STORE(node_class, NEXT_NODE(s));
-	NODES_IN_USE_ADD(1);
+	R_GenHeap[node_class].Free = NEXT_NODE(s);
+	R_NodesInUse += 1;
 	return s;
     }
 
@@ -4018,23 +4016,29 @@ SEXP allocVector3(SEXPTYPE type, R_xlen_t length, R_allocator_t *allocator)
 	    }
 		    s->sxpinfo = UnmarkedNodeTemplate.sxpinfo;
 		    INIT_REFCNT(s);
-		    SET_NODE_CLASS(s, node_class);
-		    /* Large vector nodes mutate the New list, so serialize that part. */
-		    if (R_HEAP->isWorker) {
-			if (!allocator) LARGE_VALLOC_ADD(size);
-			R_GenHeap[node_class].AllocCount++;
-			NODES_IN_USE_ADD(1);
-			SNAP_NODE(s, R_GenHeap[node_class].New);
-		    } else {
-			heap_alloc_suspend();
-			R_mtl_heap_lock();
-			if (!allocator) LARGE_VALLOC_ADD(size);
-			R_GenHeap[node_class].AllocCount++;
-			NODES_IN_USE_ADD(1);
-			SNAP_NODE(s, R_GenHeap[node_class].New);
-			R_mtl_heap_unlock();
-			heap_alloc_resume();
-		    }
+			    SET_NODE_CLASS(s, node_class);
+			    /* Large vector nodes mutate the New list, so serialize that part. */
+			    if (R_HEAP->isWorker) {
+				if (!allocator) LARGE_VALLOC_ADD(size);
+				R_GenHeap[node_class].AllocCount++;
+				NODES_IN_USE_ADD(1);
+				SNAP_NODE(s, R_GenHeap[node_class].New);
+			    } else if (R_mtl_threading_active) {
+				heap_alloc_suspend();
+				R_mtl_heap_lock();
+				if (!allocator) LARGE_VALLOC_ADD(size);
+				R_GenHeap[node_class].AllocCount++;
+				NODES_IN_USE_ADD(1);
+				SNAP_NODE(s, R_GenHeap[node_class].New);
+				R_mtl_heap_unlock();
+				heap_alloc_resume();
+			    } else {
+				/* Serial main-thread fast path: no locks, no atomics. */
+				if (!allocator) R_LargeVallocSize += size;
+				R_GenHeap[node_class].AllocCount++;
+				R_NodesInUse += 1;
+				SNAP_NODE(s, R_GenHeap[node_class].New);
+			    }
 			    /* Only worker heaps need explicit owner tracking for malloc nodes.
 			       Main-heap ownership is the default (owner == NULL). */
 			    if (R_HEAP->isWorker)
