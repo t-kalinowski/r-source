@@ -94,9 +94,7 @@ sys <- readRDS(sys_path)
 mtl <- readRDS(mtl_path)
 
 stopifnot(isTRUE(all.equal(sys$meta$settings, mtl$meta$settings)))
-
-sys_lapply <- sys$results[sys$results$method == "lapply", , drop = FALSE]
-mtl_lapply <- mtl$results[mtl$results$method == "lapply", , drop = FALSE]
+stopifnot(isTRUE(all.equal(sys$meta$workloads, mtl$meta$workloads)))
 
 tab <- rbind(
   transform(sys$results, build = "system"),
@@ -107,18 +105,29 @@ tab$label <- ifelse(tab$method == "lapply",
                     "lapply",
                     paste0("mtlapply(", tab$threads, ")"))
 
-baseline_sys <- sys_lapply$median_seconds[[1L]]
-baseline_mtl <- mtl_lapply$median_seconds[[1L]]
+baseline_sys <- sys$results[sys$results$method == "lapply", c("workload", "median_seconds")]
+baseline_mtl <- mtl$results[mtl$results$method == "lapply", c("workload", "median_seconds")]
+names(baseline_sys)[[2L]] <- "baseline_sys_lapply"
+names(baseline_mtl)[[2L]] <- "baseline_mtl_lapply"
 
-tab$speedup_vs_sys_lapply <- baseline_sys / tab$median_seconds
-tab$speedup_vs_mtl_lapply <- baseline_mtl / tab$median_seconds
+tab <- merge(tab, baseline_sys, by = "workload", all.x = TRUE, sort = FALSE)
+tab <- merge(tab, baseline_mtl, by = "workload", all.x = TRUE, sort = FALSE)
 
-tab <- tab[order(tab$build, tab$method, tab$threads), c(
-  "build", "label", "median_seconds", "speedup_vs_sys_lapply", "speedup_vs_mtl_lapply"
+tab$speedup_vs_sys_lapply <- tab$baseline_sys_lapply / tab$median_seconds
+tab$speedup_vs_mtl_lapply <- tab$baseline_mtl_lapply / tab$median_seconds
+tab$efficiency_vs_mtl_lapply <- ifelse(tab$method == "mtlapply",
+                                       tab$speedup_vs_mtl_lapply / tab$threads,
+                                       NA_real_)
+
+tab <- tab[order(tab$workload, tab$build, tab$method, tab$threads), c(
+  "workload", "build", "label", "median_seconds",
+  "speedup_vs_sys_lapply", "speedup_vs_mtl_lapply", "efficiency_vs_mtl_lapply"
 )]
 
 cat("Settings:\n")
 print(sys$meta$settings)
+cat("\nWorkloads:\n")
+print(sys$meta$workloads)
 cat("\nR versions:\n")
 cat("- system: ", sys$meta$r_version, "\n", sep = "")
 cat("- mtl:    ", mtl$meta$r_version, "\n", sep = "")
@@ -126,8 +135,10 @@ cat("- mtl:    ", mtl$meta$r_version, "\n", sep = "")
 cat("\nTimings:\n")
 knitr::kable(tab, row.names = FALSE, digits = 3)
 
-cat("\nSingle-thread overhead check:\n")
-cat(sprintf("mtl lapply / system lapply = %.3fx\n", baseline_mtl / baseline_sys))
+cat("\nSingle-thread overhead check (per workload):\n")
+ov <- merge(baseline_sys, baseline_mtl, by = "workload", all = TRUE)
+ov$ratio <- ov$baseline_mtl_lapply / ov$baseline_sys_lapply
+knitr::kable(ov[, c("workload", "ratio")], row.names = FALSE, digits = 3)
 ```
 
 ## Notes / Limitations

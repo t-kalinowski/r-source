@@ -106,6 +106,27 @@ them:
     ## [1] 1 2 4 8
 
     ## 
+    ## Workloads:
+
+    ## $etl_group_mean
+    ## list()
+    ## 
+    ## $cos_seq
+    ## $cos_seq$m
+    ## [1] 200000
+    ## 
+    ## $cos_seq$k
+    ## [1] 256
+    ## 
+    ## 
+    ## $alloc_pressure
+    ## $alloc_pressure$m
+    ## [1] 50000
+    ## 
+    ## $alloc_pressure$k
+    ## [1] 128
+
+    ## 
     ## R versions:
 
     ## - system: R version 4.5.2 (2025-10-31)
@@ -115,19 +136,35 @@ them:
     ## 
     ## Timings:
 
-| build | label | median_seconds | speedup_vs_sys_lapply | speedup_vs_mtl_lapply |
-|:---|:---|---:|---:|---:|
-| mtl | lapply | 0.999 | 0.958 | 1.000 |
-| mtl | mtlapply(1) | 0.945 | 1.013 | 1.057 |
-| mtl | mtlapply(2) | 0.475 | 2.015 | 2.103 |
-| mtl | mtlapply(4) | 0.239 | 4.004 | 4.180 |
-| mtl | mtlapply(8) | 0.120 | 7.975 | 8.325 |
-| system | lapply | 0.957 | 1.000 | 1.044 |
+| workload | build | label | median_seconds | speedup_vs_sys_lapply | speedup_vs_mtl_lapply | efficiency_vs_mtl_lapply |
+|:---|:---|:---|---:|---:|---:|---:|
+| alloc_pressure | mtl | lapply | 0.156 | 0.686 | 1.000 | NA |
+| alloc_pressure | mtl | mtlapply(1) | 0.114 | 0.939 | 1.368 | 1.368 |
+| alloc_pressure | mtl | mtlapply(2) | 0.066 | 1.621 | 2.364 | 1.182 |
+| alloc_pressure | mtl | mtlapply(4) | 0.037 | 2.892 | 4.216 | 1.054 |
+| alloc_pressure | mtl | mtlapply(8) | 0.027 | 3.963 | 5.778 | 0.722 |
+| alloc_pressure | system | lapply | 0.107 | 1.000 | 1.458 | NA |
+| cos_seq | mtl | lapply | 0.540 | 0.848 | 1.000 | NA |
+| cos_seq | mtl | mtlapply(1) | 0.418 | 1.096 | 1.292 | 1.292 |
+| cos_seq | mtl | mtlapply(2) | 0.235 | 1.949 | 2.298 | 1.149 |
+| cos_seq | mtl | mtlapply(4) | 0.136 | 3.368 | 3.971 | 0.993 |
+| cos_seq | mtl | mtlapply(8) | 0.076 | 6.026 | 7.105 | 0.888 |
+| cos_seq | system | lapply | 0.458 | 1.000 | 1.179 | NA |
+| etl_group_mean | mtl | lapply | 0.977 | 0.940 | 1.000 | NA |
+| etl_group_mean | mtl | mtlapply(1) | 0.946 | 0.970 | 1.033 | 1.033 |
+| etl_group_mean | mtl | mtlapply(2) | 0.473 | 1.941 | 2.066 | 1.033 |
+| etl_group_mean | mtl | mtlapply(4) | 0.238 | 3.857 | 4.105 | 1.026 |
+| etl_group_mean | mtl | mtlapply(8) | 0.119 | 7.714 | 8.210 | 1.026 |
+| etl_group_mean | system | lapply | 0.918 | 1.000 | 1.064 | NA |
 
     ## 
-    ## Single-thread overhead check:
+    ## Single-thread overhead check (per workload):
 
-    ## mtl lapply / system lapply = 1.044x
+| workload       | ratio |
+|:---------------|------:|
+| alloc_pressure | 1.458 |
+| cos_seq        | 1.179 |
+| etl_group_mean | 1.064 |
 
 ## Notes / Limitations
 

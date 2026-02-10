@@ -28,6 +28,22 @@ parse_int_vec <- function(x, default) {
   as.integer(strsplit(x, ",", fixed = TRUE)[[1L]])
 }
 
+time_median <- function(expr, iters) {
+  exprq <- substitute(expr)
+  ts <- numeric(iters)
+  for (i in seq_len(iters)) {
+    invisible(gc())
+    ts[[i]] <- unname(system.time(eval(exprq, parent.frame()))[["elapsed"]])
+  }
+  median(ts)
+}
+
+reduce_sum_scalar <- function(parts) {
+  s <- 0.0
+  for (p in parts) s <- s + p
+  s
+}
+
 args <- commandArgs(trailingOnly = TRUE)
 if (length(args) != 1L) {
   stop("expected exactly one argument: output .rds path", call. = FALSE)
@@ -52,71 +68,110 @@ y <- (as.double((seq_len(N) * 17L) %% 1000L) - 500) / 10
 w <- (as.double((seq_len(N) * 31L) %% 1000L) + 1) / 1000
 grp <- rep_len(seq_len(ngroups), N)
 
-worker <- function(shard_id) {
-  idx <- seq.int(shard_id, N, by = nshards)
-  z <- x[idx]
-  yy <- y[idx]
-  ww <- w[idx]
-  for (i in seq_len(feat_loops)) {
-    z <- log1p(abs(z)) + sin(yy + z) * ww + cos(z - yy)
+workloads <- list()
+
+## Workload A: ETL-ish feature engineering + group means.
+workloads[["etl_group_mean"]] <- local({
+  worker <- function(shard_id) {
+    idx <- seq.int(shard_id, N, by = nshards)
+    z <- x[idx]
+    yy <- y[idx]
+    ww <- w[idx]
+    for (i in seq_len(feat_loops)) {
+      z <- log1p(abs(z)) + sin(yy + z) * ww + cos(z - yy)
+    }
+    g <- grp[idx]
+
+    ## Avoid S3 dispatch and internal helpers inside workers for now.
+    n <- tabulate(g, ngroups)
+    s <- numeric(ngroups)
+    for (j in seq_along(z)) {
+      gj <- g[[j]]
+      s[[gj]] <- s[[gj]] + z[[j]]
+    }
+
+    list(sum = s, n = n)
   }
-  g <- grp[idx]
 
-  ## Avoid S3 dispatch and internal helpers inside workers for now.
-  n <- tabulate(g, ngroups)
-  s <- numeric(ngroups)
-  for (j in seq_along(z)) {
-    gj <- g[[j]]
-    s[[gj]] <- s[[gj]] + z[[j]]
+  reduce <- function(parts) {
+    s <- Reduce(`+`, lapply(parts, `[[`, "sum"))
+    n <- Reduce(`+`, lapply(parts, `[[`, "n"))
+    s / n
   }
 
-  list(sum = s, n = n)
-}
+  list(ids = seq_len(nshards), worker = worker, reduce = reduce)
+})
 
-reduce <- function(parts) {
-  s <- Reduce(`+`, lapply(parts, `[[`, "sum"))
-  n <- Reduce(`+`, lapply(parts, `[[`, "n"))
-  s / n
-}
+## Workload B: closure-heavy math with lots of temporary allocations.
+workloads[["cos_seq"]] <- local({
+  m <- 200000L
+  k <- 256L
 
-time_median <- function(expr, iters) {
-  exprq <- substitute(expr)
-  ts <- numeric(iters)
-  for (i in seq_len(iters)) {
-    invisible(gc())
-    ts[[i]] <- unname(system.time(eval(exprq, parent.frame()))[["elapsed"]])
+  worker <- function(shard_id) {
+    is <- seq.int(shard_id, m, by = nshards)
+    s <- 0.0
+    for (i in is) {
+      s <- s + sum(cos(seq_len(k) + i))
+    }
+    s
   }
-  median(ts)
-}
 
-ids <- seq_len(nshards)
+  list(ids = seq_len(nshards), worker = worker, reduce = reduce_sum_scalar,
+       params = list(m = m, k = k))
+})
 
-## Correctness check (small).
-ref <- reduce(lapply(ids[1:min(4L, nshards)], worker))
-if (has_mtlapply) {
-  cur <- reduce(mtlapply(ids[1:min(4L, nshards)], worker, threads = max(threads)))
-  stopifnot(isTRUE(all.equal(ref, cur, tolerance = 0)))
-}
+## Workload C: allocator/GC pressure without returning big objects.
+workloads[["alloc_pressure"]] <- local({
+  m <- 50000L
+  k <- 128L
+
+  worker <- function(shard_id) {
+    is <- seq.int(shard_id, m, by = nshards)
+    s <- 0.0
+    for (i in is) {
+      v <- (as.double(i) / 10) + seq_len(k)
+      a <- list(v, v * v, sqrt(v), v + 1)
+      s <- s + sum(a[[1L]]) + sum(a[[2L]]) + sum(a[[3L]]) + sum(a[[4L]])
+    }
+    s
+  }
+
+  list(ids = seq_len(nshards), worker = worker, reduce = reduce_sum_scalar,
+       params = list(m = m, k = k))
+})
 
 results <- data.frame(
+  workload = character(),
   method = character(),
   threads = integer(),
   median_seconds = double(),
   stringsAsFactors = FALSE
 )
 
-base <- time_median(reduce(lapply(ids, worker)), iters)
-results <- rbind(
-  results,
-  data.frame(method = "lapply", threads = 0L, median_seconds = base)
-)
+for (nm in names(workloads)) {
+  wl <- workloads[[nm]]
+  ids <- wl$ids
+  worker <- wl$worker
+  reduce <- wl$reduce
 
-if (has_mtlapply) {
-  for (t in threads) {
+  ## Correctness check (small).
+  ref <- reduce(lapply(ids[1:min(4L, length(ids))], worker))
+  if (has_mtlapply) {
+    cur <- reduce(mtlapply(ids[1:min(4L, length(ids))], worker, threads = max(threads)))
+    stopifnot(isTRUE(all.equal(ref, cur, tolerance = 0)))
+  }
+
+  base <- time_median(reduce(lapply(ids, worker)), iters)
+  results <- rbind(
+    results,
+    data.frame(workload = nm, method = "lapply", threads = 0L, median_seconds = base)
+  )
+
+  if (has_mtlapply) for (t in threads) {
     m <- time_median(reduce(mtlapply(ids, worker, threads = t)), iters)
     results <- rbind(
       results,
-      data.frame(method = "mtlapply", threads = t, median_seconds = m)
+      data.frame(workload = nm, method = "mtlapply", threads = t, median_seconds = m)
     )
   }
 }
@@ -129,11 +184,13 @@ meta <- list(
   settings = list(
     N = N, nshards = nshards, ngroups = ngroups, feat_loops = feat_loops,
     iters = iters, threads = threads
-  )
+  ),
+  workloads = lapply(workloads, function(wl) {
+    if (is.null(wl$params)) list() else wl$params
+  })
 )
 
 dir.create(dirname(out_path), recursive = TRUE, showWarnings = FALSE)
 saveRDS(list(meta = meta, results = results), out_path)
 
 cat("wrote: ", out_path, "\n", sep = "")
-
