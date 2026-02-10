@@ -6,3 +6,5 @@ build-ubsan/
 bench/results/
 README.html
 README_files/
+tasks/pkgs/mtl-lib/
+tasks/pkgs/downloads/
