@@ -4343,7 +4343,8 @@ static void R_gc_internal(R_size_t size_needed)
 	     allocation path still needs a few nodes.  Growing by 1 can lead
 	     to pathological GC-thrash on workloads that expand many bindings
 	     while close to the node limit (e.g. package installs).  */
-	  R_size_t grow = 1000;
+	  R_size_t grow = (R_size_t) R_NGrowIncrMin;
+	  if (grow < 1000) grow = 1000;
 	  R_size_t target = R_NodesInUse + grow;
 	  if (target < R_NodesInUse + 1) /* overflow paranoia */
 	      target = R_NodesInUse + 1;
