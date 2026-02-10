@@ -19,6 +19,8 @@ dir.create(lib, recursive = TRUE, showWarnings = FALSE)
 
 # Avoid mixing in user/site libs built against a different R.
 Sys.setenv(R_LIBS_USER = lib, R_LIBS_SITE = "")
+# Also avoid user/site init files for subprocesses spawned by install.packages().
+Sys.setenv(R_PROFILE_USER = "/dev/null", R_ENVIRON_USER = "/dev/null")
 .libPaths(c(lib, .Library))
 
 options(
@@ -57,7 +59,10 @@ remotes::install_github(
 
 stopifnot(requireNamespace("devtools", quietly = TRUE))
 
-# 3. Install dplyr dependencies for tests (CRAN).
+# 3. Install tidyverse (requested: "devtools and tidyverse").
+install_cran("tidyverse")
+
+# 4. Install dplyr dependencies for tests (CRAN).
 if (!dir.exists(dplyr_dir)) stop("dplyr directory not found: ", dplyr_dir)
 remotes::install_deps(
   dplyr_dir,
@@ -67,7 +72,7 @@ remotes::install_deps(
   quiet = FALSE
 )
 
-# 4. Run tests in the dplyr source directory.
+# 5. Run tests in the dplyr source directory.
 cat("\n== Running devtools::test() ==\n")
 res <- devtools::test(dplyr_dir, reporter = "summary")
 print(res)
