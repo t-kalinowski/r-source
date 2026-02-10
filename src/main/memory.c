@@ -4338,8 +4338,19 @@ static void R_gc_internal(R_size_t size_needed)
     if (!R_GCEnabled || R_in_gc) {
       if (R_in_gc)
         gc_error("*** recursive gc invocation\n");
-      if (NO_FREE_NODES())
-	R_NSize = R_NodesInUse + 1;
+      if (NO_FREE_NODES()) {
+	  /* GC is disabled (e.g. during R_expand_binding_value()) but an
+	     allocation path still needs a few nodes.  Growing by 1 can lead
+	     to pathological GC-thrash on workloads that expand many bindings
+	     while close to the node limit (e.g. package installs).  */
+	  R_size_t grow = 1000;
+	  R_size_t target = R_NodesInUse + grow;
+	  if (target < R_NodesInUse + 1) /* overflow paranoia */
+	      target = R_NodesInUse + 1;
+	  if (R_MaxNSize < R_SIZE_T_MAX && target > R_MaxNSize)
+	      target = R_MaxNSize;
+	  R_NSize = target;
+      }
 
       if (num_old_gens_to_collect < NUM_OLD_GENERATIONS &&
 	  VHEAP_FREE() < size_needed + R_MinFreeFrac * R_VSize)
