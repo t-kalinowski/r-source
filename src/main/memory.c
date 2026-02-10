@@ -495,7 +495,13 @@ static R_THREAD_LOCAL int gc_pending = 0;
 static R_THREAD_LOCAL int gc_force_wait = 0;
 static R_THREAD_LOCAL int gc_force_gap = 0;
 static R_THREAD_LOCAL Rboolean gc_inhibit_release = FALSE;
-#define FORCE_GC (gc_pending || (gc_force_wait > 0 ? (--gc_force_wait > 0 ? 0 : (gc_force_wait = gc_force_gap, 1)) : 0))
+/* When GC is disabled, repeatedly forcing GC from allocation fast paths can
+   devolve into pathological "gc_pending" thrash: every allocation calls into
+   R_gc_internal(), which can only set gc_pending again and return.  While GC is
+   disabled we instead rely on the NO_FREE_NODES()/VHEAP_FREE() checks to grow
+   the limits as needed, and keep gc_pending set so the next allocation after
+   re-enabling GC runs a real collection. */
+#define FORCE_GC ((R_GCEnabled && gc_pending) || (gc_force_wait > 0 ? (--gc_force_wait > 0 ? 0 : (gc_force_wait = gc_force_gap, 1)) : 0))
 #else
 # define FORCE_GC gc_pending
 #endif
