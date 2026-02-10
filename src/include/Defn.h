@@ -1708,6 +1708,10 @@ attribute_visible extern R_InterpreterState *R_InterpreterMain;
 attribute_visible extern R_THREAD_LOCAL R_InterpreterState *R_InterpreterTLS;
 #endif
 
+/* Slow path that may reference TLS (macOS TLV), kept out-of-line so the
+   serial fast path can compile without pulling in TLV access sequences. */
+attribute_visible R_InterpreterState *R_mtl_interpreter_tls_or_main(void);
+
 static R_INLINE R_InterpreterState *R_mtl_interpreter_ptr(void)
 {
     /* Keep serial performance close to stock: avoid TLS access unless a
@@ -1720,7 +1724,7 @@ static R_INLINE R_InterpreterState *R_mtl_interpreter_ptr(void)
 	return R_InterpreterMain;
 #endif
     }
-    return R_InterpreterTLS ? R_InterpreterTLS : R_InterpreterMain;
+    return R_mtl_interpreter_tls_or_main();
 }
 
 #define R_Interpreter (R_mtl_interpreter_ptr())

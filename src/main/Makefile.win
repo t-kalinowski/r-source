@@ -24,6 +24,7 @@ CSOURCES = \
 	identical.c inlined.c inspect.c internet.c iosupport.c \
 	lapack.c list.c localecharset.c logic.c \
 	machine.c main.c mapply.c mask.c match.c memory.c mkdtemp.c \
+	mtl-interpreter.c \
 	names.c \
 	objects.c options.c \
 	paste.c patterns.c platform.c plot.c plot3d.c plotmath.c \
