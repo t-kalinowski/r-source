@@ -1290,14 +1290,14 @@ static void mtl_worker_gc(R_size_t size_needed);
 #ifdef HAVE_PTHREAD
 static R_INLINE SEXP mtl_genheap_free_load(int c)
 {
-    if (__builtin_expect(!R_mtl_threading_active, 1))
+    if (__builtin_expect(!R_mtl_threading_active || R_HEAP->isWorker, 1))
 	return R_GenHeap[c].Free;
     return __atomic_load_n(&R_GenHeap[c].Free, __ATOMIC_ACQUIRE);
 }
 
 static R_INLINE void mtl_genheap_free_store(int c, SEXP v)
 {
-    if (__builtin_expect(!R_mtl_threading_active, 1))
+    if (__builtin_expect(!R_mtl_threading_active || R_HEAP->isWorker, 1))
 	R_GenHeap[c].Free = v;
     else
 	__atomic_store_n(&R_GenHeap[c].Free, v, __ATOMIC_RELEASE);
@@ -1308,14 +1308,14 @@ static R_INLINE void mtl_genheap_free_store(int c, SEXP v)
 
 static R_INLINE R_size_t mtl_r_size_t_load(R_size_t *p)
 {
-    if (__builtin_expect(!R_mtl_threading_active, 1))
+    if (__builtin_expect(!R_mtl_threading_active || R_HEAP->isWorker, 1))
 	return *p;
     return __atomic_load_n(p, __ATOMIC_RELAXED);
 }
 
 static R_INLINE void mtl_r_size_t_store(R_size_t *p, R_size_t v)
 {
-    if (__builtin_expect(!R_mtl_threading_active, 1))
+    if (__builtin_expect(!R_mtl_threading_active || R_HEAP->isWorker, 1))
 	*p = v;
     else
 	__atomic_store_n(p, v, __ATOMIC_RELAXED);
@@ -1323,7 +1323,7 @@ static R_INLINE void mtl_r_size_t_store(R_size_t *p, R_size_t v)
 
 static R_INLINE void mtl_r_size_t_add(R_size_t *p, R_size_t n)
 {
-    if (__builtin_expect(!R_mtl_threading_active, 1))
+    if (__builtin_expect(!R_mtl_threading_active || R_HEAP->isWorker, 1))
 	*p += n;
     else
 	__atomic_fetch_add(p, n, __ATOMIC_RELAXED);
@@ -1367,8 +1367,8 @@ static R_INLINE R_size_t VHEAP_FREE_MTL(void)
 static R_INLINE SEXP try_get_free_node(int node_class)
 {
 #ifdef HAVE_PTHREAD
-    if (!R_mtl_threading_active) {
-	/* Single-threaded fast path: avoid CAS loops and atomic RMW ops. */
+    if (!R_mtl_threading_active || R_HEAP->isWorker) {
+	/* Single-threaded heap fast path: avoid CAS loops and atomic RMW ops. */
 	SEXP s = R_GenHeap[node_class].Free;
 	if (s == R_GenHeap[node_class].New)
 	    return NULL;

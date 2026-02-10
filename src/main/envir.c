@@ -1231,8 +1231,10 @@ static R_INLINE SEXP findGlobalVar(SEXP symbol)
 
 static R_INLINE SEXP mtl_translate_globalenv(SEXP rho)
 {
-    if (R_Interpreter != NULL && R_Interpreter->isMTLWorker && rho == R_GlobalEnv)
-	return R_Interpreter->workerGlobalEnv;
+    R_InterpreterState *ist = R_Interpreter;
+    if (ist != NULL && ist->mtlGlobalEnvRedirect && ist->workerGlobalEnv != NULL &&
+	rho == R_GlobalEnv)
+	return ist->workerGlobalEnv;
     return rho;
 }
 
@@ -2505,9 +2507,9 @@ attribute_hidden SEXP do_missing(SEXP call, SEXP op, SEXP args, SEXP rho)
 attribute_hidden SEXP do_globalenv(SEXP call, SEXP op, SEXP args, SEXP rho)
 {
     checkArity(op, args);
-    if (R_Interpreter != NULL && R_Interpreter->isMTLWorker &&
-	R_Interpreter->workerGlobalEnv != NULL)
-	return R_Interpreter->workerGlobalEnv;
+    R_InterpreterState *ist = R_Interpreter;
+    if (ist != NULL && ist->mtlGlobalEnvRedirect && ist->workerGlobalEnv != NULL)
+	return ist->workerGlobalEnv;
     return R_GlobalEnv;
 }
 

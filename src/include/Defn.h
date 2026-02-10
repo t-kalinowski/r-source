@@ -1576,6 +1576,7 @@ typedef struct R_InterpreterState_ {
     struct R_mtl_heap_state_ *heap; /* per-interpreter heap/GC state (memory.c) */
     int gcEnabled;           /* whether GC is enabled for this interpreter */
     int in_gc;               /* whether this interpreter is currently in GC */
+    int mtlGlobalEnvRedirect;/* if set, redirect globalenv()/R_GlobalEnv lookups */
     SEXP currentExpr;        /* Currently evaluating expression */
     SEXP returnedValue;      /* Slot for return-ing values */
     SEXP handlerStack;       /* Condition handler stack */
