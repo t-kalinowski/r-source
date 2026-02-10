@@ -1646,8 +1646,12 @@ attribute_hidden void R_mtl_heap_unlock(void);
 attribute_hidden void R_mtl_heap_unlock_all(void);
 
 /* Global flag enabling the multi-threaded allocation/GC fast paths.
-   Keep it off outside of mtlapply() to preserve serial performance. */
-attribute_hidden extern int R_mtl_threading_active;
+   Keep it off outside of mtlapply() to preserve serial performance.
+
+   NOTE: internal bundled shared objects (e.g. tools.so) include Defn.h and are
+   compiled with -fvisibility=hidden. Mark this symbol visible so those bundles
+   can reference it via -undefined dynamic_lookup. */
+attribute_visible extern int R_mtl_threading_active;
 
 attribute_hidden void R_mtl_global_lock(void);
 attribute_hidden void R_mtl_global_unlock(void);
@@ -1677,11 +1681,19 @@ attribute_hidden void R_mtl_adopt_worker_heap(R_InterpreterState *st);
 
 extern R_InterpreterState R_Interpreter0;
 /*
- * Must be visible for internal shared objects (e.g. grDevices.so) that are
- * built against Defn.h and use macros like R_Visible.
+ * Must be visible for internal shared objects (e.g. tools.so) that are built
+ * against Defn.h and use macros like R_Visible (via R_Interpreter).
+ *
+ * These are defined in the main executable and referenced from bundles built
+ * with -undefined dynamic_lookup, so we force default visibility here.
  */
-extern0 R_InterpreterState *R_InterpreterMain INI_as(&R_Interpreter0);
-extern0 R_THREAD_LOCAL R_InterpreterState *R_InterpreterTLS INI_as(NULL);
+#ifdef __MAIN__
+attribute_visible R_InterpreterState *R_InterpreterMain INI_as(&R_Interpreter0);
+attribute_visible R_THREAD_LOCAL R_InterpreterState *R_InterpreterTLS INI_as(NULL);
+#else
+attribute_visible extern R_InterpreterState *R_InterpreterMain;
+attribute_visible extern R_THREAD_LOCAL R_InterpreterState *R_InterpreterTLS;
+#endif
 
 static R_INLINE R_InterpreterState *R_mtl_interpreter_ptr(void)
 {

@@ -161,7 +161,9 @@ attribute_hidden int R_gc_running(void) { return R_in_gc; }
 # include <stdatomic.h>
 
 /* Global: enabled only while mtlapply() workers are evaluating. */
-attribute_hidden int R_mtl_threading_active = 0;
+/* Must have default visibility: internal bundled shared objects include
+ * Defn.h and reference this flag via the R_Interpreter macro. */
+attribute_visible int R_mtl_threading_active = 0;
 
 static pthread_mutex_t R_heap_excl_mutex = PTHREAD_MUTEX_INITIALIZER;
 static pthread_cond_t  R_heap_excl_cond  = PTHREAD_COND_INITIALIZER;
@@ -834,7 +836,12 @@ typedef struct PAGE_HEADER {
   uint64_t magic;
   struct PAGE_HEADER *next;
   R_mtl_heap_state *owner;
+  /* Ensure PAGE_DATA(p) is suitably aligned for SEXPREC writes.
+     On aarch64, the compiler can use paired stores (stp) for adjacent
+     pointer fields in SEXPREC, which faults on misaligned addresses. */
+  uintptr_t pad;
 } PAGE_HEADER;
+_Static_assert(sizeof(PAGE_HEADER) % 16 == 0, "PAGE_HEADER size must preserve 16-byte alignment");
 
 #if ( SIZEOF_SIZE_T > 4 )
 # define BASE_PAGE_SIZE 8000
