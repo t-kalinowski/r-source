@@ -148,26 +148,35 @@ results <- data.frame(
   stringsAsFactors = FALSE
 )
 
+## Baseline timings first (avoid enabling worker threads before measuring lapply).
+refs <- list()
 for (nm in names(workloads)) {
   wl <- workloads[[nm]]
   ids <- wl$ids
   worker <- wl$worker
   reduce <- wl$reduce
 
-  ## Correctness check (small).
-  ref <- reduce(lapply(ids[1:min(4L, length(ids))], worker))
-  if (has_mtlapply) {
-    cur <- reduce(mtlapply(ids[1:min(4L, length(ids))], worker, threads = max(threads)))
-    stopifnot(isTRUE(all.equal(ref, cur, tolerance = 0)))
-  }
+  ## Correctness reference (small subset; computed in the main interpreter).
+  refs[[nm]] <- reduce(lapply(ids[1:min(4L, length(ids))], worker))
 
   base <- time_median(reduce(lapply(ids, worker)), iters)
   results <- rbind(
     results,
     data.frame(workload = nm, method = "lapply", threads = 0L, median_seconds = base)
   )
+}
 
-  if (has_mtlapply) for (t in threads) {
+## mtlapply timings (this will enable worker threads in the experimental build).
+if (has_mtlapply) for (nm in names(workloads)) {
+  wl <- workloads[[nm]]
+  ids <- wl$ids
+  worker <- wl$worker
+  reduce <- wl$reduce
+
+  cur <- reduce(mtlapply(ids[1:min(4L, length(ids))], worker, threads = max(threads)))
+  stopifnot(isTRUE(all.equal(refs[[nm]], cur, tolerance = 0)))
+
+  for (t in threads) {
     m <- time_median(reduce(mtlapply(ids, worker, threads = t)), iters)
     results <- rbind(
       results,
