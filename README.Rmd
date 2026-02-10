@@ -4,6 +4,15 @@ output:
     html_preview: false
 ---
 
+```{r setup, include=FALSE}
+dir.create("bench/figures", recursive = TRUE, showWarnings = FALSE)
+knitr::opts_chunk$set(
+  fig.path = "bench/figures/readme-",
+  fig.width = 7,
+  fig.height = 4
+)
+```
+
 # R Multi-Threaded Interpreter Experiment (`mtlapply`)
 
 This repo is an experimental R runtime that can evaluate *pure R* closures concurrently on multiple OS threads, in a single R process, using `mtlapply()` (modeled after `lapply()`/`mclapply()`).
@@ -77,27 +86,49 @@ mkdir -p bench/results
 # system R (no mtlapply)
 R --vanilla -q -f bench/readme_bench_run.R --args bench/results/system.rds
 
+# R-devel (no mtlapply)
+/usr/local/bin/R-devel --vanilla -q -f bench/readme_bench_run.R --args bench/results/rdevel.rds
+
 # experimental build (has mtlapply)
-R_HOME= ./build-mtl/bin/R --vanilla -q -f bench/readme_bench_run.R --args bench/results/mtl.rds
+./build-mtl/bin/R --vanilla -q -f bench/readme_bench_run.R --args bench/results/mtl.rds
+
+# optional: generate a bench::mark artifact under the experimental build
+R_LIBS_USER=/private/tmp/mtl-proof-lib-MW1vv9 R_LIBS_SITE='' \
+  ./build-mtl/bin/R --vanilla -q -f bench/readme_bench_mark.R --args bench/results/mtl_bench_mark.rds
 ```
 
 Then render this README, which loads those artifacts and summarizes them:
 
 ```{r results, echo=FALSE}
 sys_path <- "bench/results/system.rds"
+rdevel_path <- "bench/results/rdevel.rds"
 mtl_path <- "bench/results/mtl.rds"
-if (!file.exists(sys_path) || !file.exists(mtl_path)) {
-  stop("missing benchmark artifacts: run bench/readme_bench_run.R first")
+bm_path <- "bench/results/mtl_bench_mark.rds"
+
+missing <- c(sys_path, rdevel_path, mtl_path, bm_path)[
+  !file.exists(c(sys_path, rdevel_path, mtl_path, bm_path))
+]
+if (length(missing)) {
+  stop(
+    "missing benchmark artifacts:\n- ",
+    paste(missing, collapse = "\n- "),
+    "\n\nRun bench/readme_bench_run.R (and bench/readme_bench_mark.R) first."
+  )
 }
 
 sys <- readRDS(sys_path)
+rdevel <- readRDS(rdevel_path)
 mtl <- readRDS(mtl_path)
+bm <- readRDS(bm_path)
 
+stopifnot(isTRUE(all.equal(sys$meta$settings, rdevel$meta$settings)))
 stopifnot(isTRUE(all.equal(sys$meta$settings, mtl$meta$settings)))
+stopifnot(isTRUE(all.equal(sys$meta$workloads, rdevel$meta$workloads)))
 stopifnot(isTRUE(all.equal(sys$meta$workloads, mtl$meta$workloads)))
 
 tab <- rbind(
   transform(sys$results, build = "system"),
+  transform(rdevel$results, build = "rdevel"),
   transform(mtl$results, build = "mtl")
 )
 
@@ -106,39 +137,88 @@ tab$label <- ifelse(tab$method == "lapply",
                     paste0("mtlapply(", tab$threads, ")"))
 
 baseline_sys <- sys$results[sys$results$method == "lapply", c("workload", "median_seconds")]
+baseline_rdevel <- rdevel$results[rdevel$results$method == "lapply", c("workload", "median_seconds")]
 baseline_mtl <- mtl$results[mtl$results$method == "lapply", c("workload", "median_seconds")]
 names(baseline_sys)[[2L]] <- "baseline_sys_lapply"
+names(baseline_rdevel)[[2L]] <- "baseline_rdevel_lapply"
 names(baseline_mtl)[[2L]] <- "baseline_mtl_lapply"
 
 tab <- merge(tab, baseline_sys, by = "workload", all.x = TRUE, sort = FALSE)
+tab <- merge(tab, baseline_rdevel, by = "workload", all.x = TRUE, sort = FALSE)
 tab <- merge(tab, baseline_mtl, by = "workload", all.x = TRUE, sort = FALSE)
 
 tab$speedup_vs_sys_lapply <- tab$baseline_sys_lapply / tab$median_seconds
+tab$speedup_vs_rdevel_lapply <- tab$baseline_rdevel_lapply / tab$median_seconds
 tab$speedup_vs_mtl_lapply <- tab$baseline_mtl_lapply / tab$median_seconds
 tab$efficiency_vs_mtl_lapply <- ifelse(tab$method == "mtlapply",
                                        tab$speedup_vs_mtl_lapply / tab$threads,
                                        NA_real_)
 
+tab_plot <- tab
+
 tab <- tab[order(tab$workload, tab$build, tab$method, tab$threads), c(
   "workload", "build", "label", "median_seconds",
-  "speedup_vs_sys_lapply", "speedup_vs_mtl_lapply", "efficiency_vs_mtl_lapply"
+  "speedup_vs_rdevel_lapply", "speedup_vs_sys_lapply",
+  "speedup_vs_mtl_lapply", "efficiency_vs_mtl_lapply"
 )]
 
+settings <- sys$meta$settings
+settings_tab <- data.frame(
+  setting = names(settings),
+  value = vapply(settings, function(x) paste(x, collapse = ","), character(1)),
+  stringsAsFactors = FALSE
+)
+
+r_versions <- data.frame(
+  build = c("system", "rdevel", "mtl"),
+  r_version = c(sys$meta$r_version, rdevel$meta$r_version, mtl$meta$r_version),
+  stringsAsFactors = FALSE
+)
+
 cat("Settings:\n")
-print(sys$meta$settings)
-cat("\nWorkloads:\n")
-print(sys$meta$workloads)
+knitr::kable(settings_tab, row.names = FALSE)
+
 cat("\nR versions:\n")
-cat("- system: ", sys$meta$r_version, "\n", sep = "")
-cat("- mtl:    ", mtl$meta$r_version, "\n", sep = "")
+knitr::kable(r_versions, row.names = FALSE)
 
 cat("\nTimings:\n")
 knitr::kable(tab, row.names = FALSE, digits = 3)
 
 cat("\nSingle-thread overhead check (per workload):\n")
-ov <- merge(baseline_sys, baseline_mtl, by = "workload", all = TRUE)
-ov$ratio <- ov$baseline_mtl_lapply / ov$baseline_sys_lapply
-knitr::kable(ov[, c("workload", "ratio")], row.names = FALSE, digits = 3)
+ov <- merge(baseline_sys, baseline_rdevel, by = "workload", all = TRUE)
+ov <- merge(ov, baseline_mtl, by = "workload", all = TRUE)
+ov$ratio_mtl_vs_sys <- ov$baseline_mtl_lapply / ov$baseline_sys_lapply
+ov$ratio_mtl_vs_rdevel <- ov$baseline_mtl_lapply / ov$baseline_rdevel_lapply
+knitr::kable(
+  ov[, c("workload", "ratio_mtl_vs_sys", "ratio_mtl_vs_rdevel")],
+  row.names = FALSE,
+  digits = 3
+)
+
+cat("\nScaling (speedup vs `mtl` lapply):\n")
+mtl_only <- tab_plot[tab_plot$build == "mtl", , drop = FALSE]
+mtl_only$threads_plot <- ifelse(mtl_only$label == "lapply", 1L, mtl_only$threads)
+mtl_only$threads_plot <- as.integer(mtl_only$threads_plot)
+mtl_only <- mtl_only[order(mtl_only$workload, mtl_only$threads_plot), ]
+
+cols <- c("etl_group_mean" = "#1b9e77", "cos_seq" = "#d95f02", "alloc_pressure" = "#7570b3")
+u <- unique(mtl_only$workload)
+
+plot(
+  NA, xlim = range(mtl_only$threads_plot), ylim = c(0, max(mtl_only$speedup_vs_mtl_lapply, na.rm = TRUE)),
+  xlab = "threads", ylab = "speedup vs mtl lapply", xaxt = "n"
+)
+axis(1, at = sort(unique(mtl_only$threads_plot)))
+for (nm in u) {
+  d <- mtl_only[mtl_only$workload == nm, ]
+  lines(d$threads_plot, d$speedup_vs_mtl_lapply, type = "b", pch = 19, col = cols[[nm]])
+}
+legend("topleft", legend = u, col = cols[u], lty = 1, pch = 19, bty = "n")
+
+cat("\nbench::mark (mtl build, same workload; plotted):\n")
+suppressPackageStartupMessages(library(bench))
+print(bm$bench)
+plot(bm$bench)
 ```
 
 ## Notes / Limitations

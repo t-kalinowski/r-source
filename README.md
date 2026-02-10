@@ -78,8 +78,15 @@ mkdir -p bench/results
 # system R (no mtlapply)
 R --vanilla -q -f bench/readme_bench_run.R --args bench/results/system.rds
 
+# R-devel (no mtlapply)
+/usr/local/bin/R-devel --vanilla -q -f bench/readme_bench_run.R --args bench/results/rdevel.rds
+
 # experimental build (has mtlapply)
-R_HOME= ./build-mtl/bin/R --vanilla -q -f bench/readme_bench_run.R --args bench/results/mtl.rds
+./build-mtl/bin/R --vanilla -q -f bench/readme_bench_run.R --args bench/results/mtl.rds
+
+# optional: generate a bench::mark artifact under the experimental build
+R_LIBS_USER=/private/tmp/mtl-proof-lib-MW1vv9 R_LIBS_SITE='' \
+  ./build-mtl/bin/R --vanilla -q -f bench/readme_bench_mark.R --args bench/results/mtl_bench_mark.rds
 ```
 
 Then render this README, which loads those artifacts and summarizes
@@ -87,84 +94,79 @@ them:
 
     ## Settings:
 
-    ## $N
-    ## [1] 2000000
-    ## 
-    ## $nshards
-    ## [1] 64
-    ## 
-    ## $ngroups
-    ## [1] 4096
-    ## 
-    ## $feat_loops
-    ## [1] 40
-    ## 
-    ## $iters
-    ## [1] 3
-    ## 
-    ## $threads
-    ## [1] 1 2 4 8
-
-    ## 
-    ## Workloads:
-
-    ## $etl_group_mean
-    ## list()
-    ## 
-    ## $cos_seq
-    ## $cos_seq$m
-    ## [1] 200000
-    ## 
-    ## $cos_seq$k
-    ## [1] 256
-    ## 
-    ## 
-    ## $alloc_pressure
-    ## $alloc_pressure$m
-    ## [1] 50000
-    ## 
-    ## $alloc_pressure$k
-    ## [1] 128
+| setting    | value   |
+|:-----------|:--------|
+| N          | 2000000 |
+| nshards    | 64      |
+| ngroups    | 4096    |
+| feat_loops | 40      |
+| iters      | 3       |
+| threads    | 1,2,4,8 |
 
     ## 
     ## R versions:
 
-    ## - system: R version 4.5.2 (2025-10-31)
-
-    ## - mtl:    R version 4.6.0 Under development (unstable) (1970-01-01)
+| build  | r_version                                          |
+|:-------|:---------------------------------------------------|
+| system | R version 4.5.2 (2025-10-31)                       |
+| rdevel | R Under development (unstable) (2026-02-09 r89390) |
+| mtl    | R Under development (unstable) (2026-02-10 r99999) |
 
     ## 
     ## Timings:
 
-| workload | build | label | median_seconds | speedup_vs_sys_lapply | speedup_vs_mtl_lapply | efficiency_vs_mtl_lapply |
-|:---|:---|:---|---:|---:|---:|---:|
-| alloc_pressure | mtl | lapply | 0.124 | 0.847 | 1.000 | NA |
-| alloc_pressure | mtl | mtlapply(1) | 0.137 | 0.766 | 0.905 | 0.905 |
-| alloc_pressure | mtl | mtlapply(2) | 0.081 | 1.296 | 1.531 | 0.765 |
-| alloc_pressure | mtl | mtlapply(4) | 0.047 | 2.234 | 2.638 | 0.660 |
-| alloc_pressure | mtl | mtlapply(8) | 0.032 | 3.281 | 3.875 | 0.484 |
-| alloc_pressure | system | lapply | 0.105 | 1.000 | 1.181 | NA |
-| cos_seq | mtl | lapply | 0.471 | 0.943 | 1.000 | NA |
-| cos_seq | mtl | mtlapply(1) | 0.478 | 0.929 | 0.985 | 0.985 |
-| cos_seq | mtl | mtlapply(2) | 0.280 | 1.586 | 1.682 | 0.841 |
-| cos_seq | mtl | mtlapply(4) | 0.156 | 2.846 | 3.019 | 0.755 |
-| cos_seq | mtl | mtlapply(8) | 0.096 | 4.625 | 4.906 | 0.613 |
-| cos_seq | system | lapply | 0.444 | 1.000 | 1.061 | NA |
-| etl_group_mean | mtl | lapply | 0.989 | 0.940 | 1.000 | NA |
-| etl_group_mean | mtl | mtlapply(1) | 1.007 | 0.924 | 0.982 | 0.982 |
-| etl_group_mean | mtl | mtlapply(2) | 0.504 | 1.845 | 1.962 | 0.981 |
-| etl_group_mean | mtl | mtlapply(4) | 0.265 | 3.509 | 3.732 | 0.933 |
-| etl_group_mean | mtl | mtlapply(8) | 0.159 | 5.849 | 6.220 | 0.778 |
-| etl_group_mean | system | lapply | 0.930 | 1.000 | 1.063 | NA |
+| workload | build | label | median_seconds | speedup_vs_rdevel_lapply | speedup_vs_sys_lapply | speedup_vs_mtl_lapply | efficiency_vs_mtl_lapply |
+|:---|:---|:---|---:|---:|---:|---:|---:|
+| alloc_pressure | mtl | lapply | 0.111 | 0.919 | 0.856 | 1.000 | NA |
+| alloc_pressure | mtl | mtlapply(1) | 0.113 | 0.903 | 0.841 | 0.982 | 0.982 |
+| alloc_pressure | mtl | mtlapply(2) | 0.077 | 1.325 | 1.234 | 1.442 | 0.721 |
+| alloc_pressure | mtl | mtlapply(4) | 0.043 | 2.372 | 2.209 | 2.581 | 0.645 |
+| alloc_pressure | mtl | mtlapply(8) | 0.027 | 3.778 | 3.519 | 4.111 | 0.514 |
+| alloc_pressure | rdevel | lapply | 0.102 | 1.000 | 0.931 | 1.088 | NA |
+| alloc_pressure | system | lapply | 0.095 | 1.074 | 1.000 | 1.168 | NA |
+| cos_seq | mtl | lapply | 0.420 | 1.048 | 0.950 | 1.000 | NA |
+| cos_seq | mtl | mtlapply(1) | 0.435 | 1.011 | 0.917 | 0.966 | 0.966 |
+| cos_seq | mtl | mtlapply(2) | 0.255 | 1.725 | 1.565 | 1.647 | 0.824 |
+| cos_seq | mtl | mtlapply(4) | 0.147 | 2.993 | 2.714 | 2.857 | 0.714 |
+| cos_seq | mtl | mtlapply(8) | 0.081 | 5.432 | 4.926 | 5.185 | 0.648 |
+| cos_seq | rdevel | lapply | 0.440 | 1.000 | 0.907 | 0.955 | NA |
+| cos_seq | system | lapply | 0.399 | 1.103 | 1.000 | 1.053 | NA |
+| etl_group_mean | mtl | lapply | 0.922 | 1.065 | 0.905 | 1.000 | NA |
+| etl_group_mean | mtl | mtlapply(1) | 0.918 | 1.070 | 0.908 | 1.004 | 1.004 |
+| etl_group_mean | mtl | mtlapply(2) | 0.486 | 2.021 | 1.716 | 1.897 | 0.949 |
+| etl_group_mean | mtl | mtlapply(4) | 0.254 | 3.866 | 3.283 | 3.630 | 0.907 |
+| etl_group_mean | mtl | mtlapply(8) | 0.126 | 7.794 | 6.619 | 7.317 | 0.915 |
+| etl_group_mean | rdevel | lapply | 0.982 | 1.000 | 0.849 | 0.939 | NA |
+| etl_group_mean | system | lapply | 0.834 | 1.177 | 1.000 | 1.106 | NA |
 
     ## 
     ## Single-thread overhead check (per workload):
 
-| workload       | ratio |
-|:---------------|------:|
-| alloc_pressure | 1.181 |
-| cos_seq        | 1.061 |
-| etl_group_mean | 1.063 |
+| workload       | ratio_mtl_vs_sys | ratio_mtl_vs_rdevel |
+|:---------------|-----------------:|--------------------:|
+| alloc_pressure |            1.168 |               1.088 |
+| cos_seq        |            1.053 |               0.955 |
+| etl_group_mean |            1.106 |               0.939 |
+
+    ## 
+    ## Scaling (speedup vs `mtl` lapply):
+
+![](bench/figures/readme-results-1.png)<!-- -->
+
+    ## 
+    ## bench::mark (mtl build, same workload; plotted):
+
+    ## # A data frame: 5 × 13
+    ##   expression    min median `itr/sec` mem_alloc `gc/sec` n_itr  n_gc total_time
+    ##   <bch:expr>  <dbl>  <dbl>     <dbl> <bch:byt>    <dbl> <int> <dbl>      <dbl>
+    ## 1 lapply      0.909  0.935      1.07        NA     57.7     3   161      2.79 
+    ## 2 mtlapply(1) 0.914  0.923      1.08        NA     42.2     3   117      2.77 
+    ## 3 mtlapply(2) 0.480  0.481      2.07        NA     40.1     3    58      1.45 
+    ## 4 mtlapply(4) 0.253  0.254      3.93        NA     44.5     3    34      0.763
+    ## 5 mtlapply(8) 0.128  0.128      7.77        NA     36.2     3    14      0.386
+    ## # ℹ 4 more variables: result <list>, memory <list>, time <list>, gc <list>
+
+![](bench/figures/readme-results-2.png)<!-- -->
 
 ## Notes / Limitations
 
