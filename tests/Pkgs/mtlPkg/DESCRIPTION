@@ -1,0 +1,11 @@
+Package: mtlPkg
+Type: Package
+Title: Internal Test Package for mtlapply()
+Version: 0.0.0
+Author: R Core
+Maintainer: R Core <R-core@R-project.org>
+Description: Minimal package with native code used by R's test suite to
+    validate that installing and calling .Call() works under mtlapply().
+License: GPL-2 | GPL-3
+Encoding: UTF-8
+NeedsCompilation: yes

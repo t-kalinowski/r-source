@@ -17,6 +17,24 @@ x <- mtlapply(1:100, f, threads = 4L)
 stopifnot(length(x) == 100L)
 stopifnot(isTRUE(all.equal(x[[3]]$v, cos(1:3))))
 
+# Package/native-code story: install a minimal package with .Call() and ensure
+# calls from mtlapply() workers work and do not leak to the real global env.
+pkg_src <- file.path(Sys.getenv("SRCDIR"), "Pkgs", "mtlPkg")
+if (dir.exists(pkg_src)) {
+  lib <- tempfile("mtlLib-")
+  dir.create(lib)
+  utils::install.packages(pkg_src, lib = lib, repos = NULL, type = "source", quiet = TRUE)
+  stopifnot(requireNamespace("mtlPkg", lib.loc = lib, quietly = TRUE))
+
+  vals <- mtlapply(1:100, function(i) mtlPkg::mtl_add(i, i + 1), threads = 2L)
+  stopifnot(identical(unlist(vals, use.names = FALSE), as.double(1:100 + (1:100 + 1))))
+
+  if (exists("mtl_test_var", envir = .GlobalEnv, inherits = FALSE))
+    rm(mtl_test_var, envir = .GlobalEnv)
+  invisible(mtlapply(1:8, function(i) mtlPkg::mtl_define_global(i), threads = 2L))
+  stopifnot(!exists("mtl_test_var", envir = .GlobalEnv, inherits = FALSE))
+}
+
 # Ensure we got actual overlap in worker evaluation.
 invisible(.Internal(mtlparallelmax()))
 invisible(mtlapply(rep(20000L, 8L), function(i) cos(seq_len(i)), threads = 4L))

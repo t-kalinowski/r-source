@@ -1,0 +1,4 @@
+useDynLib(mtlPkg, .registration = TRUE)
+
+export(mtl_add)
+export(mtl_define_global)

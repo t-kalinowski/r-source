@@ -1,6 +1,8 @@
 .codex/
 build-mtl/
 build-mtl-clang/
+build-debug/
+build-ubsan/
 bench/results/
 README.html
 README_files/
