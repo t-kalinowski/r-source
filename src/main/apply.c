@@ -627,7 +627,7 @@ attribute_hidden void R_mtlpool_shutdown(void)
     }
 
 	    /* Enable threaded allocator/GC fast paths only while workers may run. */
-	    R_mtl_threading_active = 1;
+	    R_mtl_set_threading_active(1);
 
 	    mtl_pool.job = d->job;
 	    mtl_pool.job_nthreads = d->n_bg_threads;
@@ -649,7 +649,7 @@ attribute_hidden void R_mtlpool_shutdown(void)
 	    mtl_pool.job = NULL;
 	    pthread_cond_broadcast(&mtl_pool.cv);
 
-	    R_mtl_threading_active = 0;
+	    R_mtl_set_threading_active(0);
 
 	    pthread_mutex_unlock(&mtl_pool.mu);
 	    d->mu_locked = 0;
@@ -666,7 +666,7 @@ attribute_hidden void R_mtlpool_shutdown(void)
 
 	    /* Always restore serial mode. On unwind, also signal workers to stop
 	       consuming indices from a stack-allocated job structure. */
-	    R_mtl_threading_active = 0;
+	    R_mtl_set_threading_active(0);
 	    if (jump && d->job)
 		atomic_store_explicit(&d->job->error, 1, memory_order_relaxed);
 	    R_Interpreter->workerGlobalEnv = d->saved_worker_env;

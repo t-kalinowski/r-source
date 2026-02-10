@@ -1650,8 +1650,21 @@ attribute_hidden void R_mtl_heap_unlock_all(void);
 
    NOTE: internal bundled shared objects (e.g. tools.so) include Defn.h and are
    compiled with -fvisibility=hidden. Mark this symbol visible so those bundles
-   can reference it via -undefined dynamic_lookup. */
+   can reference it via -undefined dynamic_lookup.
+
+   Serial performance: on platforms with semantic interposition, a default-
+   visibility global can inhibit optimization and cost extra indirections.
+   Use a hidden mirror for code compiled into the main executable. */
 attribute_visible extern int R_mtl_threading_active;
+#ifdef __MAIN__
+attribute_hidden extern int R_mtl_threading_active_hidden;
+#define R_MTL_THREADING_ACTIVE (R_mtl_threading_active_hidden)
+#else
+#define R_MTL_THREADING_ACTIVE (R_mtl_threading_active)
+#endif
+
+/* Set threading-active flags (visible + hidden mirror). */
+attribute_hidden void R_mtl_set_threading_active(int active);
 
 attribute_hidden void R_mtl_global_lock(void);
 attribute_hidden void R_mtl_global_unlock(void);
@@ -1699,8 +1712,14 @@ static R_INLINE R_InterpreterState *R_mtl_interpreter_ptr(void)
 {
     /* Keep serial performance close to stock: avoid TLS access unless a
        parallel region is active. */
-    if (__builtin_expect(!R_mtl_threading_active, 1))
+    if (__builtin_expect(!R_MTL_THREADING_ACTIVE, 1)) {
+#ifdef __MAIN__
+	/* Avoid an extra default-visibility global load on the hot serial path. */
+	return &R_Interpreter0;
+#else
 	return R_InterpreterMain;
+#endif
+    }
     return R_InterpreterTLS ? R_InterpreterTLS : R_InterpreterMain;
 }
 

@@ -160,10 +160,19 @@ attribute_hidden int R_gc_running(void) { return R_in_gc; }
 #ifdef HAVE_PTHREAD
 # include <stdatomic.h>
 
-/* Global: enabled only while mtlapply() workers are evaluating. */
-/* Must have default visibility: internal bundled shared objects include
- * Defn.h and reference this flag via the R_Interpreter macro. */
+/* Global: enabled only while mtlapply() workers are evaluating.
+ *
+ * Keep a visible symbol for internal shared objects compiled with
+ * -undefined dynamic_lookup, and a hidden mirror for the main executable
+ * to avoid semantic-interposition overhead on the hot serial path. */
 attribute_visible int R_mtl_threading_active = 0;
+attribute_hidden int R_mtl_threading_active_hidden = 0;
+
+attribute_hidden void R_mtl_set_threading_active(int active)
+{
+    R_mtl_threading_active = active;
+    R_mtl_threading_active_hidden = active;
+}
 
 static pthread_mutex_t R_heap_excl_mutex = PTHREAD_MUTEX_INITIALIZER;
 static pthread_cond_t  R_heap_excl_cond  = PTHREAD_COND_INITIALIZER;
@@ -177,7 +186,7 @@ static R_THREAD_LOCAL int R_heap_inflight_suspended = 0;
 
 static R_INLINE void heap_alloc_suspend(void)
 {
-    if (__builtin_expect(!R_mtl_threading_active, 1))
+    if (__builtin_expect(!R_MTL_THREADING_ACTIVE, 1))
 	return;
     /* Worker heaps are private: they do not participate in main-heap GC sync.
        Workers only switch to the main heap while holding the heap lock, so
@@ -199,7 +208,7 @@ static R_INLINE void heap_alloc_suspend(void)
 
 static R_INLINE void heap_alloc_resume(void)
 {
-    if (__builtin_expect(!R_mtl_threading_active, 1))
+    if (__builtin_expect(!R_MTL_THREADING_ACTIVE, 1))
 	return;
     /* See heap_alloc_suspend(). */
     if (R_Interpreter != NULL && R_Interpreter->isMTLWorker)
@@ -212,7 +221,7 @@ static R_INLINE void heap_alloc_resume(void)
 
 static R_INLINE void heap_alloc_enter(void)
 {
-    if (__builtin_expect(!R_mtl_threading_active, 1))
+    if (__builtin_expect(!R_MTL_THREADING_ACTIVE, 1))
 	return;
     /* See heap_alloc_suspend(). */
     if (R_Interpreter != NULL && R_Interpreter->isMTLWorker)
@@ -253,7 +262,7 @@ static R_INLINE void heap_alloc_enter(void)
 
 static R_INLINE void heap_alloc_exit(void)
 {
-    if (__builtin_expect(!R_mtl_threading_active, 1))
+    if (__builtin_expect(!R_MTL_THREADING_ACTIVE, 1))
 	return;
     /* See heap_alloc_suspend(). */
     if (R_Interpreter != NULL && R_Interpreter->isMTLWorker)
@@ -283,7 +292,7 @@ static R_INLINE void heap_alloc_exit(void)
 
 attribute_hidden void R_mtl_heap_lock(void)
 {
-    if (!R_mtl_threading_active)
+    if (!R_MTL_THREADING_ACTIVE)
 	return;
     if (R_heap_excl_depth++ > 0)
 	return;
@@ -301,7 +310,7 @@ attribute_hidden void R_mtl_heap_lock(void)
 
 attribute_hidden void R_mtl_heap_unlock(void)
 {
-    if (!R_mtl_threading_active)
+    if (!R_MTL_THREADING_ACTIVE)
 	return;
     if (--R_heap_excl_depth > 0)
 	return;
@@ -314,7 +323,7 @@ attribute_hidden void R_mtl_heap_unlock(void)
 
 attribute_hidden void R_mtl_heap_unlock_all(void)
 {
-    if (!R_mtl_threading_active)
+    if (!R_MTL_THREADING_ACTIVE)
 	return;
     /* Drop allocator inflight accounting if we are unwinding mid-allocation. */
     if (R_heap_inflight_held) {
@@ -1303,14 +1312,14 @@ static void mtl_worker_gc(R_size_t size_needed);
 #ifdef HAVE_PTHREAD
 static R_INLINE SEXP mtl_genheap_free_load(int c)
 {
-    if (__builtin_expect(!R_mtl_threading_active || R_HEAP->isWorker, 1))
+    if (__builtin_expect(!R_MTL_THREADING_ACTIVE || R_HEAP->isWorker, 1))
 	return R_GenHeap[c].Free;
     return __atomic_load_n(&R_GenHeap[c].Free, __ATOMIC_ACQUIRE);
 }
 
 static R_INLINE void mtl_genheap_free_store(int c, SEXP v)
 {
-    if (__builtin_expect(!R_mtl_threading_active || R_HEAP->isWorker, 1))
+    if (__builtin_expect(!R_MTL_THREADING_ACTIVE || R_HEAP->isWorker, 1))
 	R_GenHeap[c].Free = v;
     else
 	__atomic_store_n(&R_GenHeap[c].Free, v, __ATOMIC_RELEASE);
@@ -1321,14 +1330,14 @@ static R_INLINE void mtl_genheap_free_store(int c, SEXP v)
 
 static R_INLINE R_size_t mtl_r_size_t_load(R_size_t *p)
 {
-    if (__builtin_expect(!R_mtl_threading_active || R_HEAP->isWorker, 1))
+    if (__builtin_expect(!R_MTL_THREADING_ACTIVE || R_HEAP->isWorker, 1))
 	return *p;
     return __atomic_load_n(p, __ATOMIC_RELAXED);
 }
 
 static R_INLINE void mtl_r_size_t_store(R_size_t *p, R_size_t v)
 {
-    if (__builtin_expect(!R_mtl_threading_active || R_HEAP->isWorker, 1))
+    if (__builtin_expect(!R_MTL_THREADING_ACTIVE || R_HEAP->isWorker, 1))
 	*p = v;
     else
 	__atomic_store_n(p, v, __ATOMIC_RELAXED);
@@ -1336,7 +1345,7 @@ static R_INLINE void mtl_r_size_t_store(R_size_t *p, R_size_t v)
 
 static R_INLINE void mtl_r_size_t_add(R_size_t *p, R_size_t n)
 {
-    if (__builtin_expect(!R_mtl_threading_active || R_HEAP->isWorker, 1))
+    if (__builtin_expect(!R_MTL_THREADING_ACTIVE || R_HEAP->isWorker, 1))
 	*p += n;
     else
 	__atomic_fetch_add(p, n, __ATOMIC_RELAXED);
@@ -1380,7 +1389,7 @@ static R_INLINE R_size_t VHEAP_FREE_MTL(void)
 static R_INLINE SEXP try_get_free_node(int node_class)
 {
 #ifdef HAVE_PTHREAD
-    if (!R_mtl_threading_active || R_HEAP->isWorker) {
+    if (!R_MTL_THREADING_ACTIVE || R_HEAP->isWorker) {
 	/* Single-threaded heap fast path: avoid CAS loops and atomic RMW ops. */
 	SEXP s = R_GenHeap[node_class].Free;
 	if (s == R_GenHeap[node_class].New)
@@ -1444,15 +1453,15 @@ static R_INLINE void mtl_gc(R_size_t size_needed)
 		    R_VSize_heap = target;
 	    }
 	}
-    } else {
-	if (R_mtl_threading_active) {
-	    R_mtl_heap_lock();
-	    R_gc_internal(size_needed);
-	    R_mtl_heap_unlock();
 	} else {
-	    R_gc_internal(size_needed);
+	    if (R_MTL_THREADING_ACTIVE) {
+		R_mtl_heap_lock();
+		R_gc_internal(size_needed);
+		R_mtl_heap_unlock();
+	    } else {
+		R_gc_internal(size_needed);
+	    }
 	}
-    }
     heap_alloc_resume();
 }
 
@@ -1463,7 +1472,7 @@ static R_INLINE void mtl_get_new_page(int node_class)
 	if (CLASS_NEED_NEW_PAGE(node_class))
 	    GetNewPage(node_class);
     } else {
-	if (R_mtl_threading_active) {
+	if (R_MTL_THREADING_ACTIVE) {
 	    R_mtl_heap_lock();
 	    if (CLASS_NEED_NEW_PAGE(node_class))
 		GetNewPage(node_class);
@@ -4036,7 +4045,7 @@ SEXP allocVector3(SEXPTYPE type, R_xlen_t length, R_allocator_t *allocator)
 				R_GenHeap[node_class].AllocCount++;
 				NODES_IN_USE_ADD(1);
 				SNAP_NODE(s, R_GenHeap[node_class].New);
-			    } else if (R_mtl_threading_active) {
+			    } else if (R_MTL_THREADING_ACTIVE) {
 				heap_alloc_suspend();
 				R_mtl_heap_lock();
 				if (!allocator) LARGE_VALLOC_ADD(size);
