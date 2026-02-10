@@ -8,3 +8,8 @@ README.html
 README_files/
 tasks/pkgs/mtl-lib/
 tasks/pkgs/downloads/
+tasks/pkgs/dplyr-test.log
+
+# built during tests/Pkgs runs
+tests/Pkgs/**/src/*.o
+tests/Pkgs/**/src/*.so
