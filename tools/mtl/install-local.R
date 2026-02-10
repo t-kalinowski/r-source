@@ -41,6 +41,10 @@ if (!length(pkgs)) stop("empty --pkgs=")
 
 dir.create(lib, recursive = TRUE, showWarnings = FALSE)
 
+# Ensure subprocesses spawned by package installation (e.g. configure scripts)
+# do not pick up user/site libraries built against a different R.
+Sys.setenv(R_LIBS_USER = lib, R_LIBS_SITE = "")
+
 desc_field <- function(desc, field) {
   x <- grep(paste0("^", field, ":"), desc, value = TRUE)
   if (!length(x)) return("")
@@ -152,7 +156,8 @@ while (length(remaining)) {
                             repos = NULL,
                             type = "source",
                             quiet = FALSE,
-                            dependencies = FALSE)
+                            dependencies = FALSE,
+                            INSTALL_opts = c("--no-test-load"))
     if (!requireNamespace(p, lib.loc = lib, quietly = TRUE))
       stop("installed '", p, "' but cannot load it from ", lib)
     installed_now <- c(installed_now, p)
@@ -173,4 +178,3 @@ while (length(remaining)) {
 
 cat("\nOK: installed and loaded ", length(installed_now), " package(s): ",
     paste(installed_now, collapse = ", "), "\n", sep = "")
-
