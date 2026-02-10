@@ -52,28 +52,49 @@ static SEXP checkArgIsSymbol(SEXP x) {
 	    int main_showErrorMessages;
 	} mtl_job_t;
 
-	typedef struct {
-	    int id;
-	    struct mtl_pool_t *pool;
-	    unsigned long seen_gen;
-	    R_InterpreterState interp;
-	} mtl_worker_t;
+		typedef struct {
+		    int id;
+		    struct mtl_pool_t *pool;
+		    unsigned long seen_gen;
+		    R_InterpreterState interp;
+		} mtl_worker_t;
 
-typedef struct mtl_pool_t {
-    int inited;
-    int shutdown;
-    int nthreads;
-    pthread_t *threads;
-    mtl_worker_t **workers;
+	typedef struct mtl_main_req_t {
+	    /* Function to execute on the main thread (must not escape data). */
+	    SEXP (*fun)(void *);
+	    void *data;
 
-    pthread_mutex_t mu;
-    pthread_cond_t cv;
+	    SEXP result;          /* valid when ok==1 */
+	    int ok;               /* 1 success, 0 error/abort */
+	    char errmsg[1024];    /* valid when ok==0 */
 
-    unsigned long gen;
-    int job_nthreads;
-    int job_done;
-    mtl_job_t *job; /* owned by the mtlapply() caller thread */
-} mtl_pool_t;
+	    pthread_mutex_t mu;
+	    pthread_cond_t cv;
+	    int done;
+
+	    struct mtl_main_req_t *next;
+	} mtl_main_req_t;
+
+	typedef struct mtl_pool_t {
+	    int inited;
+	    int shutdown;
+	    int nthreads;
+	    pthread_t *threads;
+	    mtl_worker_t **workers;
+
+	    pthread_mutex_t mu;
+	    pthread_cond_t cv;
+
+	    unsigned long gen;
+	    int job_nthreads;
+	    int job_done;
+	    mtl_job_t *job; /* owned by the mtlapply() caller thread */
+
+	    /* Worker->main requests (e.g. global caches that must be mutated by main). */
+	    mtl_main_req_t *rpc_head;
+	    mtl_main_req_t *rpc_tail;
+	    int rpc_aborted;
+	} mtl_pool_t;
 
 static int mtl_trace_cached = -1;
 static int mtl_trace_enabled(void)
@@ -225,17 +246,160 @@ static void mtl_ensure_main_thread(void)
 	error("mtlapply() may only be called from the main thread");
 }
 
-static void mtl_pool_init_if_needed(void)
-{
-    if (mtl_pool.inited)
-	return;
+	static void mtl_pool_init_if_needed(void)
+	{
+	    if (mtl_pool.inited)
+		return;
 
-    memset(&mtl_pool, 0, sizeof(mtl_pool));
-    pthread_mutex_init(&mtl_pool.mu, NULL);
-    pthread_cond_init(&mtl_pool.cv, NULL);
-    mtl_dotGlobalEnvSym = install(".GlobalEnv");
-    mtl_pool.inited = 1;
-}
+	    memset(&mtl_pool, 0, sizeof(mtl_pool));
+	    pthread_mutex_init(&mtl_pool.mu, NULL);
+	    pthread_cond_init(&mtl_pool.cv, NULL);
+	    mtl_dotGlobalEnvSym = install(".GlobalEnv");
+	    mtl_pool.inited = 1;
+	}
+
+	/* Worker -> main request plumbing.
+	 *
+	 * This is intentionally minimal: workers enqueue a request and wait.
+	 * The main thread services requests while waiting for workers to join.
+	 *
+	 * This avoids a global interpreter lock around .Call/.External while still
+	 * allowing selected operations that must touch global process state to run
+	 * on the main thread (e.g. symbol/CHARSXP interning).
+	 */
+
+	static void mtl_rpc_exec(void *vp)
+	{
+	    mtl_main_req_t *r = (mtl_main_req_t *) vp;
+	    r->result = r->fun(r->data);
+	}
+
+	static void mtl_rpc_complete(mtl_main_req_t *r, int ok, const char *msg)
+	{
+	    pthread_mutex_lock(&r->mu);
+	    r->ok = ok;
+	    if (!ok) {
+		const char *m = (msg && msg[0]) ? msg : "error";
+		snprintf(r->errmsg, sizeof(r->errmsg), "%s", m);
+	    }
+	    r->done = 1;
+	    pthread_cond_signal(&r->cv);
+	    pthread_mutex_unlock(&r->mu);
+	}
+
+	static void mtl_rpc_service_locked(void)
+	{
+	    for (;;) {
+		mtl_main_req_t *list = mtl_pool.rpc_head;
+		if (list == NULL)
+		    return;
+		int aborted = mtl_pool.rpc_aborted;
+		mtl_pool.rpc_head = NULL;
+		mtl_pool.rpc_tail = NULL;
+
+		/* Don't hold the pool mutex while executing R code. */
+		pthread_mutex_unlock(&mtl_pool.mu);
+
+		for (mtl_main_req_t *r = list; r != NULL;) {
+		    mtl_main_req_t *next = r->next;
+		    r->next = NULL;
+
+		    if (aborted) {
+			mtl_rpc_complete(r, 0, "mtlapply aborted");
+			r = next;
+			continue;
+		    }
+
+		    Rboolean ok = R_ToplevelExec(mtl_rpc_exec, r);
+		    if (ok)
+			mtl_rpc_complete(r, 1, NULL);
+		    else {
+			const char *msg = R_curErrorBuf();
+			mtl_rpc_complete(r, 0, msg ? msg : "error");
+		    }
+		    r = next;
+		}
+
+		pthread_mutex_lock(&mtl_pool.mu);
+	    }
+	}
+
+	static void mtl_rpc_abort_all(void)
+	{
+	    pthread_mutex_lock(&mtl_pool.mu);
+	    mtl_pool.rpc_aborted = 1;
+	    mtl_main_req_t *list = mtl_pool.rpc_head;
+	    mtl_pool.rpc_head = NULL;
+	    mtl_pool.rpc_tail = NULL;
+	    pthread_mutex_unlock(&mtl_pool.mu);
+
+	    for (mtl_main_req_t *r = list; r != NULL;) {
+		mtl_main_req_t *next = r->next;
+		r->next = NULL;
+		mtl_rpc_complete(r, 0, "mtlapply aborted");
+		r = next;
+	    }
+	}
+
+	attribute_hidden SEXP R_mtl_invoke_on_main(SEXP (*fun)(void *), void *data)
+	{
+	    if (fun == NULL)
+		error("R_mtl_invoke_on_main: NULL fun");
+
+	    if (R_Interpreter == NULL || !R_Interpreter->isMTLWorker)
+		return fun(data);
+
+	    if (!R_MTL_THREADING_ACTIVE)
+		error("R_mtl_invoke_on_main: called outside mtlapply()");
+
+	    mtl_main_req_t *r = (mtl_main_req_t *) calloc(1, sizeof(mtl_main_req_t));
+	    if (r == NULL)
+		error("cannot allocate memory");
+	    r->fun = fun;
+	    r->data = data;
+	    r->result = R_NilValue;
+	    r->ok = 0;
+	    r->done = 0;
+	    r->next = NULL;
+	    pthread_mutex_init(&r->mu, NULL);
+	    pthread_cond_init(&r->cv, NULL);
+
+	    pthread_mutex_lock(&mtl_pool.mu);
+	    if (mtl_pool.job == NULL || mtl_pool.rpc_aborted) {
+		pthread_mutex_unlock(&mtl_pool.mu);
+		pthread_mutex_destroy(&r->mu);
+		pthread_cond_destroy(&r->cv);
+		free(r);
+		error("R_mtl_invoke_on_main: no active mtlapply() job");
+	    }
+	    if (mtl_pool.rpc_tail)
+		mtl_pool.rpc_tail->next = r;
+	    else
+		mtl_pool.rpc_head = r;
+	    mtl_pool.rpc_tail = r;
+	    pthread_cond_broadcast(&mtl_pool.cv);
+	    pthread_mutex_unlock(&mtl_pool.mu);
+
+	    pthread_mutex_lock(&r->mu);
+	    while (!r->done)
+		pthread_cond_wait(&r->cv, &r->mu);
+	    pthread_mutex_unlock(&r->mu);
+
+	    SEXP res = r->result;
+	    int ok = r->ok;
+	    char msg[1024];
+	    msg[0] = '\0';
+	    if (!ok)
+		snprintf(msg, sizeof(msg), "%s", r->errmsg);
+
+	    pthread_mutex_destroy(&r->mu);
+	    pthread_cond_destroy(&r->cv);
+	    free(r);
+
+	    if (!ok)
+		error("%s", msg[0] ? msg : "error");
+	    return res;
+	}
 
 	static void *mtl_pool_worker_main(void *vp)
 	{
@@ -629,6 +793,11 @@ attribute_hidden void R_mtlpool_shutdown(void)
 	    /* Enable threaded allocator/GC fast paths only while workers may run. */
 	    R_mtl_set_threading_active(1);
 
+	    /* New job: clear any pending/aborted RPC state. */
+	    mtl_pool.rpc_aborted = 0;
+	    mtl_pool.rpc_head = NULL;
+	    mtl_pool.rpc_tail = NULL;
+
 	    mtl_pool.job = d->job;
 	    mtl_pool.job_nthreads = d->n_bg_threads;
 	    mtl_pool.job_done = 0;
@@ -643,8 +812,15 @@ attribute_hidden void R_mtlpool_shutdown(void)
 
 	    pthread_mutex_lock(&mtl_pool.mu);
 	    d->mu_locked = 1;
-	    while (mtl_pool.job_done < d->n_bg_threads)
-		pthread_cond_wait(&mtl_pool.cv, &mtl_pool.mu);
+	    while (mtl_pool.job_done < d->n_bg_threads) {
+		/* Service any worker->main requests (e.g. install/mkChar) while waiting. */
+		mtl_rpc_service_locked();
+		if (mtl_pool.job_done < d->n_bg_threads)
+		    pthread_cond_wait(&mtl_pool.cv, &mtl_pool.mu);
+	    }
+
+	    /* Drain any remaining requests before tearing down the job. */
+	    mtl_rpc_service_locked();
 
 	    mtl_pool.job = NULL;
 	    pthread_cond_broadcast(&mtl_pool.cv);
@@ -669,6 +845,11 @@ attribute_hidden void R_mtlpool_shutdown(void)
 	    R_mtl_set_threading_active(0);
 	    if (jump && d->job)
 		atomic_store_explicit(&d->job->error, 1, memory_order_relaxed);
+
+	    /* If workers are blocked on main-thread requests, wake them so they
+	       don't hang on unwind. */
+	    if (jump)
+		mtl_rpc_abort_all();
 	    R_Interpreter->workerGlobalEnv = d->saved_worker_env;
 	    R_Interpreter->mtlGlobalEnvRedirect = d->saved_redirect;
 

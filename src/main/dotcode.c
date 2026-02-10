@@ -582,29 +582,8 @@ static SEXP do_External_impl(SEXP call, SEXP op, SEXP args, SEXP env)
     return check_retval(call, retval);
 }
 
-typedef struct {
-    SEXP call, op, args, env;
-} mtl_external_data_t;
-
-static SEXP mtl_external_run(void *data)
-{
-    mtl_external_data_t *d = (mtl_external_data_t *) data;
-    return do_External_impl(d->call, d->op, d->args, d->env);
-}
-
-static void mtl_external_cleanup(void *data)
-{
-    (void) data;
-    R_mtl_global_unlock();
-}
-
 attribute_hidden SEXP do_External(SEXP call, SEXP op, SEXP args, SEXP env)
 {
-    if (R_Interpreter != NULL && R_Interpreter->isMTLWorker) {
-	R_mtl_global_lock();
-	mtl_external_data_t d = { .call = call, .op = op, .args = args, .env = env };
-	return R_ExecWithCleanup(mtl_external_run, &d, mtl_external_cleanup, &d);
-    }
     return do_External_impl(call, op, args, env);
 }
 
@@ -1504,30 +1483,8 @@ static SEXP do_dotcall_impl(SEXP call, SEXP op, SEXP args, SEXP env)
     return retval;
 }
 
-/* .Call(name, <args>) */
-typedef struct {
-    SEXP call, op, args, env;
-} mtl_dotcall_data_t;
-
-static SEXP mtl_dotcall_run(void *data)
-{
-    mtl_dotcall_data_t *d = (mtl_dotcall_data_t *) data;
-    return do_dotcall_impl(d->call, d->op, d->args, d->env);
-}
-
-static void mtl_dotcall_cleanup(void *data)
-{
-    (void) data;
-    R_mtl_global_unlock();
-}
-
 attribute_hidden SEXP do_dotcall(SEXP call, SEXP op, SEXP args, SEXP env)
 {
-    if (R_Interpreter != NULL && R_Interpreter->isMTLWorker) {
-	R_mtl_global_lock();
-	mtl_dotcall_data_t d = { .call = call, .op = op, .args = args, .env = env };
-	return R_ExecWithCleanup(mtl_dotcall_run, &d, mtl_dotcall_cleanup, &d);
-    }
     return do_dotcall_impl(call, op, args, env);
 }
 

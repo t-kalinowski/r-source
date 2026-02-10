@@ -1677,6 +1677,14 @@ attribute_hidden void R_mtl_restore_heap(R_InterpreterState *st, struct R_mtl_he
 
 attribute_hidden void R_mtl_adopt_worker_heap(R_InterpreterState *st);
 
+/* Worker -> main thread RPC for MTL.
+ *
+ * Used to run operations that must touch global process state (e.g. symbol and
+ * CHARSXP interning) on the main thread, while allowing worker threads to run
+ * .Call/.External code without a global interpreter lock.
+ */
+attribute_hidden SEXP R_mtl_invoke_on_main(SEXP (*fun)(void *), void *data);
+
 /* Thread-local storage (TLS) support for internal multi-threading work. */
 #ifndef R_THREAD_LOCAL
 # ifdef __cplusplus

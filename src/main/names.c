@@ -1279,74 +1279,38 @@ static SEXP install_impl(const char *name)
     return (sym);
 }
 
-typedef struct {
-    const char *name;
-    R_InterpreterState *st;
-    struct R_mtl_heap_state_ *saved_heap;
-    int saved_gc_enabled;
-} mtl_install_mainheap_data_t;
-
-static SEXP mtl_install_on_main_heap(void *data)
-{
-    mtl_install_mainheap_data_t *d = (mtl_install_mainheap_data_t *) data;
-    d->saved_heap = R_mtl_switch_to_main_heap(d->st);
-    d->saved_gc_enabled = R_GCEnabled;
-    R_GCEnabled = FALSE;
-    return install_impl(d->name);
-}
-
-static void mtl_install_on_main_heap_cleanup(void *data)
-{
-    mtl_install_mainheap_data_t *d = (mtl_install_mainheap_data_t *) data;
-    R_GCEnabled = d->saved_gc_enabled;
-    R_mtl_restore_heap(d->st, d->saved_heap);
-    R_mtl_heap_unlock();
-}
-
 static SEXP installNoTrChar_impl(SEXP charSXP);
 
 typedef struct {
-    SEXP charSXP;
-    R_InterpreterState *st;
-    struct R_mtl_heap_state_ *saved_heap;
-    int saved_gc_enabled;
-} mtl_installnotr_mainheap_data_t;
+    const char *name;
+} mtl_install_data_t;
 
-static SEXP mtl_installNoTrChar_on_main_heap(void *data)
+static SEXP mtl_install_on_main(void *data)
 {
-    mtl_installnotr_mainheap_data_t *d = (mtl_installnotr_mainheap_data_t *) data;
-    d->saved_heap = R_mtl_switch_to_main_heap(d->st);
-    d->saved_gc_enabled = R_GCEnabled;
-    R_GCEnabled = FALSE;
-    /* Ensure the symbol printname (a CHARSXP) is main-heap owned, since the
-       symbol is interned in the global symbol table traced by the main GC. */
-    PROTECT(d->charSXP);
-    SEXP mainChar = mkCharLenCE(CHAR(d->charSXP), LENGTH(d->charSXP), getCharCE(d->charSXP));
-    SEXP ans = installNoTrChar_impl(mainChar);
-    UNPROTECT(1);
-    return ans;
+    mtl_install_data_t *d = (mtl_install_data_t *) data;
+    return install_impl(d->name);
 }
 
-static void mtl_installNoTrChar_on_main_heap_cleanup(void *data)
+typedef struct {
+    const char *name;
+    int len;
+    cetype_t enc;
+} mtl_installnotr_data_t;
+
+static SEXP mtl_installNoTrChar_on_main(void *data)
 {
-    mtl_installnotr_mainheap_data_t *d = (mtl_installnotr_mainheap_data_t *) data;
-    R_GCEnabled = d->saved_gc_enabled;
-    R_mtl_restore_heap(d->st, d->saved_heap);
-    R_mtl_heap_unlock();
+    mtl_installnotr_data_t *d = (mtl_installnotr_data_t *) data;
+    /* Ensure the symbol printname (a CHARSXP) is main-heap owned, since the
+       symbol is interned in the global symbol table traced by the main GC. */
+    SEXP mainChar = mkCharLenCE(d->name, d->len, d->enc);
+    return installNoTrChar_impl(mainChar);
 }
 
 SEXP install(const char *name)
 {
     if (R_Interpreter != NULL && R_Interpreter->isMTLWorker) {
-	R_mtl_heap_lock();
-	mtl_install_mainheap_data_t d = {
-	    .name = name,
-	    .st = R_Interpreter,
-	    .saved_heap = NULL,
-	    .saved_gc_enabled = 1,
-	};
-	return R_ExecWithCleanup(mtl_install_on_main_heap, &d,
-				 mtl_install_on_main_heap_cleanup, &d);
+	mtl_install_data_t d = { .name = name };
+	return R_mtl_invoke_on_main(mtl_install_on_main, &d);
     }
     return install_impl(name);
 }
@@ -1399,15 +1363,12 @@ attribute_hidden
 SEXP installNoTrChar(SEXP charSXP)
 {
     if (R_Interpreter != NULL && R_Interpreter->isMTLWorker) {
-	R_mtl_heap_lock();
-	mtl_installnotr_mainheap_data_t d = {
-	    .charSXP = charSXP,
-	    .st = R_Interpreter,
-	    .saved_heap = NULL,
-	    .saved_gc_enabled = 1,
+	mtl_installnotr_data_t d = {
+	    .name = CHAR(charSXP),
+	    .len = LENGTH(charSXP),
+	    .enc = getCharCE(charSXP),
 	};
-	return R_ExecWithCleanup(mtl_installNoTrChar_on_main_heap, &d,
-				 mtl_installNoTrChar_on_main_heap_cleanup, &d);
+	return R_mtl_invoke_on_main(mtl_installNoTrChar_on_main, &d);
     }
     return installNoTrChar_impl(charSXP);
 }

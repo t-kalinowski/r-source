@@ -4501,47 +4501,21 @@ typedef struct {
     const char *name;
     int len;
     cetype_t enc;
-    R_InterpreterState *st;
-    struct R_mtl_heap_state_ *saved_heap;
-    int saved_gc_enabled;
-} mtl_mkchar_mainheap_data_t;
+} mtl_mkchar_data_t;
 
-static SEXP mtl_mkCharLenCE_on_main_heap(void *data)
+static SEXP mtl_mkCharLenCE_on_main(void *data)
 {
-    mtl_mkchar_mainheap_data_t *d = (mtl_mkchar_mainheap_data_t *) data;
-    d->saved_heap = R_mtl_switch_to_main_heap(d->st);
-    /* Avoid running the main GC on a worker thread while interning into the
-       global CHARSXP cache. This is a temporary safety measure: the main GC
-       is not yet able to safely stop/synchronize all interpreter threads. */
-    d->saved_gc_enabled = R_GCEnabled;
-    R_GCEnabled = FALSE;
+    mtl_mkchar_data_t *d = (mtl_mkchar_data_t *) data;
     return mkCharLenCE_impl(d->name, d->len, d->enc);
-}
-
-static void mtl_mkCharLenCE_on_main_heap_cleanup(void *data)
-{
-    mtl_mkchar_mainheap_data_t *d = (mtl_mkchar_mainheap_data_t *) data;
-    R_GCEnabled = d->saved_gc_enabled;
-    R_mtl_restore_heap(d->st, d->saved_heap);
-    R_mtl_heap_unlock();
 }
 
 SEXP mkCharLenCE(const char *name, int len, cetype_t enc)
 {
     if (R_Interpreter != NULL && R_Interpreter->isMTLWorker) {
 	/* The CHARSXP cache (R_StringHash) is global and traced by the main GC,
-	   so it must only contain main-heap nodes. */
-	R_mtl_heap_lock();
-	mtl_mkchar_mainheap_data_t d = {
-	    .name = name,
-	    .len = len,
-	    .enc = enc,
-	    .st = R_Interpreter,
-	    .saved_heap = NULL,
-	    .saved_gc_enabled = 1,
-	};
-	return R_ExecWithCleanup(mtl_mkCharLenCE_on_main_heap, &d,
-				 mtl_mkCharLenCE_on_main_heap_cleanup, &d);
+	   so it must only contain main-heap nodes. Run interning on main. */
+	mtl_mkchar_data_t d = { .name = name, .len = len, .enc = enc };
+	return R_mtl_invoke_on_main(mtl_mkCharLenCE_on_main, &d);
     }
     return mkCharLenCE_impl(name, len, enc);
 }
