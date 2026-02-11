@@ -197,7 +197,31 @@ static void parse_cleanup(void *data)
  .Internal( parse(file, n, text, prompt, srcfile, encoding) )
  If there is text then that is read and the other arguments are ignored.
 */
+typedef struct {
+    SEXP call;
+    SEXP op;
+    SEXP args;
+    SEXP env;
+} mtl_do_parse_t;
+
+static SEXP do_parse_impl(SEXP call, SEXP op, SEXP args, SEXP env);
+
+static SEXP mtl_do_parse_main(void *vp)
+{
+    mtl_do_parse_t *dp = (mtl_do_parse_t *) vp;
+    return do_parse_impl(dp->call, dp->op, dp->args, dp->env);
+}
+
 attribute_hidden SEXP do_parse(SEXP call, SEXP op, SEXP args, SEXP env)
+{
+    if (R_Interpreter != NULL && R_Interpreter->isMTLWorker) {
+	mtl_do_parse_t d = {.call = call, .op = op, .args = args, .env = env};
+	return R_mtl_invoke_on_main(mtl_do_parse_main, &d);
+    }
+    return do_parse_impl(call, op, args, env);
+}
+
+static SEXP do_parse_impl(SEXP call, SEXP op, SEXP args, SEXP env)
 {
     checkArity(op, args);
     if(!inherits(CAR(args), "connection"))

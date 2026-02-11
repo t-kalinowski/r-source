@@ -4256,6 +4256,50 @@ SEXP R_ParseFile(FILE *fp, int n, ParseStatus *status, SEXP srcfile)
 
 #include "Rconnections.h"
 static Rconnection con_parse;
+static int con_getc(void);
+
+typedef struct {
+    Rconnection con;
+    int n;
+    SEXP srcfile;
+    ParseStatus status;
+} mtl_parse_conn_t;
+
+static SEXP mtl_parse_conn_main(void *vp)
+{
+    mtl_parse_conn_t *dp = (mtl_parse_conn_t *) vp;
+    ParseStatus st;
+    SEXP res;
+    GenerateCode = 1;
+    con_parse = dp->con;
+    ptr_getc = con_getc;
+    res = R_Parse(dp->n, &st, dp->srcfile);
+    dp->status = st;
+    return res;
+}
+
+typedef struct {
+    SEXP text;
+    int n;
+    SEXP srcfile;
+    ParseStatus status;
+} mtl_parse_vector_t;
+
+static SEXP mtl_parse_vector_main(void *vp)
+{
+    mtl_parse_vector_t *dp = (mtl_parse_vector_t *) vp;
+    ParseStatus st;
+    SEXP rval;
+    TextBuffer textb;
+    R_TextBufferInit(&textb, dp->text);
+    txtb = &textb;
+    GenerateCode = 1;
+    ptr_getc = text_getc;
+    rval = R_Parse(dp->n, &st, dp->srcfile);
+    R_TextBufferFree(&textb);
+    dp->status = st;
+    return rval;
+}
 
 /* need to handle incomplete last line */
 static int con_getc(void)
@@ -4272,6 +4316,14 @@ static int con_getc(void)
 attribute_hidden
 SEXP R_ParseConn(Rconnection con, int n, ParseStatus *status, SEXP srcfile)
 {
+    if (R_Interpreter != NULL && R_Interpreter->isMTLWorker) {
+	mtl_parse_conn_t d = {.con = con, .n = n, .srcfile = srcfile, .status = PARSE_NULL};
+	SEXP res = R_mtl_invoke_on_main(mtl_parse_conn_main, &d);
+	if (status)
+	    *status = d.status;
+	return res;
+    }
+
     GenerateCode = 1;
     con_parse = con;
     ptr_getc = con_getc;
@@ -4281,6 +4333,14 @@ SEXP R_ParseConn(Rconnection con, int n, ParseStatus *status, SEXP srcfile)
 /* This one is public, and used in source.c */
 SEXP R_ParseVector(SEXP text, int n, ParseStatus *status, SEXP srcfile)
 {
+    if (R_Interpreter != NULL && R_Interpreter->isMTLWorker) {
+	mtl_parse_vector_t d = {.text = text, .n = n, .srcfile = srcfile, .status = PARSE_NULL};
+	SEXP res = R_mtl_invoke_on_main(mtl_parse_vector_main, &d);
+	if (status)
+	    *status = d.status;
+	return res;
+    }
+
     SEXP rval;
     TextBuffer textb;
     R_TextBufferInit(&textb, text);
