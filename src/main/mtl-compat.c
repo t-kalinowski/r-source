@@ -22,6 +22,12 @@
 #include <dlfcn.h>
 #include <string.h>
 
+#if defined(__GNUC__) || defined(__clang__)
+# define R_MTL_KEEP __attribute__((used))
+#else
+# define R_MTL_KEEP
+#endif
+
 /* Defn.h defines `R_Interpreter` as a macro in the mtl build. */
 #undef R_Interpreter
 #undef R_BCNodeStackEnd
@@ -39,7 +45,7 @@
 #undef R_ParseErrorMsg
 #undef R_Visible
 
-attribute_visible R_THREAD_LOCAL R_InterpreterState *R_Interpreter = &R_Interpreter0;
+attribute_visible R_MTL_KEEP R_THREAD_LOCAL R_InterpreterState *R_Interpreter = &R_Interpreter0;
 
 /*
  * Export legacy interpreter globals expected by prebuilt binaries.
@@ -48,20 +54,20 @@ attribute_visible R_THREAD_LOCAL R_InterpreterState *R_Interpreter = &R_Interpre
  * on the serial path so binaries that resolve these symbols (e.g. IDE/runtime
  * integrations built against stock libR) remain loadable.
  */
-attribute_visible R_bcstack_t *R_BCNodeStackEnd = NULL;
-attribute_visible R_bcstack_t *R_BCNodeStackTop = NULL;
-attribute_visible uintptr_t R_CStackLimit = 0;
-attribute_visible uintptr_t R_CStackStart = 0;
-attribute_visible void *R_GlobalContext = NULL;
-attribute_visible uintptr_t R_OldCStackLimit = 0;
-attribute_visible SEXP *R_PPStack = NULL;
-attribute_visible int R_PPStackTop = 0;
-attribute_visible char R_ParseContext[PARSE_CONTEXT_SIZE] = "";
-attribute_visible int R_ParseContextLast = 0;
-attribute_visible int R_ParseContextLine = 0;
-attribute_visible int R_ParseError = 0;
-attribute_visible char R_ParseErrorMsg[PARSE_ERROR_SIZE] = "";
-attribute_visible Rboolean R_Visible = TRUE;
+attribute_visible R_MTL_KEEP R_bcstack_t *R_BCNodeStackEnd = NULL;
+attribute_visible R_MTL_KEEP R_bcstack_t *R_BCNodeStackTop = NULL;
+attribute_visible R_MTL_KEEP uintptr_t R_CStackLimit = 0;
+attribute_visible R_MTL_KEEP uintptr_t R_CStackStart = 0;
+attribute_visible R_MTL_KEEP void *R_GlobalContext = NULL;
+attribute_visible R_MTL_KEEP uintptr_t R_OldCStackLimit = 0;
+attribute_visible R_MTL_KEEP SEXP *R_PPStack = NULL;
+attribute_visible R_MTL_KEEP int R_PPStackTop = 0;
+attribute_visible R_MTL_KEEP char R_ParseContext[PARSE_CONTEXT_SIZE] = "";
+attribute_visible R_MTL_KEEP int R_ParseContextLast = 0;
+attribute_visible R_MTL_KEEP int R_ParseContextLine = 0;
+attribute_visible R_MTL_KEEP int R_ParseError = 0;
+attribute_visible R_MTL_KEEP char R_ParseErrorMsg[PARSE_ERROR_SIZE] = "";
+attribute_visible R_MTL_KEEP Rboolean R_Visible = TRUE;
 
 attribute_hidden void R_mtl_sync_compat_exports(void)
 {

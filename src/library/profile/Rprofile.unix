@@ -5,6 +5,26 @@
 .Library.site <-
     if(.Library.site == "NULL") character() else unlist(strsplit(.Library.site, ":"))
 .Library.site <- .Library.site[dir.exists(.Library.site)]
+if (grepl("^darwin", R.version$os) &&
+    file.exists(file.path(R.home("lib"), "libR.dylib"))) local({
+    ## Make this build a practical drop-in on macOS by including the matching
+    ## R.framework default library (major.minor + arch), if present.
+    minor <- strsplit(R.version$minor, ".", fixed = TRUE)[[1L]][1L]
+    ver_mm <- paste(R.version$major, minor, sep = ".")
+    fw_arch <- switch(R.version$arch,
+                      "aarch64" = "arm64",
+                      "x86_64" = "x86_64",
+                      R.version$arch)
+    cand <- c(
+        file.path("/Library/Frameworks/R.framework/Versions",
+                  paste0(ver_mm, "-", fw_arch), "Resources", "library"),
+        file.path("/Library/Frameworks/R.framework/Versions",
+                  ver_mm, "Resources", "library")
+    )
+    cand <- cand[dir.exists(cand)]
+    if (length(cand))
+        .Library.site <<- unique(c(.Library.site, cand))
+})
 
 local({
     libs <- Sys.getenv("R_LIBS_USER") # This is set in Renviron.
