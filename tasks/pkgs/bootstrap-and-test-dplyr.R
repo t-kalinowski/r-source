@@ -3,7 +3,7 @@
 # Bootstrap an isolated library for the experimental build and run dplyr tests.
 #
 # Intended usage:
-#   ./build-mtl/bin/Rscript tasks/pkgs/bootstrap-and-test-dplyr.R
+#   ./build-mtl-shlib/bin/Rscript tasks/pkgs/bootstrap-and-test-dplyr.R
 #
 # Network access is required (installs from CRAN + GitHub).
 

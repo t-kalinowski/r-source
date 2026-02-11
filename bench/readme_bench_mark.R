@@ -4,7 +4,7 @@
 ## and writes an RDS artifact that README.Rmd can load and plot.
 ##
 ## Usage:
-##   ./build-mtl/bin/R --vanilla -q -f bench/readme_bench_mark.R --args bench/results/mtl_bench_mark.rds
+##   ./build-mtl-shlib/bin/R --vanilla -q -f bench/readme_bench_mark.R --args bench/results/mtl_bench_mark.rds
 ##
 ## Controls (env vars, same defaults as bench/readme_bench_run.R):
 ## - README_N

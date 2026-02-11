@@ -76,7 +76,11 @@ system.time(reduce(mtlapply(ids, worker, threads = 8L)))[["elapsed"]]
 The benchmark is run as a standalone base-R script under:
 
 - the system `R` (to check for single-threaded regressions)
-- `./build-mtl/bin/R` from this tree (to measure `mtlapply()` scaling)
+- `./build-mtl-shlib/bin/R` from this tree (to measure `mtlapply()` scaling)
+
+For binary-package ABI compatibility on macOS, use the `--enable-R-shlib` build
+(`build-mtl-shlib`). Non-shlib executables can load a second `libR.dylib` when
+loading prebuilt package binaries.
 
 Generate the timing artifacts:
 
@@ -90,11 +94,11 @@ R --vanilla -q -f bench/readme_bench_run.R --args bench/results/system.rds
 /usr/local/bin/R-devel --vanilla -q -f bench/readme_bench_run.R --args bench/results/rdevel.rds
 
 # experimental build (has mtlapply)
-./build-mtl/bin/R --vanilla -q -f bench/readme_bench_run.R --args bench/results/mtl.rds
+./build-mtl-shlib/bin/R --vanilla -q -f bench/readme_bench_run.R --args bench/results/mtl.rds
 
 # optional: generate a bench::mark artifact under the experimental build
 R_LIBS_USER=/private/tmp/mtl-proof-lib-MW1vv9 R_LIBS_SITE='' \
-  ./build-mtl/bin/R --vanilla -q -f bench/readme_bench_mark.R --args bench/results/mtl_bench_mark.rds
+  ./build-mtl-shlib/bin/R --vanilla -q -f bench/readme_bench_mark.R --args bench/results/mtl_bench_mark.rds
 ```
 
 Then render this README, which loads those artifacts and summarizes them:
