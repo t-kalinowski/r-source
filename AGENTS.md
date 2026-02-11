@@ -47,6 +47,13 @@ Work towards making this build of R usable for package code that calls `.Call()`
 - On macOS, relinking often requires re-signing the `R` executable:
   - `codesign --force --sign - build-*/bin/exec/R`
 
+### Current Default Build Target (for ABI-compatible package smoke tests)
+- Use a shared-lib build for binary-package ABI testing:
+  - `build-mtl-shlib` configured with `--enable-R-shlib`
+- After each relink in `build-mtl-shlib`, re-apply install-name fixups:
+  - `bash tools/mtl-abi-macos.sh build-mtl-shlib`
+- Reason: existing macOS binary packages are linked against framework install names; this avoids loading a second `libR.dylib`.
+
 ### Benchmarks and Regression Checks
 - Compare against the system development build at `/usr/local/bin/R-devel` for apples-to-apples timing.
 - Run heavier benchmarks (larger workloads, more iterations) to reduce measurement noise.
@@ -57,9 +64,53 @@ Work towards making this build of R usable for package code that calls `.Call()`
   - Spawn work with `system2()` inside the console session.
   - If something wedges or spawns children, use `manage_session(\"restart\")` to cleanly kill the session and its children, then continue.
 
+## Default Validation Ladder (Run in This Order)
+Use this as the standard iteration checklist after runtime changes.
+
+1. **Incremental rebuild**
+   - `make -C build-mtl-shlib -j8`
+   - `bash tools/mtl-abi-macos.sh build-mtl-shlib`
+
+2. **Core threaded runtime smoke**
+   - `build-mtl-shlib/bin/R --vanilla -q -f tests/mtlapply.R`
+
+3. **Binary package ABI smoke (minimal)**
+   - `build-mtl-shlib/bin/R --vanilla -q -f tools/mtl-abi-smoke.R --args /Users/tomasz/Library/R/arm64/4.6/library`
+   - Confirms existing compiled packages (e.g. `digest`, `Rcpp`) load in this build.
+
+4. **Binary package ABI smoke (real workflow via dplyr)**
+   - `tools/mtl-dplyr-smoke.sh build-mtl-shlib /Users/tomasz/Library/R/arm64/4.6/library 4`
+   - Confirms both main-thread and worker-thread usage in representative dplyr/tibble flows.
+
+5. **Benchmark checkpoint (always include in flow)**
+   - Generate timing artifacts:
+     - System R:
+       - `/usr/bin/R --vanilla -q -f bench/readme_bench_run.R --args bench/results/system.rds`
+     - R-devel:
+       - `/usr/local/bin/R-devel --vanilla -q -f bench/readme_bench_run.R --args bench/results/rdevel.rds`
+     - MTL build:
+       - `build-mtl-shlib/bin/R --vanilla -q -f bench/readme_bench_run.R --args bench/results/mtl.rds`
+   - Optional richer benchmark object:
+     - `build-mtl-shlib/bin/R --vanilla -q -f bench/readme_bench_mark.R --args bench/results/bench_mark.rds`
+   - Refresh human-readable report:
+     - `build-mtl-shlib/bin/R --vanilla -q -e 'rmarkdown::render(\"README.Rmd\", output_format = \"github_document\")'`
+
+6. **Interpretation rule**
+   - Check serial parity first (`lapply` path in MTL build vs R-devel/system R).
+   - Then check scaling (`mtlapply(2/4/8)` vs `mtlapply(1)` and `lapply`).
+   - Treat benchmark noise seriously: prefer larger workloads and repeated runs before concluding regressions.
+
+## Package Compatibility Goal (Current Concrete Target)
+- Short term target: this build should load and run already-built CRAN binaries (no package code changes required).
+- Required for each checkpoint:
+  - ABI smoke (`tools/mtl-abi-smoke.R`)
+  - dplyr smoke (`tools/mtl-dplyr-smoke.R`)
+- Any regression here blocks progress, even if internal microbenchmarks improve.
+
 ## Notes / Questions to Keep In Mind
 - Serial parity is non-negotiable: any added checks/atomics/dispatch on hot serial paths must be avoided.
 - Symbol resolution should be fast in all threads:
   - If the symbol already exists in the symbol table, resolving it should not require a global lock (or should be extremely lightweight).
 - R does not have true refcounting (only a few bits in the header), so cross-heap ownership/transfer needs an approach that does not depend on unbounded refcounts.
-
+- `.Call` / `.External` compatibility is part of baseline package usability; package authors should not need a new registration model.
+- Loading packages can stay main-thread-only initially, but calling already-registered routines must remain transparent.
