@@ -230,6 +230,7 @@ NORET attribute_hidden void R_jumpctxt(RCNTXT * targetcptr, int mask, SEXP val)
     R_ReturnedValue = val;
     R_GlobalContext = cptr;
     R_restore_globals(R_GlobalContext);
+    R_mtl_sync_compat_exports();
 
     /* if we are in the process of handling a C stack overflow we need
        to restore the C stack limit before the jump */
@@ -289,6 +290,7 @@ void begincontext(RCNTXT * cptr, int flags,
     cptr->jumpmask = 0;
 
     R_GlobalContext = cptr;
+    R_mtl_sync_compat_exports();
 }
 
 
@@ -335,6 +337,7 @@ void endcontext(RCNTXT * cptr)
 	R_jumpctxt(jumptarget, cptr->jumpmask, R_ReturnedValue);
 
     R_GlobalContext = cptr->nextcontext;
+    R_mtl_sync_compat_exports();
 }
 
 
@@ -810,6 +813,7 @@ Rboolean R_ToplevelExec(void (*fun)(void *), void *data)
 	result = FALSE;
     else {
 	R_GlobalContext = R_ToplevelContext = &thiscontext;
+	R_mtl_sync_compat_exports();
 	fun(data);
 	result = TRUE;
     }

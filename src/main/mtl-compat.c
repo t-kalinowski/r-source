@@ -20,18 +20,98 @@
 #include <Defn.h>
 #include <locale.h>
 #include <dlfcn.h>
+#include <string.h>
 
 /* Defn.h defines `R_Interpreter` as a macro in the mtl build. */
 #undef R_Interpreter
+#undef R_BCNodeStackEnd
+#undef R_BCNodeStackTop
+#undef R_CStackLimit
+#undef R_CStackStart
+#undef R_GlobalContext
+#undef R_OldCStackLimit
+#undef R_PPStack
+#undef R_PPStackTop
+#undef R_ParseContext
+#undef R_ParseContextLast
+#undef R_ParseContextLine
+#undef R_ParseError
+#undef R_ParseErrorMsg
+#undef R_Visible
 
 attribute_visible R_THREAD_LOCAL R_InterpreterState *R_Interpreter = &R_Interpreter0;
+
+/*
+ * Export legacy interpreter globals expected by prebuilt binaries.
+ *
+ * These mirror fields now held in R_InterpreterState. We keep them in sync
+ * on the serial path so binaries that resolve these symbols (e.g. IDE/runtime
+ * integrations built against stock libR) remain loadable.
+ */
+attribute_visible R_bcstack_t *R_BCNodeStackEnd = NULL;
+attribute_visible R_bcstack_t *R_BCNodeStackTop = NULL;
+attribute_visible uintptr_t R_CStackLimit = 0;
+attribute_visible uintptr_t R_CStackStart = 0;
+attribute_visible void *R_GlobalContext = NULL;
+attribute_visible uintptr_t R_OldCStackLimit = 0;
+attribute_visible SEXP *R_PPStack = NULL;
+attribute_visible int R_PPStackTop = 0;
+attribute_visible char R_ParseContext[PARSE_CONTEXT_SIZE] = "";
+attribute_visible int R_ParseContextLast = 0;
+attribute_visible int R_ParseContextLine = 0;
+attribute_visible int R_ParseError = 0;
+attribute_visible char R_ParseErrorMsg[PARSE_ERROR_SIZE] = "";
+attribute_visible Rboolean R_Visible = TRUE;
+
+attribute_hidden void R_mtl_sync_compat_exports(void)
+{
+    R_InterpreterState *st;
+
+    /* Avoid cross-thread writes while worker threads are active. */
+    if (R_MTL_THREADING_ACTIVE)
+	return;
+
+    st = R_InterpreterMain ? R_InterpreterMain : &R_Interpreter0;
+    R_BCNodeStackEnd = st->bcNodeStackEnd;
+    R_BCNodeStackTop = st->bcNodeStackTop;
+    R_CStackLimit = st->cStackLimit;
+    R_CStackStart = st->cStackStart;
+#ifdef R_USE_SIGNALS
+    R_GlobalContext = st->globalContext;
+#endif
+    R_OldCStackLimit = st->oldCStackLimit;
+    R_PPStack = st->ppStack;
+    R_PPStackTop = st->ppStackTop;
+    R_ParseContextLast = st->parseContextLast;
+    R_ParseContextLine = st->parseContextLine;
+    R_ParseError = st->parseError;
+    R_Visible = st->visible;
+    memcpy(R_ParseContext, st->parseContext, sizeof(R_ParseContext));
+    memcpy(R_ParseErrorMsg, st->parseErrorMsg, sizeof(R_ParseErrorMsg));
+}
 
 attribute_hidden R_InterpreterState *R_mtl_set_compat_interpreter(R_InterpreterState *st)
 {
     R_InterpreterState *old = R_Interpreter;
     R_Interpreter = st ? st : &R_Interpreter0;
+    R_mtl_sync_compat_exports();
     return old;
 }
+
+#if defined(__APPLE__) && !defined(HAVE_X11)
+#include <Rmodules/RX11.h>
+/*
+ * Keep symbol availability compatible with framework builds that include the
+ * X11 module entrypoint even when configured --without-x.
+ */
+attribute_visible R_X11Routines *R_setX11Routines(R_X11Routines *routines)
+{
+    static R_X11Routines *ptr = NULL;
+    R_X11Routines *old = ptr;
+    ptr = routines;
+    return old;
+}
+#endif
 
 #if defined(__APPLE__) && defined(ENABLE_NLS)
 /*

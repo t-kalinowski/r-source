@@ -2357,6 +2357,7 @@ static Rboolean RunFinalizers(void)
 	    PROTECT(next);
 	    if (! SETJMP(thiscontext.cjmpbuf)) {
 		R_GlobalContext = R_ToplevelContext = &thiscontext;
+		R_mtl_sync_compat_exports();
 
 		/* The entry in the weak reference list is removed
 		   before running the finalizer.  This insures that a

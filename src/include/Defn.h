@@ -1642,6 +1642,8 @@ attribute_hidden void R_UnregisterInterpreterState(R_InterpreterState *st);
 /* Set the legacy TLS symbol `R_Interpreter` used by internal shared objects.
    Returns the previous value for this thread. */
 attribute_hidden R_InterpreterState *R_mtl_set_compat_interpreter(R_InterpreterState *st);
+/* Update exported legacy `_R_*` globals from interpreter state. */
+attribute_hidden void R_mtl_sync_compat_exports(void);
 
 attribute_hidden void R_mtl_heap_lock(void);
 attribute_hidden void R_mtl_heap_unlock(void);

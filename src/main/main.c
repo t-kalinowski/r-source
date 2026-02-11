@@ -405,6 +405,7 @@ void R_ReplDLLinit(void)
     if (SETJMP(R_Toplevel.cjmpbuf))
 	check_session_exit();
     R_GlobalContext = R_ToplevelContext = R_SessionContext = &R_Toplevel;
+    R_mtl_sync_compat_exports();
     R_IoBufferWriteReset(&R_ConsoleIob);
     prompt_type = 1;
     DLLbuf[0] = DLLbuf[CONSOLE_BUFFER_SIZE] = '\0';
@@ -789,6 +790,7 @@ static void R_LoadProfile(FILE *fparg, SEXP env)
 	    check_session_exit();
 	else {
 	    R_GlobalContext = R_ToplevelContext = R_SessionContext = &R_Toplevel;
+	    R_mtl_sync_compat_exports();
 	    R_ReplFile(fp, env);
 	}
 	fclose(fp);
@@ -1100,6 +1102,7 @@ void setup_Rmainloop(void)
     R_Toplevel.evaldepth = 0;
     R_Toplevel.browserfinish = 0;
     R_GlobalContext = R_ToplevelContext = R_SessionContext = &R_Toplevel;
+    R_mtl_sync_compat_exports();
     R_ExitContext = NULL;
 
     R_Warnings = R_NilValue;
@@ -1129,6 +1132,7 @@ void setup_Rmainloop(void)
     if (SETJMP(R_Toplevel.cjmpbuf))
 	check_session_exit();
     R_GlobalContext = R_ToplevelContext = R_SessionContext = &R_Toplevel;
+    R_mtl_sync_compat_exports();
     if (R_SignalHandlers) init_signal_handlers();
     if (!doneit) {
 	doneit = 1;
@@ -1155,6 +1159,7 @@ void setup_Rmainloop(void)
     if (SETJMP(R_Toplevel.cjmpbuf))
 	check_session_exit();
     R_GlobalContext = R_ToplevelContext = R_SessionContext = &R_Toplevel;
+    R_mtl_sync_compat_exports();
     if (!doneit) {
 	doneit = 1;
 	PROTECT(cmd = install(".OptRequireMethods"));
@@ -1202,6 +1207,7 @@ void setup_Rmainloop(void)
     if (SETJMP(R_Toplevel.cjmpbuf))
 	check_session_exit();
     R_GlobalContext = R_ToplevelContext = R_SessionContext = &R_Toplevel;
+    R_mtl_sync_compat_exports();
     if (!doneit) {
 	doneit = 1;
 	R_InitialData();
@@ -1222,6 +1228,7 @@ void setup_Rmainloop(void)
     if (SETJMP(R_Toplevel.cjmpbuf))
 	check_session_exit();
     R_GlobalContext = R_ToplevelContext = R_SessionContext = &R_Toplevel;
+    R_mtl_sync_compat_exports();
     if (!doneit) {
 	doneit = 1;
 	PROTECT(cmd = install(".First"));
@@ -1241,6 +1248,7 @@ void setup_Rmainloop(void)
     if (SETJMP(R_Toplevel.cjmpbuf))
 	check_session_exit();
     R_GlobalContext = R_ToplevelContext = R_SessionContext = &R_Toplevel;
+    R_mtl_sync_compat_exports();
     if (!doneit) {
 	doneit = 1;
 	PROTECT(cmd = install(".First.sys"));
@@ -1271,6 +1279,7 @@ void setup_Rmainloop(void)
     if (SETJMP(R_Toplevel.cjmpbuf))
 	check_session_exit();
     R_GlobalContext = R_ToplevelContext = R_SessionContext = &R_Toplevel;
+    R_mtl_sync_compat_exports();
     if (!doneit) {
 	doneit = 1;
 	R_init_jit_enabled();
@@ -1298,6 +1307,7 @@ void run_Rmainloop(void)
     if (SETJMP(R_Toplevel.cjmpbuf))
 	check_session_exit();
     R_GlobalContext = R_ToplevelContext = R_SessionContext = &R_Toplevel;
+    R_mtl_sync_compat_exports();
     R_ReplConsole(R_GlobalEnv, 0, 0);
     end_Rmainloop(); /* must go here */
 }
@@ -1462,6 +1472,7 @@ static void R_browserRepl(SEXP rho)
     R_CurrentExpr = topExp;
     R_ToplevelContext = saveToplevelContext;
     R_GlobalContext = saveGlobalContext;
+    R_mtl_sync_compat_exports();
 }
 #endif
 
@@ -1583,6 +1594,7 @@ attribute_hidden SEXP do_browser(SEXP call, SEXP op, SEXP args, SEXP rho)
 	    R_Visible = FALSE;
 	}
 	R_GlobalContext = &thiscontext;
+	R_mtl_sync_compat_exports();
 	R_InsertRestartHandlers(&thiscontext, "browser");
 #ifdef USE_BROWSER_HOOK
 	/* if a browser hook is provided, call it and use the result */
@@ -1614,6 +1626,7 @@ attribute_hidden SEXP do_browser(SEXP call, SEXP op, SEXP args, SEXP rho)
     R_CurrentExpr = topExp;
     R_ToplevelContext = saveToplevelContext;
     R_GlobalContext = saveGlobalContext;
+    R_mtl_sync_compat_exports();
     return R_ReturnedValue;
 }
 
@@ -1625,6 +1638,7 @@ void R_dot_Last(void)
     /* Errors here should kick us back into the repl. */
 
     R_GlobalContext = R_ToplevelContext = R_SessionContext = &R_Toplevel;
+    R_mtl_sync_compat_exports();
     PROTECT(cmd = install(".Last"));
     R_CurrentExpr = R_findVar(cmd, R_GlobalEnv);
     if (R_CurrentExpr != R_UnboundValue && TYPEOF(R_CurrentExpr) == CLOSXP) {
