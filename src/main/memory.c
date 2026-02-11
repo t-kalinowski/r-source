@@ -816,7 +816,7 @@ static R_size_t R_V_maxused=0;
 #define NUM_SMALL_NODE_CLASSES (NUM_NODE_CLASSES - 2)
 
 /* the number of VECREC's in nodes of the small node classes */
-static int NodeClassSize[NUM_SMALL_NODE_CLASSES] = { 0, 1, 2, 4, 8, 16 };
+static int NodeClassSize[NUM_SMALL_NODE_CLASSES] = { 0, 1, 2, 4, 16, 128 };
 
 #define NODE_CLASS(s) ((s)->sxpinfo.gccls)
 #define SET_NODE_CLASS(s,v) (((s)->sxpinfo.gccls) = (v))
