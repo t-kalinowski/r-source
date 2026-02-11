@@ -66,6 +66,8 @@ static const char *mtl_rpc_reason_name_lookup(int reason)
 	    atomic_int error;         /* 0/1 */
 	    atomic_int cancel_requested; /* 0/1 cooperative cancellation */
 	    atomic_int active_eval_workers; /* workers currently evaluating/writing one item */
+	    atomic_int workers_done;  /* workers that have fully exited this job */
+	    int bg_threads;           /* number of worker threads assigned to this job */
 	    atomic_int refcount;      /* heap lifetime across main + workers */
 	    char errmsg[1024];
 	    pthread_mutex_t err_mutex; /* protects errmsg */
@@ -108,7 +110,6 @@ static const char *mtl_rpc_reason_name_lookup(int reason)
 
 	    unsigned long gen;
 	    int job_nthreads;
-	    int job_done;
 	    mtl_job_t *job; /* owned by the mtlapply() caller thread */
 
 	    /* Worker->main requests (e.g. global caches that must be mutated by main). */
@@ -676,13 +677,11 @@ static void mtl_job_release(mtl_job_t *job)
 			    R_gc();
 
 			pthread_mutex_lock(&p->mu);
-			if (p->job == job && p->gen == mygen) {
-			    p->job_done++;
-			    pthread_cond_broadcast(&p->cv);
-	}
-	pthread_mutex_unlock(&p->mu);
-	mtl_job_release(job);
-    }
+			atomic_fetch_add_explicit(&job->workers_done, 1, memory_order_relaxed);
+			pthread_cond_broadcast(&p->cv);
+			pthread_mutex_unlock(&p->mu);
+		mtl_job_release(job);
+	    }
 
     R_InterpreterTLS = saved_interp;
     R_mtl_set_compat_interpreter(saved_compat);
@@ -950,7 +949,6 @@ static SEXP mtl_serial_apply_no_pool(SEXP XX, SEXP FUN, SEXP dots, SEXP names, S
 
 	    mtl_pool.job = d->job;
 	    mtl_pool.job_nthreads = d->n_bg_threads;
-	    mtl_pool.job_done = 0;
 	    mtl_pool.gen++;
 	    pthread_cond_broadcast(&mtl_pool.cv);
 
@@ -961,9 +959,9 @@ static SEXP mtl_serial_apply_no_pool(SEXP XX, SEXP FUN, SEXP dots, SEXP names, S
        Running FUN concurrently on the main thread and worker threads
        can corrupt error/unwind state when one branch raises an error. */
 
-    pthread_mutex_lock(&mtl_pool.mu);
-    d->mu_locked = 1;
-	    while (mtl_pool.job_done < d->n_bg_threads) {
+	    pthread_mutex_lock(&mtl_pool.mu);
+	    d->mu_locked = 1;
+	    while (atomic_load_explicit(&d->job->workers_done, memory_order_relaxed) < d->n_bg_threads) {
 		/* Service any worker->main requests (e.g. install/mkChar) while waiting. */
 		mtl_rpc_service_locked();
 		/* Fail-fast on worker errors: once no worker is actively evaluating,
@@ -975,7 +973,7 @@ static SEXP mtl_serial_apply_no_pool(SEXP XX, SEXP FUN, SEXP dots, SEXP names, S
 		    pthread_cond_broadcast(&mtl_pool.cv);
 		    break;
 		}
-		if (mtl_pool.job_done < d->n_bg_threads)
+		if (atomic_load_explicit(&d->job->workers_done, memory_order_relaxed) < d->n_bg_threads)
 		    pthread_cond_wait(&mtl_pool.cv, &mtl_pool.mu);
 	    }
 
@@ -1016,14 +1014,14 @@ static void mtlapply_run_cleanup(void *vp, Rboolean jump)
 
 	/* Keep mtl_pool.job valid until all workers have reported done. */
 	if (mtl_pool.job == d->job) {
-	    while (mtl_pool.job_done < d->n_bg_threads) {
+	    while (atomic_load_explicit(&d->job->workers_done, memory_order_relaxed) < d->n_bg_threads) {
 		mtl_rpc_service_locked();
 		if (atomic_load_explicit(&d->job->active_eval_workers, memory_order_relaxed) == 0) {
 		    mtl_pool.job = NULL;
 		    pthread_cond_broadcast(&mtl_pool.cv);
 		    break;
 		}
-		if (mtl_pool.job_done < d->n_bg_threads)
+		if (atomic_load_explicit(&d->job->workers_done, memory_order_relaxed) < d->n_bg_threads)
 		    pthread_cond_wait(&mtl_pool.cv, &mtl_pool.mu);
 	    }
 	    mtl_rpc_service_locked();
@@ -1184,6 +1182,8 @@ attribute_hidden SEXP do_mtlapply(SEXP call, SEXP op, SEXP args, SEXP rho)
 		    atomic_init(&job->error, 0);
 		    atomic_init(&job->cancel_requested, 0);
 		    atomic_init(&job->active_eval_workers, 0);
+		    atomic_init(&job->workers_done, 0);
+		    job->bg_threads = n_bg_threads;
 		    atomic_init(&job->refcount, 1); /* main owner; workers acquire when job starts */
 		    job->errmsg[0] = '\0';
 		    job->main_showErrorMessages = R_ShowErrorMessages;
