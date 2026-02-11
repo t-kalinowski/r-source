@@ -110,20 +110,7 @@ attribute_hidden SEXP R_mtl_shallow_duplicate_pairlist(SEXP lst)
 	return R_NilValue;
     if (TYPEOF(lst) != LISTSXP)
 	error(_("corrupted options list"));
-
-    SEXP head = R_NilValue;
-    SEXP tail = R_NilValue;
-    for (SEXP cur = lst; cur != R_NilValue; cur = CDR(cur)) {
-	SEXP cell = CONS(CAR(cur), R_NilValue);
-	SET_TAG(cell, TAG(cur));
-	if (head == R_NilValue) {
-	    head = tail = cell;
-	} else {
-	    SETCDR(tail, cell);
-	    tail = cell;
-	}
-    }
-    return head;
+    return shallow_duplicate(lst);
 }
 
 static R_INLINE int is_mtl_worker(void)

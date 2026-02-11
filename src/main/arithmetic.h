@@ -65,6 +65,9 @@ SEXP do_log_builtin(SEXP call, SEXP op, SEXP args, SEXP env);
 static R_INLINE SEXP R_allocOrReuseVector(SEXP s1, SEXP s2,
 					  SEXPTYPE type , R_xlen_t n)
 {
+    if (R_Interpreter != NULL && R_Interpreter->isMTLWorker)
+	return allocVector(type, n);
+
     R_xlen_t n1 = XLENGTH(s1);
     R_xlen_t n2 = XLENGTH(s2);
 

@@ -182,7 +182,10 @@ static SEXP mtl_dotOptionsSym = NULL;
 			static void mtl_interp_init_from_main(R_InterpreterState *st)
 			{
 		    st->heap = NULL;
-		    st->gcEnabled = 1;
+		    /* Worker evaluation currently shares references to main-heap objects
+		       (closures/environments/arguments). Keep worker GC disabled to
+		       avoid tracing corruption while this representation is in use. */
+		    st->gcEnabled = 0;
 		    st->in_gc = 0;
 		    st->mtlGlobalEnvRedirect = 0;
 			    st->currentExpr = NULL;
@@ -508,7 +511,7 @@ static void mtl_job_release(mtl_job_t *job)
        per-thread dummy toplevel context as the base of the chain. */
     R_Toplevel.nextcontext = NULL;
     R_Toplevel.callflag = CTXT_TOPLEVEL;
-    R_Toplevel.cstacktop = 0;
+    R_Toplevel.cstacktop = R_PPStackTop;
     R_Toplevel.gcenabled = R_GCEnabled;
     R_Toplevel.promargs = R_NilValue;
     R_Toplevel.callfun = R_NilValue;
@@ -516,7 +519,7 @@ static void mtl_job_release(mtl_job_t *job)
     R_Toplevel.cloenv = R_BaseEnv;
     R_Toplevel.sysparent = R_BaseEnv;
     R_Toplevel.conexit = R_NilValue;
-    R_Toplevel.vmax = NULL;
+    R_Toplevel.vmax = vmaxget();
     R_Toplevel.nodestack = w->interp.bcNodeStackTop;
     R_Toplevel.bcprottop = w->interp.bcProtTop;
     R_Toplevel.cend = NULL;
@@ -634,6 +637,27 @@ static void mtl_job_release(mtl_job_t *job)
 			break;
 		    atomic_fetch_add_explicit(&job->active_eval_workers, 1, memory_order_relaxed);
 		    int err = 0;
+#ifdef R_USE_SIGNALS
+		    /* R_tryEvalSilent() errors unwind to this thread's toplevel
+		       context. Refresh the baseline snapshots before each eval so
+		       unwind restores the current protection/vmax/node-stack state
+		       (including job-scoped PROTECTs like fcall/argcell/tail). */
+		    R_Toplevel.cstacktop = R_PPStackTop;
+		    R_Toplevel.gcenabled = R_GCEnabled;
+		    R_Toplevel.bcintactive = R_BCIntActive;
+		    R_Toplevel.bcpc = R_BCpc;
+		    R_Toplevel.bcbody = R_BCbody;
+		    R_Toplevel.bcframe = R_BCFrame;
+		    R_Toplevel.vmax = vmaxget();
+		    R_Toplevel.intsusp = R_interrupts_suspended;
+		    R_Toplevel.nodestack = R_BCNodeStackTop;
+		    R_Toplevel.bcprottop = R_BCProtTop;
+		    R_Toplevel.handlerstack = R_HandlerStack;
+		    R_Toplevel.restartstack = R_RestartStack;
+		    R_Toplevel.prstack = R_PendingPromises;
+		    R_Toplevel.evaldepth = R_EvalDepth;
+		    R_Toplevel.srcref = R_Srcref;
+#endif
 		    mtl_parallel_begin();
 		    if (mtl_trace_enabled()) {
 			fprintf(stderr, "[mtl] worker=%p eval i=%lld begin\n",
@@ -673,11 +697,7 @@ static void mtl_job_release(mtl_job_t *job)
 				w->interp.mtlOptions = R_NilValue;
 				w->interp.mtlOptionsBase = R_NilValue;
 
-			/* Only on successful jobs: before heap adoption, move live worker
-			   nodes out of New space. On error paths we do not adopt worker
-			   heaps, and forcing GC here can deadlock teardown. */
-			if (!atomic_load_explicit(&job->error, memory_order_relaxed))
-			    R_gc();
+			/* Worker GC is disabled; adoption/reset happens on main thread. */
 
 			pthread_mutex_lock(&p->mu);
 			atomic_fetch_add_explicit(&job->workers_done, 1, memory_order_relaxed);
@@ -1203,20 +1223,33 @@ attribute_hidden SEXP do_mtlapply(SEXP call, SEXP op, SEXP args, SEXP rho)
 						    mtlapply_run_cleanup, &run_data,
 						    NULL);
 
+			    const char *noadopt = getenv("R_MTL_NOADOPT");
 			    if (atomic_load_explicit(&job->error, memory_order_relaxed)) {
 				char msg[1024];
 				snprintf(msg, sizeof(msg), "%s",
 					 job->errmsg[0] ? job->errmsg : "mtlapply error");
-			/* Ensure worker heaps don't keep partial results rooted. */
-			for (int t = 0; t < n_bg_threads; t++)
-			    mtl_pool.workers[t]->interp.preciousList = R_NilValue;
+			/* After an error, workers may hold partial allocations/results in
+			   their heaps. Adopt+reset worker heaps now so stale worker state
+			   cannot leak into subsequent jobs. */
+			if (n_bg_threads > 0) {
+			    if (noadopt == NULL || *noadopt == '\0') {
+				for (int t = 0; t < n_bg_threads; t++)
+				    R_mtl_adopt_worker_heap(&mtl_pool.workers[t]->interp);
+			    }
+			    for (int t = 0; t < n_bg_threads; t++)
+				mtl_pool.workers[t]->interp.preciousList = R_NilValue;
+			}
 			mtl_job_release(job);
 			UNPROTECT(nprotect);
+			/* Error paths can leave worker interpreter stacks in an
+			   inconsistent state for subsequent jobs. Reset the pool so
+			   the next mtlapply() starts from fresh worker interpreters. */
+			if (n_bg_threads > 0 && mtl_pool.inited)
+			    R_mtlpool_shutdown();
 			error("%s", msg);
 		    }
 
 			    /* Adopt all worker heaps into main before touching the results. */
-			    const char *noadopt = getenv("R_MTL_NOADOPT");
 			    if (n_bg_threads > 0) {
 				if (noadopt == NULL || *noadopt == '\0') {
 				    for (int t = 0; t < n_bg_threads; t++)
@@ -1225,6 +1258,13 @@ attribute_hidden SEXP do_mtlapply(SEXP call, SEXP op, SEXP args, SEXP rho)
 				for (R_xlen_t i = 0; i < n; i++) {
 				    if (job->results[i] != NULL)
 					SET_VECTOR_ELT(ans, i, job->results[i]);
+				}
+				/* Worker results are preserved in each worker interpreter while
+				   the job is running. Once results are adopted and rooted by 'ans',
+				   clear worker preserve lists to avoid stale cross-job preserves. */
+				if (noadopt == NULL || *noadopt == '\0') {
+				    for (int t = 0; t < n_bg_threads; t++)
+					mtl_pool.workers[t]->interp.preciousList = R_NilValue;
 				}
 			    }
 
@@ -1373,6 +1413,20 @@ attribute_hidden SEXP do_mtlrpcstats(SEXP call, SEXP op, SEXP args, SEXP rho)
     setAttrib(out, R_NamesSymbol, nms);
     UNPROTECT(2);
     return out;
+}
+
+/* .Internal(mtlpoolreset())
+ *
+ * Force a teardown of the worker pool so the next mtlapply() call starts
+ * from fresh worker interpreters. */
+attribute_hidden SEXP do_mtlpoolreset(SEXP call, SEXP op, SEXP args, SEXP rho)
+{
+    checkArity(op, args);
+#ifdef HAVE_PTHREAD
+    if (mtl_pool.inited)
+	R_mtlpool_shutdown();
+#endif
+    return ScalarLogical(1);
 }
 
 /* .Internal(vapply(X, FUN, FUN.VALUE, USE.NAMES)) */

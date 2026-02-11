@@ -100,6 +100,12 @@ nested <- mtlapply_with_threads(4L, 1:20, function(i) {
 })
 stopifnot(identical(nested[[4]], outer_off + 12L + 1:5))
 
+# Worker arithmetic must not mutate captured scalar bindings in place.
+mod_guard <- 9L
+mod_vals <- mtlapply_with_threads(4L, 1:40, function(i) i %% mod_guard)
+stopifnot(identical(unlist(mod_vals, use.names = FALSE), (1:40) %% 9L))
+stopifnot(identical(mod_guard, 9L))
+
 # Nested mtlapply() reuses the existing pool (no extra worker creation).
 invisible(.Internal(mtlpoolstats(TRUE)))
 invisible(mtlapply_with_threads(4L, 1:8, function(i) i))

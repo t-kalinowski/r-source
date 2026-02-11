@@ -23,5 +23,24 @@ mtlapply <- function(X, FUN, ...)
     threads <- as.integer(getOption("mtlapply.threads", 2L))[1L]
     if (is.na(threads) || threads < 1L)
         stop("invalid value in options(\"mtlapply.threads\"): must be >= 1")
-    .Internal(mtlapply(X, FUN, list(...), as.integer(threads)))
+    wrapped <- function(...) {
+        tryCatch(
+            FUN(...),
+            error = function(e) structure(
+                list(message = conditionMessage(e)),
+                class = "mtlapply_internal_worker_error"
+            )
+        )
+    }
+    ans <- .Internal(mtlapply(X, wrapped, list(...), as.integer(threads)))
+    err <- vapply(ans, inherits, logical(1), "mtlapply_internal_worker_error")
+    if (any(err)) {
+        first <- ans[[which(err)[1L]]]
+        msg <- first$message
+        if (!is.character(msg) || length(msg) != 1L || is.na(msg))
+            msg <- "mtlapply worker error"
+        invisible(.Internal(mtlpoolreset()))
+        stop(msg, call. = FALSE)
+    }
+    ans
 }

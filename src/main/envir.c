@@ -998,12 +998,20 @@ SEXP findVarInFrame3(SEXP rho, SEXP symbol, Rboolean doGet)
 {
     int hashcode;
     SEXP frame, c;
+    const int is_mtl_worker = (R_Interpreter != NULL && R_Interpreter->isMTLWorker);
 
     if (TYPEOF(rho) == NILSXP)
 	error(_("use of NULL environment is defunct"));
 
-    if (rho == R_BaseNamespace || rho == R_BaseEnv)
-	return SYMBOL_BINDING_VALUE(symbol);
+    if (rho == R_BaseNamespace || rho == R_BaseEnv) {
+	SEXP val = SYMBOL_BINDING_VALUE(symbol);
+	/* Worker threads read shared/global state; force read-only treatment
+	   so arithmetic and replacement paths do not mutate these values
+	   in place based on stale NAMED/REFCNT metadata. */
+	if (is_mtl_worker && val != R_UnboundValue)
+	    ENSURE_NAMEDMAX(val);
+	return val;
+    }
 
     if (rho == R_EmptyEnv)
 	return R_UnboundValue;
@@ -1028,8 +1036,12 @@ SEXP findVarInFrame3(SEXP rho, SEXP symbol, Rboolean doGet)
     } else if (HASHTAB(rho) == R_NilValue) {
 	frame = FRAME(rho);
 	while (frame != R_NilValue) {
-	    if (TAG(frame) == symbol)
-		return BINDING_VALUE(frame);
+	    if (TAG(frame) == symbol) {
+		SEXP val = BINDING_VALUE(frame);
+		if (is_mtl_worker && val != R_UnboundValue)
+		    ENSURE_NAMEDMAX(val);
+		return val;
+	    }
 	    frame = CDR(frame);
 	}
     }
@@ -1041,7 +1053,10 @@ SEXP findVarInFrame3(SEXP rho, SEXP symbol, Rboolean doGet)
 	}
 	hashcode = HASHVALUE(c) % HASHSIZE(HASHTAB(rho));
 	/* Will return 'R_UnboundValue' if not found */
-	return(R_HashGet(hashcode, symbol, HASHTAB(rho)));
+	SEXP val = R_HashGet(hashcode, symbol, HASHTAB(rho));
+	if (is_mtl_worker && val != R_UnboundValue)
+	    ENSURE_NAMEDMAX(val);
+	return val;
     }
     return R_UnboundValue;
 }
@@ -1220,12 +1235,23 @@ static SEXP findGlobalVarLoc(SEXP symbol)
 static R_INLINE SEXP findGlobalVar(SEXP symbol)
 {
     SEXP loc = findGlobalVarLoc(symbol);
+    const int is_mtl_worker = (R_Interpreter != NULL && R_Interpreter->isMTLWorker);
+    SEXP val = R_UnboundValue;
     switch (TYPEOF(loc)) {
-    case NILSXP: return R_UnboundValue;
-    case SYMSXP: return SYMBOL_BINDING_VALUE(symbol);
-    default: return BINDING_VALUE(loc);
+    case NILSXP:
+	val = R_UnboundValue;
+	break;
+    case SYMSXP:
+	val = SYMBOL_BINDING_VALUE(symbol);
+	break;
+    default:
+	val = BINDING_VALUE(loc);
+	break;
                     /* loc is protected by callee when needed */
     }
+    if (is_mtl_worker && val != R_UnboundValue)
+	ENSURE_NAMEDMAX(val);
+    return val;
 }
 #endif
 

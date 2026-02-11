@@ -247,6 +247,7 @@ SEXP do_mtlapply(SEXP, SEXP, SEXP, SEXP);
 SEXP do_mtlparallelmax(SEXP, SEXP, SEXP, SEXP);
 SEXP do_mtlpoolstats(SEXP, SEXP, SEXP, SEXP);
 SEXP do_mtlrpcstats(SEXP, SEXP, SEXP, SEXP);
+SEXP do_mtlpoolreset(SEXP, SEXP, SEXP, SEXP);
 SEXP do_lazyLoadDBfetch(SEXP, SEXP, SEXP, SEXP);
 SEXP do_lazyLoadDBflush(SEXP, SEXP, SEXP, SEXP);
 SEXP do_lazyLoadDBinsertValue(SEXP call, SEXP op, SEXP args, SEXP env);
