@@ -163,11 +163,11 @@ them:
     ## # A data frame: 5 × 13
     ##   expression    min median `itr/sec` mem_alloc `gc/sec` n_itr  n_gc total_time
     ##   <bch:expr>  <dbl>  <dbl>     <dbl> <bch:byt>    <dbl> <int> <dbl>      <dbl>
-    ## 1 lapply      0.900  0.917      1.09        NA     61.8     3   170      2.75 
-    ## 2 mtlapply(1) 0.905  0.911      1.10        NA     42.4     3   116      2.74 
-    ## 3 mtlapply(2) 0.481  0.484      2.07        NA     37.9     3    55      1.45 
-    ## 4 mtlapply(4) 0.254  0.254      3.93        NA     43.2     3    33      0.764
-    ## 5 mtlapply(8) 0.128  0.129      7.74        NA     36.1     3    14      0.387
+    ## 1 lapply      0.930  0.936      1.06        NA     52.9     5   249      4.70 
+    ## 2 mtlapply(1) 0.909  0.931      1.08        NA     40.5     5   188      4.64 
+    ## 3 mtlapply(2) 0.580  0.583      1.70        NA     31.7     5    93      2.93 
+    ## 4 mtlapply(4) 0.304  0.308      3.25        NA     32.5     5    50      1.54 
+    ## 5 mtlapply(8) 0.155  0.160      6.21        NA     33.6     5    27      0.805
     ## # ℹ 4 more variables: result <list>, memory <list>, time <list>, gc <list>
 
 ![](bench/figures/readme-results-2.png)<!-- -->
