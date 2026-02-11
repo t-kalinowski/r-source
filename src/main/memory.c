@@ -2569,24 +2569,26 @@ static int RunGenCollect(R_size_t size_needed)
 
 	    /* Per-interpreter roots (main + workers). */
 	    LOCK_INTERP_REGISTRY();
-	    for (R_InterpreterState *ist = R_InterpreterRegistry;
-		 ist != NULL;
-		 ist = ist->next) {
-		/* Only forward roots for interpreters sharing the current heap.
-		   Independent mtlapply() worker heaps are collected separately. */
-		if (ist->heap != R_HEAP)
-		    continue;
-		FORWARD_NODE_IN_CURRENT_HEAP(ist->warnings);          /* Warnings, if any */
-		FORWARD_NODE_IN_CURRENT_HEAP(ist->returnedValue);
-		FORWARD_NODE_IN_CURRENT_HEAP(ist->handlerStack);      /* Condition handler stack */
-		FORWARD_NODE_IN_CURRENT_HEAP(ist->restartStack);      /* Available restarts stack */
-		FORWARD_NODE_IN_CURRENT_HEAP(ist->workerGlobalEnv);   /* Worker global env (may be NULL) */
-		FORWARD_NODE_IN_CURRENT_HEAP(ist->bcbody);            /* Current byte code object */
-		FORWARD_NODE_IN_CURRENT_HEAP(ist->parseErrorFile);    /* Parse error source file (may be NULL) */
-		if (ist->currentExpr)                 /* Current expression */
-		    FORWARD_NODE_IN_CURRENT_HEAP(ist->currentExpr);
-	    }
-	    UNLOCK_INTERP_REGISTRY();
+		    for (R_InterpreterState *ist = R_InterpreterRegistry;
+			 ist != NULL;
+			 ist = ist->next) {
+			/* Only forward roots for interpreters sharing the current heap.
+			   Independent mtlapply() worker heaps are collected separately. */
+			if (ist->heap != R_HEAP)
+			    continue;
+			FORWARD_NODE_IN_CURRENT_HEAP(ist->warnings);          /* Warnings, if any */
+			FORWARD_NODE_IN_CURRENT_HEAP(ist->returnedValue);
+			FORWARD_NODE_IN_CURRENT_HEAP(ist->handlerStack);      /* Condition handler stack */
+			FORWARD_NODE_IN_CURRENT_HEAP(ist->restartStack);      /* Available restarts stack */
+			FORWARD_NODE_IN_CURRENT_HEAP(ist->workerGlobalEnv);   /* Worker global env (may be NULL) */
+			FORWARD_NODE_IN_CURRENT_HEAP(ist->mtlOptionsBase);    /* Worker options base (may be NULL) */
+			FORWARD_NODE_IN_CURRENT_HEAP(ist->mtlOptions);        /* Worker options current (may be NULL) */
+			FORWARD_NODE_IN_CURRENT_HEAP(ist->bcbody);            /* Current byte code object */
+			FORWARD_NODE_IN_CURRENT_HEAP(ist->parseErrorFile);    /* Parse error source file (may be NULL) */
+			if (ist->currentExpr)                 /* Current expression */
+			    FORWARD_NODE_IN_CURRENT_HEAP(ist->currentExpr);
+		    }
+		    UNLOCK_INTERP_REGISTRY();
 
 	    for (i = 0; i < R_MaxDevices; i++) {   /* Device display lists */
 		pGEDevDesc gdd = GEgetDevice(i);
@@ -2868,14 +2870,16 @@ static void mtl_worker_gc(R_size_t size_needed)
 
     /* Forward interpreter roots. */
     FORWARD_NODE(R_Warnings);
-    FORWARD_NODE(R_ReturnedValue);
-    FORWARD_NODE(R_HandlerStack);
-    FORWARD_NODE(R_RestartStack);
-    FORWARD_NODE(R_Interpreter->workerGlobalEnv);
-    FORWARD_NODE(R_BCbody);
-    FORWARD_NODE(R_ParseErrorFile);
-    if (R_CurrentExpr)
-	FORWARD_NODE(R_CurrentExpr);
+	    FORWARD_NODE(R_ReturnedValue);
+	    FORWARD_NODE(R_HandlerStack);
+	    FORWARD_NODE(R_RestartStack);
+	    FORWARD_NODE(R_Interpreter->workerGlobalEnv);
+	    FORWARD_NODE(R_Interpreter->mtlOptionsBase);
+	    FORWARD_NODE(R_Interpreter->mtlOptions);
+	    FORWARD_NODE(R_BCbody);
+	    FORWARD_NODE(R_ParseErrorFile);
+	    if (R_CurrentExpr)
+		FORWARD_NODE(R_CurrentExpr);
 
 #ifdef R_USE_SIGNALS
     for (ctxt = R_GlobalContext; ctxt != NULL; ctxt = ctxt->nextcontext) {

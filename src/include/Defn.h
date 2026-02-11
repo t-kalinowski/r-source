@@ -1584,6 +1584,8 @@ typedef struct R_InterpreterState_ {
     Rboolean visible;        /* Value visibility flag */
     int showErrorMessages;   /* show error messages? */
     int allowOptionsSet;     /* can this interpreter mutate global options? */
+    SEXP mtlOptionsBase;     /* worker: base snapshot of .Options for current job */
+    SEXP mtlOptions;         /* worker: current .Options (reset per eval) */
     int isMTLWorker;         /* non-zero for mtlapply() worker interpreter */
     SEXP workerGlobalEnv;    /* worker "global" env (parent is R_GlobalEnv) */
     int collectWarnings;     /* number of collected warnings (0 means none) */
@@ -1644,6 +1646,10 @@ attribute_hidden R_InterpreterState *R_mtl_set_compat_interpreter(R_InterpreterS
 attribute_hidden void R_mtl_heap_lock(void);
 attribute_hidden void R_mtl_heap_unlock(void);
 attribute_hidden void R_mtl_heap_unlock_all(void);
+
+/* Shallow-duplicate a LISTSXP options pairlist: duplicates the cons cells, but
+   preserves CAR pointers (no deep copy of values). */
+attribute_hidden SEXP R_mtl_shallow_duplicate_pairlist(SEXP lst);
 
 /* Global flag enabling the multi-threaded allocation/GC fast paths.
    Keep it off outside of mtlapply() to preserve serial performance.

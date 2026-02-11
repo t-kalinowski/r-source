@@ -139,25 +139,28 @@ static pthread_t mtl_main_thread;
 static mtl_pool_t mtl_pool;
 static atomic_int mtl_pool_threads_created = 0;
 static SEXP mtl_dotGlobalEnvSym = NULL;
+static SEXP mtl_dotOptionsSym = NULL;
 
-		static void mtl_interp_init_from_main(R_InterpreterState *st)
-		{
-		    st->heap = NULL;
-		    st->gcEnabled = 1;
-		    st->in_gc = 0;
-		    st->mtlGlobalEnvRedirect = 1;
-		    st->currentExpr = NULL;
-		    st->returnedValue = R_NilValue;
-		    st->handlerStack = R_NilValue;
-		    st->restartStack = R_NilValue;
-		    st->visible = TRUE;
-	    st->showErrorMessages = 1;
-	    st->allowOptionsSet = 0;
-	    st->isMTLWorker = 1;
-	    st->workerGlobalEnv = NULL;
-	    st->collectWarnings = 0;
-    st->warnings = R_NilValue;
-    st->evalDepth = 0;
+			static void mtl_interp_init_from_main(R_InterpreterState *st)
+			{
+			    st->heap = NULL;
+			    st->gcEnabled = 1;
+			    st->in_gc = 0;
+			    st->mtlGlobalEnvRedirect = 1;
+			    st->currentExpr = NULL;
+			    st->returnedValue = R_NilValue;
+			    st->handlerStack = R_NilValue;
+			    st->restartStack = R_NilValue;
+			    st->visible = TRUE;
+		    st->showErrorMessages = 1;
+		    st->allowOptionsSet = 0;
+		    st->mtlOptionsBase = R_NilValue;
+		    st->mtlOptions = R_NilValue;
+		    st->isMTLWorker = 1;
+		    st->workerGlobalEnv = NULL;
+		    st->collectWarnings = 0;
+	    st->warnings = R_NilValue;
+	    st->evalDepth = 0;
     st->ppStackTop = 0;
     st->ppStack = NULL;
     st->parseError = 0;
@@ -218,6 +221,8 @@ static void mtl_interp_reset_for_eval(R_InterpreterState *st, const mtl_job_t *j
     st->collectWarnings = 0;
     st->warnings = R_NilValue;
     st->evalDepth = 0;
+    /* Reset worker-local options to the per-job base snapshot. */
+    st->mtlOptions = st->mtlOptionsBase;
     st->expressions = st->expressions_keep;
     st->bcNodeStackTop = st->bcNodeStackBase;
     st->bcProtTop = st->bcNodeStackTop;
@@ -246,17 +251,18 @@ static void mtl_ensure_main_thread(void)
 	error("mtlapply() may only be called from the main thread");
 }
 
-	static void mtl_pool_init_if_needed(void)
-	{
-	    if (mtl_pool.inited)
-		return;
+		static void mtl_pool_init_if_needed(void)
+		{
+		    if (mtl_pool.inited)
+			return;
 
-	    memset(&mtl_pool, 0, sizeof(mtl_pool));
-	    pthread_mutex_init(&mtl_pool.mu, NULL);
-	    pthread_cond_init(&mtl_pool.cv, NULL);
-	    mtl_dotGlobalEnvSym = install(".GlobalEnv");
-	    mtl_pool.inited = 1;
-	}
+		    memset(&mtl_pool, 0, sizeof(mtl_pool));
+		    pthread_mutex_init(&mtl_pool.mu, NULL);
+		    pthread_cond_init(&mtl_pool.cv, NULL);
+		    mtl_dotGlobalEnvSym = install(".GlobalEnv");
+		    mtl_dotOptionsSym = install(".Options");
+		    mtl_pool.inited = 1;
+		}
 
 	/* Worker -> main request plumbing.
 	 *
@@ -463,20 +469,32 @@ static void mtl_ensure_main_thread(void)
 		w->seen_gen = mygen;
 		pthread_mutex_unlock(&p->mu);
 
-		/* Create a fresh worker "global" environment for this job.
-		   Parent is the real global env, so reads see main-session bindings. */
-		{
-		    SEXP wenv = PROTECT(NewEnvironment(R_NilValue, R_NilValue, R_GlobalEnv));
-		    w->interp.workerGlobalEnv = wenv;
-		    defineVar(mtl_dotGlobalEnvSym, wenv, wenv); /* shadow .GlobalEnv */
-		    UNPROTECT(1);
-		}
+			/* Create a fresh worker "global" environment for this job.
+			   Parent is the real global env, so reads see main-session bindings. */
+			{
+			    SEXP wenv = PROTECT(NewEnvironment(R_NilValue, R_NilValue, R_GlobalEnv));
+			    w->interp.workerGlobalEnv = wenv;
+			    defineVar(mtl_dotGlobalEnvSym, wenv, wenv); /* shadow .GlobalEnv */
+			    UNPROTECT(1);
+			}
 
-		/* Build per-job call objects in the worker heap to avoid mutating
-		   main-heap call structures from worker threads. */
-		SEXP tail = PROTECT(duplicate(job->tail0));
-		SEXP argcell = PROTECT(CONS(R_NilValue, tail));
-		SEXP fcall = PROTECT(LCONS(job->FUN, argcell));
+			/* Snapshot global options into the worker heap for this job.
+			   The worker sees/sets options against this snapshot (copy-on-write),
+			   so packages using withr::with_options() work without mutating global
+			   process state. */
+			{
+			    R_mtl_global_lock();
+			    SEXP glob = SYMVALUE(mtl_dotOptionsSym);
+			    w->interp.mtlOptionsBase = R_mtl_shallow_duplicate_pairlist(glob);
+			    w->interp.mtlOptions = w->interp.mtlOptionsBase;
+			    R_mtl_global_unlock();
+			}
+
+			/* Build per-job call objects in the worker heap to avoid mutating
+			   main-heap call structures from worker threads. */
+			SEXP tail = PROTECT(duplicate(job->tail0));
+			SEXP argcell = PROTECT(CONS(R_NilValue, tail));
+			SEXP fcall = PROTECT(LCONS(job->FUN, argcell));
 		MARK_NOT_MUTABLE(fcall);
 
 		for (;;) {
@@ -572,13 +590,16 @@ static void mtl_ensure_main_thread(void)
 
 			UNPROTECT(3); /* tail, argcell, fcall */
 
-			/* Drop the job-global env so it won't be kept alive across adoption. */
-			w->interp.workerGlobalEnv = NULL;
+				/* Drop the job-global env so it won't be kept alive across adoption. */
+				w->interp.workerGlobalEnv = NULL;
+				/* Drop worker-local options before GC/adoption: keep them job-local. */
+				w->interp.mtlOptions = R_NilValue;
+				w->interp.mtlOptionsBase = R_NilValue;
 
-			/* Ensure all live worker nodes are moved out of New space before the
-			   main thread adopts this heap. Without this, adoption can move
-			   still-live New-space nodes into the main heap where they may be
-			   overwritten by subsequent allocations before a main GC runs. */
+				/* Ensure all live worker nodes are moved out of New space before the
+				   main thread adopts this heap. Without this, adoption can move
+				   still-live New-space nodes into the main heap where they may be
+				   overwritten by subsequent allocations before a main GC runs. */
 			R_gc();
 
 			pthread_mutex_lock(&p->mu);

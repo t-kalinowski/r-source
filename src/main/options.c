@@ -104,6 +104,83 @@ static SEXP Options(void)
     return sOptions;
 }
 
+attribute_hidden SEXP R_mtl_shallow_duplicate_pairlist(SEXP lst)
+{
+    if (lst == R_NilValue)
+	return R_NilValue;
+    if (TYPEOF(lst) != LISTSXP)
+	error(_("corrupted options list"));
+
+    SEXP head = R_NilValue;
+    SEXP tail = R_NilValue;
+    for (SEXP cur = lst; cur != R_NilValue; cur = CDR(cur)) {
+	SEXP cell = CONS(CAR(cur), R_NilValue);
+	SET_TAG(cell, TAG(cur));
+	if (head == R_NilValue) {
+	    head = tail = cell;
+	} else {
+	    SETCDR(tail, cell);
+	    tail = cell;
+	}
+    }
+    return head;
+}
+
+static R_INLINE int is_mtl_worker(void)
+{
+    return (R_Interpreter != NULL && R_Interpreter->isMTLWorker);
+}
+
+static void global_unlock_cleanup(void *data)
+{
+    (void) data;
+    R_mtl_global_unlock();
+}
+
+static SEXP dup_global_options_body(void *data)
+{
+    (void) data;
+    return R_mtl_shallow_duplicate_pairlist(SYMVALUE(Options()));
+}
+
+static void ensure_worker_options_initialized(void)
+{
+    if (!is_mtl_worker())
+	return;
+
+    if (R_Interpreter->mtlOptionsBase == NULL ||
+	R_Interpreter->mtlOptionsBase == R_NilValue) {
+	/* Lazily snapshot global options for the worker. */
+	R_mtl_global_lock();
+	SEXP base = R_ExecWithCleanup(dup_global_options_body, NULL,
+				     global_unlock_cleanup, NULL);
+	R_Interpreter->mtlOptionsBase = base;
+	R_Interpreter->mtlOptions = base;
+    }
+
+    if (R_Interpreter->mtlOptions == NULL ||
+	R_Interpreter->mtlOptions == R_NilValue)
+	R_Interpreter->mtlOptions = R_Interpreter->mtlOptionsBase;
+}
+
+static SEXP current_options_list(void)
+{
+    if (is_mtl_worker()) {
+	ensure_worker_options_initialized();
+	return R_Interpreter->mtlOptions;
+    }
+    return SYMVALUE(Options());
+}
+
+static SEXP worker_options_list_writable(void)
+{
+    ensure_worker_options_initialized();
+    if (R_Interpreter->mtlOptions == R_Interpreter->mtlOptionsBase) {
+	R_Interpreter->mtlOptions = R_mtl_shallow_duplicate_pairlist(R_Interpreter->mtlOptions);
+    }
+    return R_Interpreter->mtlOptions;
+}
+
 static SEXP FindTaggedItem(SEXP lst, SEXP tag)
 {
     for ( ; lst != R_NilValue ; lst = CDR(lst)) {
@@ -127,7 +204,7 @@ static SEXP makeErrorCall(SEXP fun)
 
 SEXP GetOption1(SEXP tag)
 {
-    SEXP opt = SYMVALUE(Options());
+    SEXP opt = current_options_list();
     if (!isList(opt)) error(_("corrupted options list"));
     opt = FindTaggedItem(opt, tag);
     return CAR(opt);
@@ -226,13 +303,10 @@ Rboolean Rf_GetOptionDeviceAsk(void)
 /* Change the value of an option or add a new option or, */
 /* if called with value R_NilValue, remove that option. */
 
-static SEXP SetOption(SEXP tag, SEXP value)
+static SEXP SetOptionInList(SEXP opt, SEXP tag, SEXP value)
 {
-    SEXP opt, old, t;
-    PROTECT(value);
-    if (!R_AllowOptionsSet)
-	error(_("setting options is not supported in worker threads"));
-    t = opt = SYMVALUE(Options());
+    SEXP old, t;
+    t = opt;
     if (!isList(opt))
 	error(_("corrupted options list"));
     opt = FindTaggedItem(opt, tag);
@@ -243,10 +317,8 @@ static SEXP SetOption(SEXP tag, SEXP value)
 	    if (TAG(CDR(t)) == tag) {
 		old = CAR(CDR(t));
 		SETCDR(t, CDDR(t));
-		UNPROTECT(1); /* value */
 		return old;
 	    }
-	UNPROTECT(1); /* value */
 	return R_NilValue;
     }
     /* If the option is new, a new slot */
@@ -260,8 +332,56 @@ static SEXP SetOption(SEXP tag, SEXP value)
     }
     old = CAR(opt);
     SETCAR(opt, value);
-    UNPROTECT(1); /* value */
     return old;
+}
+
+typedef struct {
+    SEXP tag;
+    SEXP value;
+} set_option_global_data_t;
+
+static SEXP SetOptionGlobalBody(void *vdata)
+{
+    set_option_global_data_t *d = (set_option_global_data_t *) vdata;
+    PROTECT(d->value);
+    SEXP opt = SYMVALUE(Options());
+    SEXP old = SetOptionInList(opt, d->tag, d->value);
+    UNPROTECT(1);
+    return old;
+}
+
+static SEXP SetOptionGlobal(SEXP tag, SEXP value)
+{
+    if (!R_AllowOptionsSet)
+	error(_("setting options is not supported in worker threads"));
+
+    if (R_MTL_THREADING_ACTIVE) {
+	R_mtl_global_lock();
+	set_option_global_data_t d = {.tag = tag, .value = value};
+	return R_ExecWithCleanup(SetOptionGlobalBody, &d,
+				 global_unlock_cleanup, NULL);
+    } else {
+	PROTECT(value);
+	SEXP old = SetOptionInList(SYMVALUE(Options()), tag, value);
+	UNPROTECT(1);
+	return old;
+    }
+}
+
+static SEXP SetOptionLocal(SEXP tag, SEXP value)
+{
+    PROTECT(value);
+    SEXP opt = worker_options_list_writable();
+    SEXP old = SetOptionInList(opt, tag, value);
+    UNPROTECT(1);
+    return old;
+}
+
+static SEXP SetOption(SEXP tag, SEXP value)
+{
+    if (is_mtl_worker())
+	return SetOptionLocal(tag, value);
+    return SetOptionGlobal(tag, value);
 }
 
 attribute_hidden SEXP R_SetOption(SEXP tag, SEXP value)
@@ -526,7 +646,7 @@ attribute_hidden SEXP do_options(SEXP call, SEXP op, SEXP args, SEXP rho)
        frame.
        */
 
-    options = SYMVALUE(Options());
+    options = current_options_list();
 
     /* This code is not re-entrant and people have used it in
        finalizers.
@@ -564,10 +684,8 @@ attribute_hidden SEXP do_options(SEXP call, SEXP op, SEXP args, SEXP rho)
 	return value2;
     }
 
-    if (R_Interpreter != NULL && !R_Interpreter->allowOptionsSet &&
-	options_wants_set(args) &&
-	!(R_Interpreter->isMTLWorker && R_mtl_global_is_locked()))
-	errorcall(call, _("cannot set options from mtlapply() worker threads"));
+    if (!is_mtl_worker() && !R_AllowOptionsSet && options_wants_set(args))
+	errorcall(call, _("setting options is not supported in worker threads"));
 
     /* The arguments to "options" can either be a sequence of
        name = value form, or can be a single list.
@@ -678,7 +796,8 @@ attribute_hidden SEXP do_options(SEXP call, SEXP op, SEXP args, SEXP rho)
 		if (TYPEOF(argi) != LGLSXP || LENGTH(argi) != 1)
 		    error(_("invalid value for '%s'"), CHAR(namei));
 		Rboolean k = asRbool(argi, call);
-		R_KeepSource = k;
+		if (!is_mtl_worker())
+		    R_KeepSource = k;
 		SET_VECTOR_ELT(value, i, SetOption(tag, ScalarLogical(k)));
 	    }
 	    else if (streql(CHAR(namei), "editor") && isString(argi)) {
@@ -743,7 +862,8 @@ attribute_hidden SEXP do_options(SEXP call, SEXP op, SEXP args, SEXP rho)
 		int k = asInteger(argi);
 		if (k < 100 || k > 8170)
 		    error(_("invalid value for '%s'"), CHAR(namei));
-		R_WarnLength = k;
+		if (!is_mtl_worker())
+		    R_WarnLength = k;
 		SET_VECTOR_ELT(value, i, SetOption(tag, argi));
 	    }
 	    else if ( streql(CHAR(namei), "warning.expression") )  {
@@ -763,7 +883,8 @@ attribute_hidden SEXP do_options(SEXP call, SEXP op, SEXP args, SEXP rho)
 	    else if (streql(CHAR(namei), "nwarnings")) {
 		int k = asInteger(argi);
 		if (k < 1) error(_("invalid value for '%s'"), CHAR(namei));
-		R_nwarnings = k;
+		if (!is_mtl_worker())
+		    R_nwarnings = k;
 		R_CollectWarnings = 0; /* force a reset */
 		SET_VECTOR_ELT(value, i, SetOption(tag, ScalarInteger(k)));
 	    }
@@ -791,7 +912,8 @@ attribute_hidden SEXP do_options(SEXP call, SEXP op, SEXP args, SEXP rho)
 		/* Should be quicker than checking options(echo)
 		   every time R prompts for input:
 		   */
-		R_NoEcho = !k;
+		if (!is_mtl_worker())
+		    R_NoEcho = !k;
 		SET_VECTOR_ELT(value, i, SetOption(tag, ScalarLogical(k)));
 	    }
 	    else if (streql(CHAR(namei), "OutDec")) {
@@ -804,54 +926,63 @@ attribute_hidden SEXP do_options(SEXP call, SEXP op, SEXP args, SEXP rho)
 		    warning(_("'OutDec' must be a string of one character"));
 		strncpy(sdec, CHAR(STRING_ELT(argi, 0)), 10);
 		sdec[10] = '\0';
-		OutDec = sdec;
+		if (!is_mtl_worker())
+		    OutDec = sdec;
 		SET_VECTOR_ELT(value, i, SetOption(tag, duplicate(argi)));
 	    }
 	    else if (streql(CHAR(namei), "max.contour.segments")) {
 		int k = asInteger(argi);
 		if (k < 0) // also many times above: rely on  NA_INTEGER  <  <finite_int>
 		    error(_("invalid value for '%s'"), CHAR(namei));
-		max_contour_segments = k;
+		if (!is_mtl_worker())
+		    max_contour_segments = k;
 		SET_VECTOR_ELT(value, i, SetOption(tag, ScalarInteger(k)));
 	    }
 	    else if (streql(CHAR(namei), "rl_word_breaks")) {
 		if (TYPEOF(argi) != STRSXP || LENGTH(argi) != 1)
 		    error(_("invalid value for '%s'"), CHAR(namei));
 #ifdef HAVE_RL_COMPLETION_MATCHES
-		set_rl_word_breaks(CHAR(STRING_ELT(argi, 0)));
+		if (!is_mtl_worker())
+		    set_rl_word_breaks(CHAR(STRING_ELT(argi, 0)));
 #endif
 		SET_VECTOR_ELT(value, i, SetOption(tag, duplicate(argi)));
 	    }
 	    else if (streql(CHAR(namei), "warnPartialMatchDollar")) {
 		check_TRUE_FALSE(argi, CHAR(namei));
-		R_warn_partial_match_dollar = asRbool(argi, call);
+		if (!is_mtl_worker())
+		    R_warn_partial_match_dollar = asRbool(argi, call);
 		SET_VECTOR_ELT(value, i, SetOption(tag, argi));
 	    }
 	    else if (streql(CHAR(namei), "warnPartialMatchArgs")) {
 		check_TRUE_FALSE(argi, CHAR(namei));
-		R_warn_partial_match_args = asRbool(argi, call);
+		if (!is_mtl_worker())
+		    R_warn_partial_match_args = asRbool(argi, call);
 		SET_VECTOR_ELT(value, i, SetOption(tag, argi));
 	    }
 	    else if (streql(CHAR(namei), "warnPartialMatchAttr")) {
 		check_TRUE_FALSE(argi, CHAR(namei));
-		R_warn_partial_match_attr = asRbool(argi, call);
+		if (!is_mtl_worker())
+		    R_warn_partial_match_attr = asRbool(argi, call);
 		SET_VECTOR_ELT(value, i, SetOption(tag, argi));
 	    }
 	    else if (streql(CHAR(namei), "showWarnCalls")) {
 		check_TRUE_FALSE(argi, CHAR(namei));
-		R_ShowWarnCalls = asRbool(argi, call);
+		if (!is_mtl_worker())
+		    R_ShowWarnCalls = asRbool(argi, call);
 		SET_VECTOR_ELT(value, i, SetOption(tag, argi));
 	    }
 	    else if (streql(CHAR(namei), "showErrorCalls")) {
 		check_TRUE_FALSE(argi, CHAR(namei));
-		R_ShowErrorCalls = asRbool(argi, call);
+		if (!is_mtl_worker())
+		    R_ShowErrorCalls = asRbool(argi, call);
 		SET_VECTOR_ELT(value, i, SetOption(tag, argi));
 	    }
 	    else if (streql(CHAR(namei), "showNCalls")) {
 		int k = asInteger(argi);
 		if (k < 30 || k > 500 || k == NA_INTEGER || LENGTH(argi) != 1)
 		    error(_("invalid value for '%s'"), CHAR(namei));
-		R_NShowCalls = k;
+		if (!is_mtl_worker())
+		    R_NShowCalls = k;
 		SET_VECTOR_ELT(value, i, SetOption(tag, ScalarInteger(k)));
 	    }
 	    else if (streql(CHAR(namei), "par.ask.default")) {
@@ -859,64 +990,75 @@ attribute_hidden SEXP do_options(SEXP call, SEXP op, SEXP args, SEXP rho)
 	    }
 	    else if (streql(CHAR(namei), "browserNLdisabled")) {
 		check_TRUE_FALSE(argi, CHAR(namei));
-		R_DisableNLinBrowser = asRbool(argi, call);
+		if (!is_mtl_worker())
+		    R_DisableNLinBrowser = asRbool(argi, call);
 		SET_VECTOR_ELT(value, i, SetOption(tag, argi));
 	    }
 	    else if (streql(CHAR(namei), "CBoundsCheck")) {
 		check_TRUE_FALSE(argi, CHAR(namei));
-		R_CBoundsCheck = asRbool(argi, call);
+		if (!is_mtl_worker())
+		    R_CBoundsCheck = asRbool(argi, call);
 		SET_VECTOR_ELT(value, i, SetOption(tag, argi));
 	    }
 	    else if (streql(CHAR(namei), "matprod")) {
 		SEXP s = asChar(argi);
 		if (s == NA_STRING || LENGTH(s) == 0)
 		    error(_("invalid value for '%s'"), CHAR(namei));
-		if (streql(CHAR(s), "default"))
-		    R_Matprod = MATPROD_DEFAULT;
-		else if (streql(CHAR(s), "internal"))
-		    R_Matprod = MATPROD_INTERNAL;
-		else if (streql(CHAR(s), "blas"))
-		    R_Matprod = MATPROD_BLAS;
-		else if (streql(CHAR(s), "default.simd")) {
-		    R_Matprod = MATPROD_DEFAULT_SIMD;
+		if (!is_mtl_worker()) {
+		    if (streql(CHAR(s), "default"))
+			R_Matprod = MATPROD_DEFAULT;
+		    else if (streql(CHAR(s), "internal"))
+			R_Matprod = MATPROD_INTERNAL;
+		    else if (streql(CHAR(s), "blas"))
+			R_Matprod = MATPROD_BLAS;
+		    else if (streql(CHAR(s), "default.simd")) {
+			R_Matprod = MATPROD_DEFAULT_SIMD;
 #if !defined(_OPENMP) || !defined(HAVE_OPENMP_SIMDRED)
-		    warning(_("OpenMP SIMD is not supported in this build of R"));
+			warning(_("OpenMP SIMD is not supported in this build of R"));
 #endif
-		} else
-		    error(_("invalid value for '%s'"), CHAR(namei));
+		    } else
+			error(_("invalid value for '%s'"), CHAR(namei));
+		}
 		SET_VECTOR_ELT(value, i, SetOption(tag, duplicate(argi)));
 	    }
 	    else if (streql(CHAR(namei), "PCRE_study")) {
 		if (TYPEOF(argi) == LGLSXP) {
 		    int k = asLogical(argi) > 0;
-		    R_PCRE_study = k ? -1 : -2;
+		    if (!is_mtl_worker())
+			R_PCRE_study = k ? -1 : -2;
 		    SET_VECTOR_ELT(value, i,
 				   SetOption(tag, ScalarLogical(k)));
 		} else {
-		    R_PCRE_study = asInteger(argi);
-		    if (R_PCRE_study < 0) {
-			R_PCRE_study = -2;
+		    if (!is_mtl_worker())
+			R_PCRE_study = asInteger(argi);
+		    int tmp = asInteger(argi);
+		    if (tmp < 0) {
+			if (!is_mtl_worker())
+			    R_PCRE_study = -2;
 			SET_VECTOR_ELT(value, i,
 				       SetOption(tag, ScalarLogical(-2)));
 		    } else
 			SET_VECTOR_ELT(value, i,
-				       SetOption(tag, ScalarInteger(R_PCRE_study)));
+				       SetOption(tag, ScalarInteger(tmp)));
 		}
 #ifdef HAVE_PCRE2
-		if (R_PCRE_study != -2)
+		if (!is_mtl_worker() && R_PCRE_study != -2)
 		    warning(_("'PCRE_study' has no effect with PCRE2"));
 #endif
 	    }
 	    else if (streql(CHAR(namei), "PCRE_use_JIT")) {
 		int use_JIT = asLogical(argi);
-		R_PCRE_use_JIT = (use_JIT > 0); // NA_LOGICAL is < 0
+		if (!is_mtl_worker())
+		    R_PCRE_use_JIT = (use_JIT > 0); // NA_LOGICAL is < 0
 		SET_VECTOR_ELT(value, i,
-			       SetOption(tag, ScalarLogical(R_PCRE_use_JIT)));
+			       SetOption(tag, ScalarLogical(use_JIT > 0)));
 	    }
 	    else if (streql(CHAR(namei), "PCRE_limit_recursion")) {
-		R_PCRE_limit_recursion = asLogical(argi);
+		int k = asLogical(argi);
+		if (!is_mtl_worker())
+		    R_PCRE_limit_recursion = k;
 		SET_VECTOR_ELT(value, i,
-			       SetOption(tag, ScalarLogical(R_PCRE_limit_recursion)));
+			       SetOption(tag, ScalarLogical(k)));
 		/* could warn for PCRE2 >= 10.30, but the value is ignored also when
 		   JIT is used  */
 	    }
@@ -941,7 +1083,8 @@ attribute_hidden SEXP do_options(SEXP call, SEXP op, SEXP args, SEXP rho)
 		if(k && R_Verbose)
 		    error(_("cannot set both options 'quiet' and 'verbose' to TRUE"));
 #endif
-		R_Quiet = k;
+		if (!is_mtl_worker())
+		    R_Quiet = k;
 		SET_VECTOR_ELT(value, i, SetOption(tag, ScalarLogical(k)));
 	    }
 	    else if (streql(CHAR(namei), "verbose")) {
@@ -952,7 +1095,8 @@ attribute_hidden SEXP do_options(SEXP call, SEXP op, SEXP args, SEXP rho)
 		if(k && R_Quiet)
 		    error(_("cannot set both options 'quiet' and 'verbose' to TRUE"));
 #endif
-		R_Verbose = k;
+		if (!is_mtl_worker())
+		    R_Verbose = k;
 		SET_VECTOR_ELT(value, i, SetOption(tag, ScalarLogical(k)));
 	    }
 	    else {
