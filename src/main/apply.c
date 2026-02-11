@@ -1076,10 +1076,9 @@ attribute_hidden SEXP do_mtlapply(SEXP call, SEXP op, SEXP args, SEXP rho)
 		return ans;
 	    }
 
-	    /* threads counts the main thread too. */
+	    /* 'threads' is the number of worker threads (main thread coordinates). */
 	    if (nthreads > n) nthreads = (int) n;
-	    int n_bg_threads = nthreads - 1;
-	    if (n_bg_threads < 0) n_bg_threads = 0;
+	    int n_bg_threads = nthreads;
 
 	    if (n_bg_threads > 0) {
 		mtl_pool_init_if_needed();
