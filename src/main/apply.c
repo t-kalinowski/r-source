@@ -363,10 +363,10 @@ static void mtl_ensure_main_thread(void)
 	    }
 	}
 
-	static void mtl_rpc_abort_all(void)
-	{
-	    pthread_mutex_lock(&mtl_pool.mu);
-	    mtl_pool.rpc_aborted = 1;
+static void mtl_rpc_abort_all(void)
+{
+    pthread_mutex_lock(&mtl_pool.mu);
+    mtl_pool.rpc_aborted = 1;
 	    mtl_main_req_t *list = mtl_pool.rpc_head;
 	    mtl_pool.rpc_head = NULL;
 	    mtl_pool.rpc_tail = NULL;
@@ -375,10 +375,24 @@ static void mtl_ensure_main_thread(void)
 	    for (mtl_main_req_t *r = list; r != NULL;) {
 		mtl_main_req_t *next = r->next;
 		r->next = NULL;
-		mtl_rpc_complete(r, 0, "mtlapply aborted");
-		r = next;
-	    }
-	}
+	mtl_rpc_complete(r, 0, "mtlapply aborted");
+	r = next;
+    }
+}
+
+static void mtl_rpc_abort_all_locked(void)
+{
+    mtl_pool.rpc_aborted = 1;
+    mtl_main_req_t *list = mtl_pool.rpc_head;
+    mtl_pool.rpc_head = NULL;
+    mtl_pool.rpc_tail = NULL;
+    for (mtl_main_req_t *r = list; r != NULL;) {
+	mtl_main_req_t *next = r->next;
+	r->next = NULL;
+	mtl_rpc_complete(r, 0, "mtlapply aborted");
+	r = next;
+    }
+}
 
 		attribute_hidden SEXP R_mtl_invoke_on_main(SEXP (*fun)(void *), void *data)
 		{
@@ -641,11 +655,11 @@ static void mtl_ensure_main_thread(void)
 				w->interp.mtlOptions = R_NilValue;
 				w->interp.mtlOptionsBase = R_NilValue;
 
-				/* Ensure all live worker nodes are moved out of New space before the
-				   main thread adopts this heap. Without this, adoption can move
-				   still-live New-space nodes into the main heap where they may be
-				   overwritten by subsequent allocations before a main GC runs. */
-			R_gc();
+			/* Only on successful jobs: before heap adoption, move live worker
+			   nodes out of New space. On error paths we do not adopt worker
+			   heaps, and forcing GC here can deadlock teardown. */
+			if (!atomic_load_explicit(&job->error, memory_order_relaxed))
+			    R_gc();
 
 			pthread_mutex_lock(&p->mu);
 			if (p->job == job && p->gen == mygen) {
@@ -873,11 +887,12 @@ attribute_hidden void R_mtlpool_shutdown(void)
 	    pthread_mutex_unlock(&mtl_pool.mu);
 	    d->mu_locked = 0;
 
-	    /* The main thread participates as a worker too. */
-	    mtl_main_eval_loop(d->job, d->main_env, d->ans);
+    /* For threaded jobs, keep the main thread as coordinator only.
+       Running FUN concurrently on the main thread and worker threads
+       can corrupt error/unwind state when one branch raises an error. */
 
-	    pthread_mutex_lock(&mtl_pool.mu);
-	    d->mu_locked = 1;
+    pthread_mutex_lock(&mtl_pool.mu);
+    d->mu_locked = 1;
 	    while (mtl_pool.job_done < d->n_bg_threads) {
 		/* Service any worker->main requests (e.g. install/mkChar) while waiting. */
 		mtl_rpc_service_locked();
@@ -902,32 +917,52 @@ attribute_hidden void R_mtlpool_shutdown(void)
 	    return R_NilValue;
 	}
 
-	static void mtlapply_run_cleanup(void *vp, Rboolean jump)
-	{
-	    mtlapply_run_data_t *d = (mtlapply_run_data_t *) vp;
+static void mtlapply_run_cleanup(void *vp, Rboolean jump)
+{
+    mtlapply_run_data_t *d = (mtlapply_run_data_t *) vp;
 
-	    /* Always restore serial mode. On unwind, also signal workers to stop
-	       consuming indices from a stack-allocated job structure. */
-	    R_mtl_set_threading_active(0);
-	    if (jump && d->job)
-		atomic_store_explicit(&d->job->error, 1, memory_order_relaxed);
+    /* On unwind, force workers to stop touching the stack-allocated job and
+       wait for them to acknowledge completion before leaving this frame.
+       While waiting, keep servicing worker->main RPCs to avoid deadlock. */
+    if (jump && d->job && d->n_bg_threads > 0) {
+	atomic_store_explicit(&d->job->error, 1, memory_order_relaxed);
 
-	    /* If workers are blocked on main-thread requests, wake them so they
-	       don't hang on unwind. */
-	    if (jump)
-		mtl_rpc_abort_all();
-	    R_Interpreter->workerGlobalEnv = d->saved_worker_env;
-	    R_Interpreter->mtlGlobalEnvRedirect = d->saved_redirect;
+	if (!d->mu_locked) {
+	    pthread_mutex_lock(&mtl_pool.mu);
+	    d->mu_locked = 1;
+	}
 
-	    if (d->mu_locked) {
-		/* Best-effort: ensure workers aren't stuck waiting for job==NULL. */
-		if (mtl_pool.job == d->job) {
-		    mtl_pool.job = NULL;
+	/* Abort pending worker->main requests while holding the pool mutex
+	   to avoid races/deadlocks with concurrent cleanup. */
+	mtl_rpc_abort_all_locked();
+
+	/* Keep mtl_pool.job valid until all workers have reported done. */
+	if (mtl_pool.job == d->job) {
+	    while (mtl_pool.job_done < d->n_bg_threads) {
+		mtl_rpc_service_locked();
+		if (mtl_pool.job_done < d->n_bg_threads)
+		    pthread_cond_wait(&mtl_pool.cv, &mtl_pool.mu);
+	    }
+	    mtl_rpc_service_locked();
+	    mtl_pool.job = NULL;
 	    pthread_cond_broadcast(&mtl_pool.cv);
 	}
+    } else if (jump) {
+	/* No active workers for this job, but still abort pending RPCs. */
+	if (d->mu_locked)
+	    mtl_rpc_abort_all_locked();
+	else
+	    mtl_rpc_abort_all();
+    }
+
+    if (d->mu_locked) {
 	pthread_mutex_unlock(&mtl_pool.mu);
 	d->mu_locked = 0;
     }
+
+    R_mtl_set_threading_active(0);
+    R_Interpreter->workerGlobalEnv = d->saved_worker_env;
+    R_Interpreter->mtlGlobalEnvRedirect = d->saved_redirect;
 }
 #endif /* HAVE_PTHREAD */
 

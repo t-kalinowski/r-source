@@ -44,4 +44,18 @@ stopifnot(m >= 2L)
 # The critical regression: a GC after mtlapply() must not wedge the interpreter.
 invisible(gc())
 
+# Error-path regression: an mtlapply() failure must not poison subsequent
+# main-thread evaluation or error handling.
+err <- try(mtlapply(1:64, function(i) {
+  if (i == 17L) stop("boom from worker")
+  i
+}, threads = 4L), silent = TRUE)
+stopifnot(inherits(err, "try-error"))
+
+# Main-thread errors after mtlapply() should remain recoverable.
+bad <- try(system.time(lapply(1:10, function(i) i, threads = 8L)), silent = TRUE)
+stopifnot(inherits(bad, "try-error"))
+ok <- lapply(1:100, function(i) i + 1L)
+stopifnot(identical(unlist(ok, use.names = FALSE), 2:101))
+
 cat("mtlapply ok\n")
