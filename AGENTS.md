@@ -159,6 +159,9 @@ Use this as the standard iteration checklist after runtime changes.
 - [x] Add dedicated worker-native package smoke for `.Call`-heavy paths.
 - [x] Add standard-build package load sweep for namespace compatibility.
 - [x] Add serial performance regression guard with thresholded pass/fail.
+- [x] Move `mtlapply` job state to heap-owned lifetime (worker refs + main owner).
+- [x] Add fail-fast cancellation path on worker/main error (`cancel_requested` + active-eval quiescence gate).
+- [x] Add user-facing regressions for handled worker errors and repeated failure/recovery in `tests/mtlapply.R`.
 - [ ] Expand worker-native smoke to more compiled packages (as available in system library).
 - [ ] Keep serial benchmark parity at each checkpoint before increasing worker coverage.
 
