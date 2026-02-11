@@ -35,9 +35,16 @@ size <- parse_int(Sys.getenv("MTLBENCH_SIZE"), 2000L)
 loop_n <- parse_int(Sys.getenv("MTLBENCH_LOOPN"), 200000L)
 str_iter <- parse_int(Sys.getenv("MTLBENCH_STRITER"), 5000L)
 include_call <- identical(Sys.getenv("MTLBENCH_CALL"), "1")
+nested_outer <- parse_int(Sys.getenv("MTLBENCH_NEST_OUTER"), 64L)
+nested_mid <- parse_int(Sys.getenv("MTLBENCH_NEST_MID"), 8L)
+nested_inner <- parse_int(Sys.getenv("MTLBENCH_NEST_INNER"), 8L)
+nested_work_n <- parse_int(Sys.getenv("MTLBENCH_NEST_WORK_N"), 4096L)
+nested_work_reps <- parse_int(Sys.getenv("MTLBENCH_NEST_WORK_REPS"), 8L)
 
 stopifnot(all(is.finite(threads)))
 stopifnot(iters >= 1L, warmup >= 0L, ntasks >= 1L, size >= 1L, loop_n >= 1L, str_iter >= 1L)
+stopifnot(nested_outer >= 1L, nested_mid >= 1L, nested_inner >= 1L)
+stopifnot(nested_work_n >= 1L, nested_work_reps >= 1L)
 
 time_elapsed <- function(expr, env) {
     unname(system.time(eval(expr, env))[["elapsed"]])
@@ -105,6 +112,11 @@ cat("threads=", paste(threads, collapse = ","), "\n", sep = "")
 cat("iters=", iters, " warmup=", warmup,
     " ntasks=", ntasks, " size=", size,
     " loop_n=", loop_n, " str_iter=", str_iter, "\n", sep = "")
+cat("nested_outer=", nested_outer,
+    " nested_mid=", nested_mid,
+    " nested_inner=", nested_inner,
+    " nested_work_n=", nested_work_n,
+    " nested_work_reps=", nested_work_reps, "\n", sep = "")
 
 cases <- list(
     list(
@@ -202,5 +214,72 @@ if (include_call) {
 for (c in cases) {
     bench_case(c$name, c$x, c$fun, threads, iters, warmup)
 }
+
+bench_nested_case <- function(threads, iters, warmup, outer_n, mid_n, inner_n, work_n, work_reps) {
+    cat("\n== nested 3-level apply: lapply/lapply/lapply vs mtlapply/mtlapply/mtlapply ==\n")
+
+    do_work <- function(seed) {
+        base <- as.double(seed)
+        acc <- 0
+        for (r in seq_len(work_reps)) {
+            acc <- acc + sum(cos(seq_len(work_n) + base + r))
+        }
+        acc
+    }
+
+    mk_outer <- function() {
+        out <- vector("list", outer_n)
+        v <- seq_len(inner_n)
+        for (i in seq_len(outer_n)) {
+            mid <- vector("list", mid_n)
+            for (j in seq_len(mid_n))
+                mid[[j]] <- v + (i * 17L + j * 31L)
+            out[[i]] <- mid
+        }
+        out
+    }
+
+    x <- mk_outer()
+
+    nested_lapply <- function(xx) {
+        lapply(xx, function(a) lapply(a, function(b) lapply(b, do_work)))
+    }
+
+    nested_mtlapply <- function(xx) {
+        mtlapply(xx, function(a) mtlapply(a, function(b) mtlapply(b, do_work)))
+    }
+
+    ref <- nested_lapply(x[seq_len(min(4L, length(x)))])
+    cur <- with_mtl_threads(max(threads), nested_mtlapply(x[seq_len(min(4L, length(x)))]))
+    stopifnot(identical(ref, cur))
+
+    run_method <- function(label, expr) {
+        invisible(gc())
+        exprq <- substitute(expr)
+        if (warmup > 0L) {
+            for (i in seq_len(warmup)) invisible(eval(exprq, parent.frame()))
+        }
+        ts <- numeric(iters)
+        for (i in seq_len(iters)) ts[[i]] <- time_elapsed(exprq, parent.frame())
+        invisible(gc())
+        s <- summarize_times(ts)
+        cat(sprintf("%-18s  median=%8.3f  mean=%8.3f  min=%8.3f  max=%8.3f\n",
+                    label, s[["median"]], s[["mean"]], s[["min"]], s[["max"]]))
+        s
+    }
+
+    base <- run_method("lapply^3", nested_lapply(x))
+    for (t in threads) {
+        s <- run_method(sprintf("mtlapply^3(%d)", t),
+                        with_mtl_threads(t, nested_mtlapply(x)))
+        sp <- if (base[["median"]] > 0 && s[["median"]] > 0) base[["median"]] / s[["median"]] else NA_real_
+        cat(sprintf("%-18s  speedup=%8s (vs lapply^3 median)\n",
+                    "", if (is.na(sp)) "NA" else sprintf("%.2fx", sp)))
+    }
+}
+
+bench_nested_case(threads, iters, warmup,
+                  nested_outer, nested_mid, nested_inner,
+                  nested_work_n, nested_work_reps)
 
 cat("\nDone.\n")

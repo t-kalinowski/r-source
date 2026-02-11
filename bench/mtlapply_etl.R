@@ -43,6 +43,14 @@ feat_loops <- parse_int(Sys.getenv("MTL_ETL_FEAT_LOOPS"), 4L)
 stopifnot(N >= 1L, shards >= 1L, ngroups >= 1L, iters >= 1L, warmup >= 0L, feat_loops >= 1L)
 stopifnot(all(is.finite(threads)), all(threads >= 1L))
 
+with_mtl_threads <- function(n, expr)
+{
+    old <- getOption("mtlapply.threads")
+    on.exit(options(mtlapply.threads = old), add = TRUE)
+    options(mtlapply.threads = as.integer(n))
+    force(expr)
+}
+
 cat("mtlapply_etl settings:\n")
 cat("N=", N,
     " shards=", shards,
@@ -76,9 +84,13 @@ process_shard <- function(idx) {
     g <- grp[idx]
 
     ## "summarise" step: group-wise sum (all groups present by construction).
-    ## Avoid S3 dispatch machinery in worker threads for now.
-    s1 <- rowsum.default(z, g, reorder = FALSE)
+    ## Keep this on primitive loops to avoid S3/generic dispatch in workers.
     cnt <- tabulate(g, ngroups)
+    s1 <- numeric(ngroups)
+    for (j in seq_along(z)) {
+        gj <- g[[j]]
+        s1[[gj]] <- s1[[gj]] + z[[j]]
+    }
 
     ## "slice_max" step: top-k within shard (small return payload).
     ## Use quicksort explicitly to avoid radix-sort thread-local initialization.
@@ -117,7 +129,7 @@ run_method <- function(label, expr) {
 ## Correctness check once (subset).
 idxs_check <- idxs[seq_len(min(4L, length(idxs)))]
 ref <- reduce_results(lapply(idxs_check, process_shard))
-cur <- reduce_results(mtlapply(idxs_check, process_shard, threads = max(threads)))
+cur <- reduce_results(with_mtl_threads(max(threads), mtlapply(idxs_check, process_shard)))
 stopifnot(isTRUE(all.equal(ref, cur, tolerance = 0)))
 
 cat("\n== ETL pipeline: shard -> mutate -> summarise -> top-k -> reduce ==\n")
@@ -125,8 +137,9 @@ cat("\n== ETL pipeline: shard -> mutate -> summarise -> top-k -> reduce ==\n")
 base <- run_method("lapply", reduce_results(lapply(idxs, process_shard)))
 
 for (t in threads) {
-    m <- run_method(sprintf("mtlapply(%d)", t),
-                    reduce_results(mtlapply(idxs, process_shard, threads = t)))
+    m <- run_method(sprintf("mtlapply(%d)", t), with_mtl_threads(
+        t, reduce_results(mtlapply(idxs, process_shard))
+    ))
     bmed <- base$summary[["median"]]
     mmed <- m$summary[["median"]]
     sp <- if (bmed > 0 && mmed > 0) bmed / mmed else NA_real_

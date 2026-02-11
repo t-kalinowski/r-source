@@ -37,6 +37,14 @@ out_path <- args[[1L]]
 stopifnot(exists("mtlapply"))
 stopifnot(requireNamespace("bench", quietly = TRUE))
 
+with_mtl_threads <- function(n, expr)
+{
+  old <- getOption("mtlapply.threads")
+  on.exit(options(mtlapply.threads = old), add = TRUE)
+  options(mtlapply.threads = as.integer(n))
+  force(expr)
+}
+
 N <- parse_int(Sys.getenv("README_N"), 2000000L)
 nshards <- parse_int(Sys.getenv("README_SHARDS"), 64L)
 ngroups <- parse_int(Sys.getenv("README_GROUPS"), 4096L)
@@ -91,14 +99,14 @@ reduce <- function(parts) {
 
 ## Correctness check (small subset; computed in the main interpreter).
 ref <- reduce(lapply(ids[1:min(4L, length(ids))], worker))
-cur <- reduce(mtlapply(ids[1:min(4L, length(ids))], worker, threads = max(threads)))
+cur <- reduce(with_mtl_threads(max(threads), mtlapply(ids[1:min(4L, length(ids))], worker)))
 stopifnot(isTRUE(all.equal(ref, cur, tolerance = 0)))
 
 ## One workload for plotting: lapply vs mtlapply scaling.
 exprs <- list(lapply = quote(reduce(lapply(ids, worker))))
 for (t in threads) {
   exprs[[paste0("mtlapply(", t, ")")]] <- substitute(
-    reduce(mtlapply(ids, worker, threads = TT)),
+    with_mtl_threads(TT, reduce(mtlapply(ids, worker))),
     list(TT = t)
   )
 }

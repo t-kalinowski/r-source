@@ -74,6 +74,14 @@ stopifnot(all(is.finite(threads)), all(threads >= 1L))
 
 has_mtlapply <- exists("mtlapply")
 
+with_mtl_threads <- function(n, expr)
+{
+  old <- getOption("mtlapply.threads")
+  on.exit(options(mtlapply.threads = old), add = TRUE)
+  options(mtlapply.threads = as.integer(n))
+  force(expr)
+}
+
 ## Deterministic data in the main heap (no RNG, no strings).
 x <- (as.double(seq_len(N) %% 1000L) - 500) / 10
 y <- (as.double((seq_len(N) * 17L) %% 1000L) - 500) / 10
@@ -185,11 +193,12 @@ if (has_mtlapply) for (nm in names(workloads)) {
   worker <- wl$worker
   reduce <- wl$reduce
 
-  cur <- reduce(mtlapply(ids[1:min(4L, length(ids))], worker, threads = max(threads)))
+  cur <- reduce(with_mtl_threads(max(threads),
+                                 mtlapply(ids[1:min(4L, length(ids))], worker)))
   stopifnot(isTRUE(all.equal(refs[[nm]], cur, tolerance = 0)))
 
   for (t in threads) {
-    m <- time_median(reduce(mtlapply(ids, worker, threads = t)), iters)
+    m <- time_median(with_mtl_threads(t, reduce(mtlapply(ids, worker))), iters)
     results <- rbind(
       results,
       data.frame(workload = nm, method = "mtlapply", threads = t, median_seconds = m)
