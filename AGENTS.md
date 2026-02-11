@@ -50,6 +50,9 @@ Work towards making this build of R usable for package code that calls `.Call()`
 ### Current Default Build Target (for ABI-compatible package smoke tests)
 - Use a shared-lib build for binary-package ABI testing:
   - `build-mtl-shlib` configured with `--enable-R-shlib`
+- Repo default now enforces this via `config.site`:
+  - `enable_R_shlib=yes`
+  - so plain `../configure ...` in build dirs will build shared `libR` unless explicitly overridden with `--disable-R-shlib`.
 - On macOS, configure this build as framework-ABI-identical by default:
   - `./configure --enable-R-shlib --with-mtl-abi-libroot=auto ...`
   - Optional explicit root:
