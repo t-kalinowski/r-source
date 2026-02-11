@@ -51,20 +51,42 @@ fail_pkg <- character()
 fail_msg <- character()
 pkg_timeout <- as.double(Sys.getenv("MTL_LOAD_TIMEOUT_SEC", "20"))
 if (!is.finite(pkg_timeout) || pkg_timeout <= 0) pkg_timeout <- 20
+r_bin <- file.path(R.home("bin"), "R")
+if (!file.exists(r_bin))
+  stop("cannot find R binary for child namespace checks: ", r_bin, call. = FALSE)
+
+as_literal <- function(x) {
+  paste(capture.output(dput(x)), collapse = "")
+}
+
+load_in_child <- function(pkg, libs, timeout_sec) {
+  tf <- tempfile("mtl-load-", fileext = ".R")
+  on.exit(unlink(tf), add = TRUE)
+  lines <- c(
+    sprintf("libs <- %s", as_literal(libs)),
+    sprintf("pkg <- %s", as_literal(pkg)),
+    ".libPaths(unique(c(libs, .libPaths())))",
+    "suppressPackageStartupMessages(loadNamespace(pkg))",
+    "cat('ok\\n')"
+  )
+  writeLines(lines, tf, useBytes = TRUE)
+  out <- suppressWarnings(
+    system2(r_bin,
+            c("--vanilla", "--slave", "-f", tf),
+            stdout = TRUE, stderr = TRUE,
+            timeout = timeout_sec)
+  )
+  status <- attr(out, "status")
+  if (is.null(status)) status <- 0L
+  list(status = as.integer(status), output = out)
+}
 
 for (pkg in pkgs) {
-  ok <- TRUE
-  msg <- ""
-  setTimeLimit(elapsed = pkg_timeout, transient = TRUE)
-  tryCatch(
-    loadNamespace(pkg),
-    error = function(e) {
-      ok <<- FALSE
-      msg <<- conditionMessage(e)
-    }
-  )
-  setTimeLimit(cpu = Inf, elapsed = Inf, transient = TRUE)
-  if (!ok) {
+  res <- load_in_child(pkg, libs, pkg_timeout)
+  if (res$status != 0L) {
+    msg <- if (length(res$output)) paste(res$output, collapse = " | ") else "namespace load failed"
+    if (res$status == 124L)
+      msg <- paste0("timeout after ", pkg_timeout, "s: ", msg)
     fail_pkg <- c(fail_pkg, pkg)
     fail_msg <- c(fail_msg, msg)
   }

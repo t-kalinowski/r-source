@@ -25,6 +25,10 @@ fi
 
 cd "${repo_root}"
 
+if [ "$(uname -s)" = "Darwin" ]; then
+  "${repo_root}/tools/mtl-abi-macos.sh" "${build_dir}"
+fi
+
 echo "framework package library: ${framework_lib}"
 "${mtl_r}" --vanilla -q -f "${repo_root}/tools/mtl-load-library-smoke.R" --args "${framework_lib}"
 

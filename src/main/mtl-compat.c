@@ -43,6 +43,41 @@ attribute_hidden R_InterpreterState *R_mtl_set_compat_interpreter(R_InterpreterS
  *
  * Export thin wrappers in libR so existing binaries remain loadable.
  */
+/* libintl headers may macro-redirect these names to libintl_* variants. */
+#ifdef gettext
+# undef gettext
+#endif
+#ifdef dgettext
+# undef dgettext
+#endif
+#ifdef dcgettext
+# undef dcgettext
+#endif
+#ifdef ngettext
+# undef ngettext
+#endif
+#ifdef dngettext
+# undef dngettext
+#endif
+#ifdef dcngettext
+# undef dcngettext
+#endif
+#ifdef textdomain
+# undef textdomain
+#endif
+#ifdef bindtextdomain
+# undef bindtextdomain
+#endif
+#ifdef bind_textdomain_codeset
+# undef bind_textdomain_codeset
+#endif
+#ifdef setlocale
+# undef setlocale
+#endif
+#ifdef newlocale
+# undef newlocale
+#endif
+
 extern char *gettext(const char *);
 extern char *dgettext(const char *, const char *);
 extern char *dcgettext(const char *, const char *, int);

@@ -27,6 +27,11 @@ set -eu
 
 build_dir="${1:-build-mtl-shlib}"
 
+if [ "$(uname -s)" != "Darwin" ]; then
+  echo "skip: mtl-abi-macos is only needed on macOS"
+  exit 0
+fi
+
 if [ ! -d "${build_dir}" ]; then
   echo "error: build dir not found: ${build_dir}" >&2
   exit 1
@@ -44,8 +49,16 @@ install_name_tool -id "${abi_lib_root}/libR.dylib" "${build_dir}/lib/libR.dylib"
 install_name_tool -id "${abi_lib_root}/libRblas.dylib" "${build_dir}/lib/libRblas.dylib"
 install_name_tool -id "${abi_lib_root}/libRlapack.dylib" "${build_dir}/lib/libRlapack.dylib"
 
+# Keep macOS code signing happy after install_name edits.
+if [ -x "${build_dir}/bin/exec/R" ]; then
+  codesign --force --sign - \
+    "${build_dir}/lib/libR.dylib" \
+    "${build_dir}/lib/libRblas.dylib" \
+    "${build_dir}/lib/libRlapack.dylib" \
+    "${build_dir}/bin/exec/R" >/dev/null 2>&1 || true
+fi
+
 echo "ok: set install-names for:"
 echo "  ${build_dir}/lib/libR.dylib -> ${abi_lib_root}/libR.dylib"
 echo "  ${build_dir}/lib/libRblas.dylib -> ${abi_lib_root}/libRblas.dylib"
 echo "  ${build_dir}/lib/libRlapack.dylib -> ${abi_lib_root}/libRlapack.dylib"
-

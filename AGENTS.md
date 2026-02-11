@@ -93,7 +93,11 @@ Use this as the standard iteration checklist after runtime changes.
    - `tools/mtl-load-standard-library-smoke.sh build-mtl-shlib build-mtl-shlib/library`
    - Confirms this build can load all package namespaces from the standard built package set (base/recommended in `build-*/library`).
 
-7. **Benchmark checkpoint (always include in flow)**
+7. **Framework-binary package load sweep (macOS)**
+   - `tools/mtl-framework-library-smoke.sh build-mtl-shlib /Library/Frameworks/R.framework/Versions/4.6-arm64/Resources/library`
+   - Confirms in-tree MTL build can load prebuilt framework package binaries without loading a second `libR`.
+
+8. **Benchmark checkpoint (always include in flow)**
    - Generate timing artifacts:
      - System R:
        - `/usr/bin/R --vanilla -q -f bench/readme_bench_run.R --args bench/results/system.rds`
@@ -106,15 +110,15 @@ Use this as the standard iteration checklist after runtime changes.
    - Refresh human-readable report:
      - `build-mtl-shlib/bin/R --vanilla -q -e 'rmarkdown::render(\"README.Rmd\", output_format = \"github_document\")'`
 
-8. **Serial regression guard**
+9. **Serial regression guard**
    - `tools/mtl-perf-smoke.sh build-mtl-shlib /usr/local/bin/R-devel 1.10`
    - Fails if `lapply` median runtime in MTL build exceeds baseline by more than threshold (default `1.10`).
 
-9. **Interpretation rule**
+10. **Interpretation rule**
    - Check serial parity first (`lapply` path in MTL build vs R-devel/system R).
    - Then check scaling (`mtlapply(2/4/8)` vs `mtlapply(1)` and `lapply`).
    - Treat benchmark noise seriously: prefer larger workloads and repeated runs before concluding regressions.
-   - Convenience wrapper for 3-8:
+   - Convenience wrapper for 3-9:
      - `tools/mtl-validation-smoke.sh build-mtl-shlib /Users/tomasz/Library/R/arm64/4.6/library 4 build-mtl-shlib/library /usr/local/bin/R-devel 1.10`
 
 ## Package Compatibility Goal (Current Concrete Target)
