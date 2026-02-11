@@ -53,13 +53,21 @@ summarize_times <- function(times) {
     )
 }
 
+with_mtl_threads <- function(n, expr)
+{
+    old <- getOption("mtlapply.threads")
+    on.exit(options(mtlapply.threads = old), add = TRUE)
+    options(mtlapply.threads = as.integer(n))
+    force(expr)
+}
+
 bench_case <- function(name, x, fun, threads, iters, warmup) {
     cat("\n== ", name, " ==\n", sep = "")
 
     # Correctness check (once).
     x_check <- x[seq_len(min(8L, length(x)))]
     ref <- lapply(x_check, fun)
-    cur <- mtlapply(x_check, fun, threads = max(threads))
+    cur <- with_mtl_threads(max(threads), mtlapply(x_check, fun))
     stopifnot(identical(ref, cur))
 
     run_method <- function(label, expr) {
@@ -81,7 +89,7 @@ bench_case <- function(name, x, fun, threads, iters, warmup) {
 
     for (t in threads) {
         label <- sprintf("mtlapply(%d)", t)
-        m <- run_method(label, mtlapply(x, fun, threads = t))
+        m <- run_method(label, with_mtl_threads(t, mtlapply(x, fun)))
         bmed <- base$summary[["median"]]
         mmed <- m$summary[["median"]]
         sp <- if (bmed > 0 && mmed > 0) bmed / mmed else NA_real_

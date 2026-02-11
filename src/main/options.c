@@ -181,6 +181,16 @@ static SEXP worker_options_list_writable(void)
     return R_Interpreter->mtlOptions;
 }
 
+static Rboolean worker_disallows_option_set(SEXP tag)
+{
+    if (!is_mtl_worker())
+	return FALSE;
+    if (TYPEOF(tag) != SYMSXP)
+	return FALSE;
+    const char *nm = CHAR(PRINTNAME(tag));
+    return (strcmp(nm, "threads") == 0 || strcmp(nm, "mtlapply.threads") == 0);
+}
+
 static SEXP FindTaggedItem(SEXP lst, SEXP tag)
 {
     for ( ; lst != R_NilValue ; lst = CDR(lst)) {
@@ -379,6 +389,9 @@ static SEXP SetOptionLocal(SEXP tag, SEXP value)
 
 static SEXP SetOption(SEXP tag, SEXP value)
 {
+    if (worker_disallows_option_set(tag))
+	error(_("setting option '%s' is not supported in mtlapply() worker threads"),
+	      CHAR(PRINTNAME(tag)));
     if (is_mtl_worker())
 	return SetOptionLocal(tag, value);
     return SetOptionGlobal(tag, value);

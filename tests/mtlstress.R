@@ -37,9 +37,10 @@ for (k in seq_len(iters)) {
     ntasks <- sample.int(max_tasks, 1L)
     x <- seq_len(ntasks)
     f <- function(i) worker_fun(i, k)
+    options(mtlapply.threads = threads)
 
     a <- lapply(x, f)
-    b <- mtlapply(x, f, threads = threads)
+    b <- mtlapply(x, f)
     if (!identical(a, b)) {
         stop(sprintf("mismatch at iter=%d threads=%d ntasks=%d", k, threads, ntasks))
     }

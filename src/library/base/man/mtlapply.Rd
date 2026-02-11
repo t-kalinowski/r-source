@@ -7,14 +7,13 @@
 \title{Apply a Function over a List Using Threads (Experimental)}
 \alias{mtlapply}
 \usage{
-mtlapply(X, FUN, \dots, threads = 2L)
+mtlapply(X, FUN, \dots)
 }
 \arguments{
   \item{X}{a vector (atomic or list).  Other objects (including classed
     objects) will be coerced by \code{base::\link{as.list}}.}
   \item{FUN}{the function to be applied to each element of \code{X}.}
   \item{\dots}{optional arguments to \code{FUN}.}
-  \item{threads}{integer giving the number of worker threads.}
 }
 \description{
   \code{mtlapply} returns a list of the same length as \code{X}, each
@@ -30,6 +29,9 @@ mtlapply(X, FUN, \dots, threads = 2L)
   (as in \code{\link[parallel]{mclapply}} on Unix-alikes), and the worker
   threads evaluate \code{FUN} concurrently.
 
+  The worker-pool size is controlled by \code{options(mtlapply.threads = n)}
+  and defaults to \code{2L}.
+
   Workers use the real \code{globalenv()}. Reads from global bindings are
   allowed, but writes to \code{globalenv()} from worker threads are rejected
   with an error.
@@ -40,7 +42,9 @@ mtlapply(X, FUN, \dots, threads = 2L)
 
   Worker \code{options()} writes are job-local: each worker starts from a
   snapshot of main-thread options, and changes do not propagate back to
-  the main thread.
+  the main thread. Setting \code{options(threads = ...)} or
+  \code{options(mtlapply.threads = ...)} from a worker thread is not
+  supported and errors.
 
   Some operations that rely on shared process-wide state may run under a
   global internal lock (for example, \code{tempfile()}), and can
@@ -57,5 +61,8 @@ mtlapply(X, FUN, \dots, threads = 2L)
 }
 \examples{
 x <- as.list(1:5)
-mtlapply(x, function(z) z * 2, threads = 2L)
+old <- getOption("mtlapply.threads")
+options(mtlapply.threads = 2L)
+on.exit(options(mtlapply.threads = old))
+mtlapply(x, function(z) z * 2)
 }

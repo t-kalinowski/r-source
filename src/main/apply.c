@@ -58,6 +58,7 @@ static const char *mtl_rpc_reason_name_lookup(int reason)
 	typedef struct {
 	    SEXP XX;
 	    SEXP FUN;
+	    SEXP eval_env;           /* call-site environment used for evaluation */
 	    SEXP tail0;              /* DOTS as pairlist (main heap, duplicated per worker) */
 	    R_xlen_t n;
 	    SEXP *results;            /* C array of worker-owned SEXPs (adopted after join) */
@@ -276,14 +277,13 @@ static void mtl_interp_reset_for_eval(R_InterpreterState *st, const mtl_job_t *j
 #endif
 }
 
-static void mtl_ensure_main_thread(void)
+static Rboolean mtl_is_main_thread(void)
 {
     if (!mtl_main_thread_inited) {
 	mtl_main_thread = pthread_self();
 	mtl_main_thread_inited = 1;
     }
-    if (!pthread_equal(mtl_main_thread, pthread_self()))
-	error("mtlapply() may only be called from the main thread");
+    return pthread_equal(mtl_main_thread, pthread_self());
 }
 
 		static void mtl_pool_init_if_needed(void)
@@ -636,7 +636,7 @@ static void mtl_job_release(mtl_job_t *job)
 				(void *)w, (long long)i);
 		fflush(stderr);
 	    }
-		    SEXP val = R_tryEvalSilent(fcall, R_GlobalEnv, &err);
+		    SEXP val = R_tryEvalSilent(fcall, job->eval_env, &err);
 		    if (mtl_trace_enabled()) {
 			fprintf(stderr, "[mtl] worker=%p eval i=%lld end err=%d\n",
 				(void *)w, (long long)i, err);
@@ -766,9 +766,9 @@ attribute_hidden void R_mtlpool_shutdown(void)
 	    int mu_locked;
 	} mtlapply_run_data_t;
 
-	static void mtl_main_eval_loop(mtl_job_t *job, SEXP env, SEXP ans)
-	{
-	    /* Build per-job call objects in the main heap (main thread only). */
+static void mtl_main_eval_loop(mtl_job_t *job, SEXP env, SEXP ans)
+{
+    /* Build per-job call objects in the caller thread/interpreter heap. */
 	    SEXP tail = PROTECT(duplicate(job->tail0));
 	    SEXP argcell = PROTECT(CONS(R_NilValue, tail));
 	    SEXP fcall = PROTECT(LCONS(job->FUN, argcell));
@@ -851,13 +851,82 @@ attribute_hidden void R_mtlpool_shutdown(void)
 	    UNPROTECT(3); /* tail, argcell, fcall */
 	}
 
+static SEXP mtl_serial_apply_no_pool(SEXP XX, SEXP FUN, SEXP dots, SEXP names, SEXP eval_env)
+{
+    R_xlen_t n = xlength(XX);
+    int nprotect = 0;
+    SEXP ans = PROTECT(allocVector(VECSXP, n)); nprotect++;
+    if (!isNull(names)) setAttrib(ans, R_NamesSymbol, names);
+
+    SEXP tail = PROTECT(VectorToPairList(dots)); nprotect++;
+    SEXP argcell = PROTECT(CONS(R_NilValue, tail)); nprotect++;
+    SEXP fcall = PROTECT(LCONS(FUN, argcell)); nprotect++;
+    MARK_NOT_MUTABLE(fcall);
+
+    for (R_xlen_t i = 0; i < n; i++) {
+	if (TYPEOF(XX) == VECSXP || TYPEOF(XX) == EXPRSXP) {
+	    SETCAR(argcell, VECTOR_ELT(XX, i));
+	} else {
+	    switch (TYPEOF(XX)) {
+	    case LGLSXP:
+		SETCAR(argcell, ScalarLogical(LOGICAL_ELT(XX, i)));
+		break;
+	    case INTSXP:
+		SETCAR(argcell, ScalarInteger(INTEGER_ELT(XX, i)));
+		break;
+	    case REALSXP:
+		SETCAR(argcell, ScalarReal(REAL_ELT(XX, i)));
+		break;
+	    case RAWSXP:
+		{
+		    SEXP s = allocVector(RAWSXP, 1);
+		    RAW(s)[0] = RAW(XX)[i];
+		    SETCAR(argcell, s);
+		}
+		break;
+	    case STRSXP:
+		SETCAR(argcell, ScalarString(STRING_ELT(XX, i)));
+		break;
+	    case CPLXSXP:
+		{
+		    SEXP s = allocVector(CPLXSXP, 1);
+		    COMPLEX(s)[0] = COMPLEX_ELT(XX, i);
+		    SETCAR(argcell, s);
+		}
+		break;
+	    default:
+		error(_("mtlapply: unsupported type '%s'"), R_typeToChar(XX));
+	    }
+	}
+
+	int err = 0;
+	SEXP val = R_tryEvalSilent(fcall, eval_env, &err);
+	if (err || val == NULL) {
+	    const char *msg = R_curErrorBuf();
+	    error("%s", (msg && msg[0]) ? msg : "mtlapply error");
+	}
+	PROTECT(val);
+	if (MAYBE_REFERENCED(val)) {
+	    SEXP dup = lazy_duplicate(val);
+	    UNPROTECT(1);
+	    val = dup;
+	    PROTECT(val);
+	}
+	SET_VECTOR_ELT(ans, i, val);
+	UNPROTECT(1);
+    }
+
+    UNPROTECT(nprotect);
+    return ans;
+}
+
 	static SEXP mtlapply_run(void *vp)
 	{
 	    mtlapply_run_data_t *d = (mtlapply_run_data_t *) vp;
 
 	    if (d->n_bg_threads == 0) {
 		/* threads=1: stay on the main thread (no pool). */
-		mtl_main_eval_loop(d->job, R_GlobalEnv, d->ans);
+		mtl_main_eval_loop(d->job, d->job->eval_env, d->ans);
 		return R_NilValue;
 	    }
 
@@ -1048,6 +1117,8 @@ attribute_hidden SEXP do_mtlapply(SEXP call, SEXP op, SEXP args, SEXP rho)
     SEXP FUN = CADR(args);
 	    SEXP dots = CADDR(args);
 	    int nthreads = asInteger(CADDDR(args));
+	    Rboolean is_main = mtl_is_main_thread();
+	    Rboolean in_worker = (R_Interpreter != NULL && R_Interpreter->isMTLWorker);
 
 		    if (nthreads == NA_INTEGER || nthreads < 1)
 			error(_("invalid '%s' value"), "threads");
@@ -1066,9 +1137,13 @@ attribute_hidden SEXP do_mtlapply(SEXP call, SEXP op, SEXP args, SEXP rho)
     if (n == NA_INTEGER)
 	error(_("invalid length"));
 
-    mtl_ensure_main_thread();
-
     SEXP names = getAttrib(XX, R_NamesSymbol);
+
+    if (!is_main && !in_worker)
+	error("mtlapply() may only be called from the main thread");
+
+    if (in_worker)
+	return mtl_serial_apply_no_pool(XX, FUN, dots, names, rho);
 
 	    if (n == 0) {
 		SEXP ans = allocVector(VECSXP, 0);
@@ -1101,6 +1176,7 @@ attribute_hidden SEXP do_mtlapply(SEXP call, SEXP op, SEXP args, SEXP rho)
 			error(_("cannot allocate memory"));
 		    job->XX = XX;
 		    job->FUN = FUN;
+		    job->eval_env = rho;
 		    job->tail0 = tail0;
 		    job->n = n;
 		    job->results = NULL;
