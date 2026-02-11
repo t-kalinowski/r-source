@@ -49,10 +49,13 @@ if (length(skip_pkg)) {
 
 fail_pkg <- character()
 fail_msg <- character()
+pkg_timeout <- as.double(Sys.getenv("MTL_LOAD_TIMEOUT_SEC", "20"))
+if (!is.finite(pkg_timeout) || pkg_timeout <= 0) pkg_timeout <- 20
 
 for (pkg in pkgs) {
   ok <- TRUE
   msg <- ""
+  setTimeLimit(elapsed = pkg_timeout, transient = TRUE)
   tryCatch(
     loadNamespace(pkg),
     error = function(e) {
@@ -60,6 +63,7 @@ for (pkg in pkgs) {
       msg <<- conditionMessage(e)
     }
   )
+  setTimeLimit(cpu = Inf, elapsed = Inf, transient = TRUE)
   if (!ok) {
     fail_pkg <- c(fail_pkg, pkg)
     fail_msg <- c(fail_msg, msg)

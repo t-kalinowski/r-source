@@ -18,6 +18,8 @@
 #endif
 
 #include <Defn.h>
+#include <locale.h>
+#include <dlfcn.h>
 
 /* Defn.h defines `R_Interpreter` as a macro in the mtl build. */
 #undef R_Interpreter
@@ -30,3 +32,97 @@ attribute_hidden R_InterpreterState *R_mtl_set_compat_interpreter(R_InterpreterS
     R_Interpreter = st ? st : &R_Interpreter0;
     return old;
 }
+
+#if defined(__APPLE__) && defined(ENABLE_NLS)
+/*
+ * ABI compatibility for binary packages built against framework libR that
+ * exports libintl_* symbols.  Homebrew-based builds link against libintl but
+ * do not re-export these prefixed names from libR itself; packages that record
+ * libR as their lookup image then fail to load with "Symbol not found:
+ * _libintl_dgettext" (and siblings).
+ *
+ * Export thin wrappers in libR so existing binaries remain loadable.
+ */
+extern char *gettext(const char *);
+extern char *dgettext(const char *, const char *);
+extern char *dcgettext(const char *, const char *, int);
+extern char *ngettext(const char *, const char *, unsigned long int);
+extern char *dngettext(const char *, const char *, const char *, unsigned long int);
+extern char *dcngettext(const char *, const char *, const char *, unsigned long int, int);
+extern char *textdomain(const char *);
+extern char *bindtextdomain(const char *, const char *);
+extern char *bind_textdomain_codeset(const char *, const char *);
+extern char *setlocale(int, const char *);
+extern locale_t newlocale(int, const char *, locale_t);
+
+attribute_visible char *libintl_gettext(const char *msgid)
+{
+    return gettext(msgid);
+}
+
+attribute_visible char *libintl_dgettext(const char *domainname, const char *msgid)
+{
+    return dgettext(domainname, msgid);
+}
+
+attribute_visible char *libintl_dcgettext(const char *domainname, const char *msgid, int category)
+{
+    return dcgettext(domainname, msgid, category);
+}
+
+attribute_visible char *libintl_ngettext(const char *msgid1, const char *msgid2,
+					 unsigned long int n)
+{
+    return ngettext(msgid1, msgid2, n);
+}
+
+attribute_visible char *libintl_dngettext(const char *domainname, const char *msgid1,
+					  const char *msgid2, unsigned long int n)
+{
+    return dngettext(domainname, msgid1, msgid2, n);
+}
+
+attribute_visible char *libintl_dcngettext(const char *domainname, const char *msgid1,
+					   const char *msgid2, unsigned long int n,
+					   int category)
+{
+    return dcngettext(domainname, msgid1, msgid2, n, category);
+}
+
+attribute_visible char *libintl_textdomain(const char *domainname)
+{
+    return textdomain(domainname);
+}
+
+attribute_visible char *libintl_bindtextdomain(const char *domainname, const char *dirname)
+{
+    return bindtextdomain(domainname, dirname);
+}
+
+attribute_visible char *libintl_bind_textdomain_codeset(const char *domainname,
+							const char *codeset)
+{
+    return bind_textdomain_codeset(domainname, codeset);
+}
+
+attribute_visible char *libintl_setlocale(int category, const char *locale)
+{
+    return setlocale(category, locale);
+}
+
+attribute_visible locale_t libintl_newlocale(int category_mask, const char *name, locale_t base)
+{
+    return newlocale(category_mask, name, base);
+}
+
+attribute_visible void libintl_set_relocation_prefix(const char *orig_prefix,
+						     const char *curr_prefix)
+{
+    typedef void (*set_reloc_t)(const char *, const char *);
+    static set_reloc_t p = NULL;
+    if (p == NULL)
+	p = (set_reloc_t) dlsym(RTLD_NEXT, "libintl_set_relocation_prefix");
+    if (p != NULL)
+	p(orig_prefix, curr_prefix);
+}
+#endif
