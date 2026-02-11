@@ -45,13 +45,10 @@ TAR=${TAR-'@TAR@'}
 R_STRIP_SHARED_LIB=${R_STRIP_SHARED_LIB-'@STRIP_SHARED_LIB@'}
 R_STRIP_STATIC_LIB=${R_STRIP_STATIC_LIB-'@STRIP_STATIC_LIB@'}
 
-## Experimental MTL build: keep a separate default user library to avoid mixing
-## with packages compiled against another libR (e.g. framework R on macOS).
-##
-## Use a lib under R.home() so it is always writable/contained within the build
-## tree when developing. This prevents hard-to-debug crashes from loading two
-## libR copies.
-R_LIBS_USER=${R_LIBS_USER:-'%S-mtl'}
+## Experimental MTL build: prefer a build-local user library first, but
+## fall back to the default user library path so existing installed packages
+## remain visible when launching this build directly.
+R_LIBS_USER=${R_LIBS_USER:-'%S-mtl:%U'}
 R_LIBS_SITE=${R_LIBS_SITE:-'%S'}
 
 ### Local Variables: ***

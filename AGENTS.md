@@ -54,6 +54,9 @@ Work towards making this build of R usable for package code that calls `.Call()`
   - `./configure --enable-R-shlib --with-mtl-abi-libroot=auto ...`
   - Optional explicit root:
     - `--with-mtl-abi-libroot=/Library/Frameworks/R.framework/Versions/4.6-arm64/Resources/lib`
+- Default package-library behavior in this tree:
+  - `R_LIBS_USER` defaults to `'%S-mtl:%U'` so the build-local library is used first,
+    then the normal user library fallback (`~/Library/R/<arch>/<x.y>/library` on macOS).
 - After each relink in `build-mtl-shlib`, re-apply install-name fixups:
   - `bash tools/mtl-abi-macos.sh build-mtl-shlib`
 - Reason: existing macOS binary packages are linked against framework install names; this avoids loading a second `libR.dylib`.
