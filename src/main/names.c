@@ -659,6 +659,7 @@ FUNTAB R_FunTab[] =
 {"lapply",	do_lapply,	0,	10,	2,	{PP_FUNCALL, PREC_FN,	0}},
 {"mtlapply",	do_mtlapply,	0,	11,	4,	{PP_FUNCALL, PREC_FN,	0}},
 {"mtlparallelmax", do_mtlparallelmax, 0,     11,     0,      {PP_FUNCALL, PREC_FN,	0}},
+{"mtlrpcstats", do_mtlrpcstats, 0,	11,	1,	{PP_FUNCALL, PREC_FN,	0}},
 {"vapply",	do_vapply,	0,	10,	4,	{PP_FUNCALL, PREC_FN,	0}},
 {"mapply",	do_mapply,	0,	11,	3,	{PP_FUNCALL, PREC_FN,	0}},
 
@@ -1310,7 +1311,8 @@ SEXP install(const char *name)
 {
     if (R_Interpreter != NULL && R_Interpreter->isMTLWorker) {
 	mtl_install_data_t d = { .name = name };
-	return R_mtl_invoke_on_main(mtl_install_on_main, &d);
+	return R_mtl_invoke_on_main_reason(mtl_install_on_main, &d,
+					   R_MTL_RPC_INSTALL);
     }
     return install_impl(name);
 }
@@ -1368,7 +1370,8 @@ SEXP installNoTrChar(SEXP charSXP)
 	    .len = LENGTH(charSXP),
 	    .enc = getCharCE(charSXP),
 	};
-	return R_mtl_invoke_on_main(mtl_installNoTrChar_on_main, &d);
+	return R_mtl_invoke_on_main_reason(mtl_installNoTrChar_on_main, &d,
+					   R_MTL_RPC_INSTALL_NOTRCHAR);
     }
     return installNoTrChar_impl(charSXP);
 }

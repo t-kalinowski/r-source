@@ -1689,7 +1689,20 @@ attribute_hidden void R_mtl_adopt_worker_heap(R_InterpreterState *st);
  * CHARSXP interning) on the main thread, while allowing worker threads to run
  * .Call/.External code without a global interpreter lock.
  */
+enum {
+    R_MTL_RPC_OTHER = 0,
+    R_MTL_RPC_INSTALL,
+    R_MTL_RPC_INSTALL_NOTRCHAR,
+    R_MTL_RPC_MKCHAR,
+    R_MTL_RPC_PARSE_VECTOR,
+    R_MTL_RPC_PARSE_CONN,
+    R_MTL_RPC_DO_PARSE,
+    R_MTL_RPC_REASON_COUNT
+};
+
 attribute_hidden SEXP R_mtl_invoke_on_main(SEXP (*fun)(void *), void *data);
+attribute_hidden SEXP R_mtl_invoke_on_main_reason(SEXP (*fun)(void *), void *data,
+						  int reason);
 
 /* Thread-local storage (TLS) support for internal multi-threading work. */
 #ifndef R_THREAD_LOCAL

@@ -4318,7 +4318,8 @@ SEXP R_ParseConn(Rconnection con, int n, ParseStatus *status, SEXP srcfile)
 {
     if (R_Interpreter != NULL && R_Interpreter->isMTLWorker) {
 	mtl_parse_conn_t d = {.con = con, .n = n, .srcfile = srcfile, .status = PARSE_NULL};
-	SEXP res = R_mtl_invoke_on_main(mtl_parse_conn_main, &d);
+	SEXP res = R_mtl_invoke_on_main_reason(mtl_parse_conn_main, &d,
+					      R_MTL_RPC_PARSE_CONN);
 	if (status)
 	    *status = d.status;
 	return res;
@@ -4335,7 +4336,8 @@ SEXP R_ParseVector(SEXP text, int n, ParseStatus *status, SEXP srcfile)
 {
     if (R_Interpreter != NULL && R_Interpreter->isMTLWorker) {
 	mtl_parse_vector_t d = {.text = text, .n = n, .srcfile = srcfile, .status = PARSE_NULL};
-	SEXP res = R_mtl_invoke_on_main(mtl_parse_vector_main, &d);
+	SEXP res = R_mtl_invoke_on_main_reason(mtl_parse_vector_main, &d,
+					      R_MTL_RPC_PARSE_VECTOR);
 	if (status)
 	    *status = d.status;
 	return res;

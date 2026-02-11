@@ -4515,7 +4515,8 @@ SEXP mkCharLenCE(const char *name, int len, cetype_t enc)
 	/* The CHARSXP cache (R_StringHash) is global and traced by the main GC,
 	   so it must only contain main-heap nodes. Run interning on main. */
 	mtl_mkchar_data_t d = { .name = name, .len = len, .enc = enc };
-	return R_mtl_invoke_on_main(mtl_mkCharLenCE_on_main, &d);
+	return R_mtl_invoke_on_main_reason(mtl_mkCharLenCE_on_main, &d,
+					   R_MTL_RPC_MKCHAR);
     }
     return mkCharLenCE_impl(name, len, enc);
 }

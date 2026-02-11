@@ -22,6 +22,8 @@ cat("libPaths:\n", paste(.libPaths(), collapse = "\n"), "\n", sep = "")
 
 suppressPackageStartupMessages(library(dplyr))
 suppressPackageStartupMessages(library(tibble))
+suppressPackageStartupMessages(library(rlang))
+suppressPackageStartupMessages(library(vctrs))
 
 ## Main-thread examples.
 df <- tibble(x = 1:5, g = c("a", "a", "b", "b", "b"))
@@ -49,20 +51,35 @@ stopifnot(identical(as.integer(j$w[[3L]]), 300L))
 
 ## Optional: exercise dplyr/vctrs/rlang code on worker threads too.
 if (exists("mtlapply")) {
+  rpc_reset <- try(.Internal(mtlrpcstats(TRUE)), silent = TRUE)
+
   f <- function(i) {
+    nm <- as_string(sym(paste0("col_", i)))
+    base <- vec_c(i + (1:8), i + (1:8))
     df <- tibble(x = i + (1:8), g = rep_len(c("a", "b"), 8))
-    df |>
+    out <- df |>
       group_by(g) |>
       mutate(z = x * 2 + 1) |>
       summarise(s = sum(z), .groups = "drop") |>
       arrange(g) |>
       pull(s)
+    list(
+      s = out,
+      nm = nm,
+      vec_sum = sum(base)
+    )
   }
 
   ref <- lapply(1:32, f)
   got <- mtlapply(1:32, f, threads = threads)
   stopifnot(isTRUE(all.equal(ref, got, tolerance = 0)))
+
+  rpc <- try(.Internal(mtlrpcstats(FALSE)), silent = TRUE)
+  if (!inherits(rpc, "try-error")) {
+    cat("\nworker->main RPC stats:\n")
+    print(rpc)
+    stopifnot(unname(rpc[["calls.total"]]) >= 1L)
+  }
 }
 
 cat("\ndplyr smoke ok\n")
-

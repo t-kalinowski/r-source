@@ -38,6 +38,22 @@ static SEXP checkArgIsSymbol(SEXP x) {
     return x;
 }
 
+static const char *mtl_rpc_reason_name_lookup(int reason)
+{
+    static const char *names[R_MTL_RPC_REASON_COUNT] = {
+	"other",
+	"install",
+	"installNoTrChar",
+	"mkCharLenCE",
+	"parseVector",
+	"parseConn",
+	"doParse",
+    };
+    if (reason < 0 || reason >= R_MTL_RPC_REASON_COUNT)
+	return names[R_MTL_RPC_OTHER];
+    return names[reason];
+}
+
 #ifdef HAVE_PTHREAD
 	typedef struct {
 	    SEXP XX;
@@ -63,6 +79,7 @@ static SEXP checkArgIsSymbol(SEXP x) {
 	    /* Function to execute on the main thread (must not escape data). */
 	    SEXP (*fun)(void *);
 	    void *data;
+	    int reason;
 
 	    SEXP result;          /* valid when ok==1 */
 	    int ok;               /* 1 success, 0 error/abort */
@@ -106,6 +123,22 @@ static int mtl_trace_enabled(void)
 
 static atomic_int mtl_parallel_active = 0;
 static atomic_int mtl_parallel_max = 0;
+static atomic_ulong mtl_rpc_calls[R_MTL_RPC_REASON_COUNT];
+static atomic_ulong mtl_rpc_errors[R_MTL_RPC_REASON_COUNT];
+
+static int mtl_rpc_sanitize_reason(int reason)
+{
+    if (reason < 0 || reason >= R_MTL_RPC_REASON_COUNT)
+	return R_MTL_RPC_OTHER;
+    return reason;
+}
+
+static unsigned long mtl_rpc_counter_read(atomic_ulong *x, int reset)
+{
+    if (reset)
+	return atomic_exchange_explicit(x, 0, memory_order_relaxed);
+    return atomic_load_explicit(x, memory_order_relaxed);
+}
 
 static void mtl_parallel_update_max(int cur)
 {
@@ -347,44 +380,54 @@ static void mtl_ensure_main_thread(void)
 	    }
 	}
 
-	attribute_hidden SEXP R_mtl_invoke_on_main(SEXP (*fun)(void *), void *data)
-	{
-	    if (fun == NULL)
-		error("R_mtl_invoke_on_main: NULL fun");
+		attribute_hidden SEXP R_mtl_invoke_on_main(SEXP (*fun)(void *), void *data)
+		{
+		    return R_mtl_invoke_on_main_reason(fun, data, R_MTL_RPC_OTHER);
+		}
 
-	    if (R_Interpreter == NULL || !R_Interpreter->isMTLWorker)
-		return fun(data);
+		attribute_hidden SEXP R_mtl_invoke_on_main_reason(SEXP (*fun)(void *), void *data,
+								  int reason)
+		{
+		    if (fun == NULL)
+			error("R_mtl_invoke_on_main: NULL fun");
+
+		    reason = mtl_rpc_sanitize_reason(reason);
+
+		    if (R_Interpreter == NULL || !R_Interpreter->isMTLWorker)
+			return fun(data);
 
 	    if (!R_MTL_THREADING_ACTIVE)
 		error("R_mtl_invoke_on_main: called outside mtlapply()");
 
-	    mtl_main_req_t *r = (mtl_main_req_t *) calloc(1, sizeof(mtl_main_req_t));
-	    if (r == NULL)
-		error("cannot allocate memory");
-	    r->fun = fun;
-	    r->data = data;
-	    r->result = R_NilValue;
+		    mtl_main_req_t *r = (mtl_main_req_t *) calloc(1, sizeof(mtl_main_req_t));
+		    if (r == NULL)
+			error("cannot allocate memory");
+		    r->fun = fun;
+		    r->data = data;
+		    r->reason = reason;
+		    r->result = R_NilValue;
 	    r->ok = 0;
 	    r->done = 0;
 	    r->next = NULL;
 	    pthread_mutex_init(&r->mu, NULL);
 	    pthread_cond_init(&r->cv, NULL);
 
-	    pthread_mutex_lock(&mtl_pool.mu);
-	    if (mtl_pool.job == NULL || mtl_pool.rpc_aborted) {
+		    pthread_mutex_lock(&mtl_pool.mu);
+		    if (mtl_pool.job == NULL || mtl_pool.rpc_aborted) {
 		pthread_mutex_unlock(&mtl_pool.mu);
 		pthread_mutex_destroy(&r->mu);
 		pthread_cond_destroy(&r->cv);
 		free(r);
 		error("R_mtl_invoke_on_main: no active mtlapply() job");
 	    }
-	    if (mtl_pool.rpc_tail)
-		mtl_pool.rpc_tail->next = r;
-	    else
-		mtl_pool.rpc_head = r;
-	    mtl_pool.rpc_tail = r;
-	    pthread_cond_broadcast(&mtl_pool.cv);
-	    pthread_mutex_unlock(&mtl_pool.mu);
+		    if (mtl_pool.rpc_tail)
+			mtl_pool.rpc_tail->next = r;
+		    else
+			mtl_pool.rpc_head = r;
+		    mtl_pool.rpc_tail = r;
+		    atomic_fetch_add_explicit(&mtl_rpc_calls[reason], 1, memory_order_relaxed);
+		    pthread_cond_broadcast(&mtl_pool.cv);
+		    pthread_mutex_unlock(&mtl_pool.mu);
 
 	    pthread_mutex_lock(&r->mu);
 	    while (!r->done)
@@ -402,10 +445,12 @@ static void mtl_ensure_main_thread(void)
 	    pthread_cond_destroy(&r->cv);
 	    free(r);
 
-	    if (!ok)
-		error("%s", msg[0] ? msg : "error");
-	    return res;
-	}
+		    if (!ok)
+			atomic_fetch_add_explicit(&mtl_rpc_errors[reason], 1, memory_order_relaxed);
+		    if (!ok)
+			error("%s", msg[0] ? msg : "error");
+		    return res;
+		}
 
 	static void *mtl_pool_worker_main(void *vp)
 	{
@@ -1102,6 +1147,64 @@ attribute_hidden SEXP do_mtlparallelmax(SEXP call, SEXP op, SEXP args, SEXP rho)
 #else
     return ScalarInteger(mtl_parallel_max_and_reset());
 #endif
+}
+
+/* .Internal(mtlrpcstats(reset))
+ *
+ * Returns named integer stats for worker->main RPC traffic, optionally
+ * resetting counters when reset is TRUE. */
+attribute_hidden SEXP do_mtlrpcstats(SEXP call, SEXP op, SEXP args, SEXP rho)
+{
+    checkArity(op, args);
+    int reset = asLogical(CAR(args));
+    if (reset == NA_LOGICAL)
+	error(_("invalid '%s' value"), "reset");
+
+    const int nreason = R_MTL_RPC_REASON_COUNT;
+    const int nout = 2 * nreason + 2;
+    SEXP out, nms;
+    PROTECT(out = allocVector(INTSXP, nout));
+    PROTECT(nms = allocVector(STRSXP, nout));
+    int k = 0;
+    unsigned long total_calls = 0, total_errors = 0;
+    for (int i = 0; i < nreason; i++) {
+	char nm[64];
+	snprintf(nm, sizeof(nm), "calls.%s", mtl_rpc_reason_name_lookup(i));
+#ifdef HAVE_PTHREAD
+	unsigned long v = mtl_rpc_counter_read(&mtl_rpc_calls[i], reset);
+#else
+	unsigned long v = 0;
+#endif
+	total_calls += v;
+	if (v > INT_MAX) v = INT_MAX;
+	INTEGER(out)[k] = (int) v;
+	SET_STRING_ELT(nms, k, mkChar(nm));
+	k++;
+    }
+    for (int i = 0; i < nreason; i++) {
+	char nm[64];
+	snprintf(nm, sizeof(nm), "errors.%s", mtl_rpc_reason_name_lookup(i));
+#ifdef HAVE_PTHREAD
+	unsigned long v = mtl_rpc_counter_read(&mtl_rpc_errors[i], reset);
+#else
+	unsigned long v = 0;
+#endif
+	total_errors += v;
+	if (v > INT_MAX) v = INT_MAX;
+	INTEGER(out)[k] = (int) v;
+	SET_STRING_ELT(nms, k, mkChar(nm));
+	k++;
+    }
+    if (total_calls > INT_MAX) total_calls = INT_MAX;
+    if (total_errors > INT_MAX) total_errors = INT_MAX;
+    INTEGER(out)[k] = (int) total_calls;
+    SET_STRING_ELT(nms, k, mkChar("calls.total"));
+    k++;
+    INTEGER(out)[k] = (int) total_errors;
+    SET_STRING_ELT(nms, k, mkChar("errors.total"));
+    setAttrib(out, R_NamesSymbol, nms);
+    UNPROTECT(2);
+    return out;
 }
 
 /* .Internal(vapply(X, FUN, FUN.VALUE, USE.NAMES)) */

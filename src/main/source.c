@@ -216,7 +216,8 @@ attribute_hidden SEXP do_parse(SEXP call, SEXP op, SEXP args, SEXP env)
 {
     if (R_Interpreter != NULL && R_Interpreter->isMTLWorker) {
 	mtl_do_parse_t d = {.call = call, .op = op, .args = args, .env = env};
-	return R_mtl_invoke_on_main(mtl_do_parse_main, &d);
+	return R_mtl_invoke_on_main_reason(mtl_do_parse_main, &d,
+					   R_MTL_RPC_DO_PARSE);
     }
     return do_parse_impl(call, op, args, env);
 }
