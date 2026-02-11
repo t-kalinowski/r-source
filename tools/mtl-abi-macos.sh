@@ -42,6 +42,9 @@ if [ ! -f "${build_dir}/lib/libR.dylib" ]; then
   exit 1
 fi
 
+build_abs=$(CDPATH= cd -- "${build_dir}" && pwd)
+libdir="${build_abs}/lib"
+
 current_id() {
   otool -D "$1" 2>/dev/null | sed -n '2p'
 }
@@ -59,9 +62,26 @@ id_r="${abi_lib_root}/libR.dylib"
 id_blas="${abi_lib_root}/libRblas.dylib"
 id_lapack="${abi_lib_root}/libRlapack.dylib"
 
-if [ "$(current_id "${build_dir}/lib/libR.dylib")" = "${id_r}" ] &&
-   [ "$(current_id "${build_dir}/lib/libRblas.dylib")" = "${id_blas}" ] &&
-   [ "$(current_id "${build_dir}/lib/libRlapack.dylib")" = "${id_lapack}" ]; then
+needs_fixup=0
+if [ "$(current_id "${build_dir}/lib/libR.dylib")" != "${id_r}" ] ||
+   [ "$(current_id "${build_dir}/lib/libRblas.dylib")" != "${id_blas}" ] ||
+   [ "$(current_id "${build_dir}/lib/libRlapack.dylib")" != "${id_lapack}" ]; then
+  needs_fixup=1
+fi
+
+loader_ref_ok() {
+  file="$1"
+  dep="$2"
+  if otool -L "${file}" | awk 'NR>1{print $1}' | grep -qx "${dep}"; then
+    return 0
+  fi
+  return 1
+}
+
+if [ "${needs_fixup}" -eq 0 ] &&
+   loader_ref_ok "${build_dir}/lib/libR.dylib" "@loader_path/libRblas.dylib" &&
+   loader_ref_ok "${build_dir}/lib/libRlapack.dylib" "@loader_path/libRblas.dylib" &&
+   loader_ref_ok "${build_dir}/lib/libRlapack.dylib" "@loader_path/libR.dylib"; then
   echo "ok: install-names already mapped to framework ABI root"
   echo "  ${build_dir}/lib/libR.dylib -> ${id_r}"
   echo "  ${build_dir}/lib/libRblas.dylib -> ${id_blas}"
@@ -72,6 +92,28 @@ fi
 install_name_tool -id "${id_r}" "${build_dir}/lib/libR.dylib"
 install_name_tool -id "${id_blas}" "${build_dir}/lib/libRblas.dylib"
 install_name_tool -id "${id_lapack}" "${build_dir}/lib/libRlapack.dylib"
+
+# Keep runtime self-consistent inside the in-tree build: route BLAS/LAPACK deps
+# through the local lib directory so we do not accidentally pull framework
+# variants (e.g. libRblas.vecLib) that can miss symbols required by this build.
+if otool -L "${build_dir}/lib/libR.dylib" | awk 'NR>1{print $1}' | grep -qx "${id_blas}"; then
+  install_name_tool -change "${id_blas}" "@loader_path/libRblas.dylib" "${build_dir}/lib/libR.dylib"
+fi
+if otool -L "${build_dir}/lib/libR.dylib" | awk 'NR>1{print $1}' | grep -qx "libRblas.dylib"; then
+  install_name_tool -change "libRblas.dylib" "@loader_path/libRblas.dylib" "${build_dir}/lib/libR.dylib"
+fi
+if otool -L "${build_dir}/lib/libRlapack.dylib" | awk 'NR>1{print $1}' | grep -qx "${id_blas}"; then
+  install_name_tool -change "${id_blas}" "@loader_path/libRblas.dylib" "${build_dir}/lib/libRlapack.dylib"
+fi
+if otool -L "${build_dir}/lib/libRlapack.dylib" | awk 'NR>1{print $1}' | grep -qx "libRblas.dylib"; then
+  install_name_tool -change "libRblas.dylib" "@loader_path/libRblas.dylib" "${build_dir}/lib/libRlapack.dylib"
+fi
+if otool -L "${build_dir}/lib/libRlapack.dylib" | awk 'NR>1{print $1}' | grep -qx "${id_r}"; then
+  install_name_tool -change "${id_r}" "@loader_path/libR.dylib" "${build_dir}/lib/libRlapack.dylib"
+fi
+if otool -L "${build_dir}/lib/libRlapack.dylib" | awk 'NR>1{print $1}' | grep -qx "libR.dylib"; then
+  install_name_tool -change "libR.dylib" "@loader_path/libR.dylib" "${build_dir}/lib/libRlapack.dylib"
+fi
 
 # Keep macOS code signing happy after install_name edits.
 if [ -x "${build_dir}/bin/exec/R" ]; then
@@ -86,3 +128,5 @@ echo "ok: set install-names for:"
 echo "  ${build_dir}/lib/libR.dylib -> ${id_r}"
 echo "  ${build_dir}/lib/libRblas.dylib -> ${id_blas}"
 echo "  ${build_dir}/lib/libRlapack.dylib -> ${id_lapack}"
+echo "  ${build_dir}/lib/libR.dylib: libRblas -> @loader_path/libRblas.dylib"
+echo "  ${build_dir}/lib/libRlapack.dylib: libR/libRblas -> @loader_path/*"
