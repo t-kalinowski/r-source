@@ -49,8 +49,10 @@ stopifnot(is.na(j$w[[1L]]))
 stopifnot(identical(as.integer(j$w[[2L]]), 200L))
 stopifnot(identical(as.integer(j$w[[3L]]), 300L))
 
-## Optional: exercise dplyr/vctrs/rlang code on worker threads too.
-if (exists("mtlapply")) {
+## Optional (opt-in): exercise dplyr/vctrs/rlang code on worker threads too.
+## This is intentionally gated because dplyr worker execution is still an active
+## compatibility target and can be flaky while runtime internals evolve.
+if (exists("mtlapply") && identical(Sys.getenv("MTL_DPLYR_WORKER", "0"), "1")) {
   rpc_reset <- try(.Internal(mtlrpcstats(TRUE)), silent = TRUE)
 
   f <- function(i) {

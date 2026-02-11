@@ -22,5 +22,8 @@ cd "${repo_root}"
 "${repo_root}/${build_dir}/bin/R" --vanilla -q -f "${repo_root}/tools/mtl-dplyr-smoke.R" \
   --args "${sys_lib}" "${threads}"
 
+"${repo_root}/${build_dir}/bin/R" --vanilla -q -f "${repo_root}/tools/mtl-worker-native-smoke.R" \
+  --args "${sys_lib}" "${threads}" "64"
+
 echo
 echo "package smoke ok"

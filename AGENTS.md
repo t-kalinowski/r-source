@@ -80,9 +80,16 @@ Use this as the standard iteration checklist after runtime changes.
 
 4. **Binary package ABI smoke (real workflow via dplyr)**
    - `tools/mtl-dplyr-smoke.sh build-mtl-shlib /Users/tomasz/Library/R/arm64/4.6/library 4`
-   - Confirms both main-thread and worker-thread usage in representative dplyr/tibble flows.
+   - Confirms package load and representative main-thread dplyr/tibble flows.
+   - Optional worker-side dplyr check is opt-in:
+     - `MTL_DPLYR_WORKER=1 build-mtl-shlib/bin/R --vanilla -q -f tools/mtl-dplyr-smoke.R --args /Users/tomasz/Library/R/arm64/4.6/library 4`
 
-5. **Benchmark checkpoint (always include in flow)**
+5. **Worker-native package smoke (`.Call`-heavy paths)**
+   - `build-mtl-shlib/bin/R --vanilla -q -f tools/mtl-worker-native-smoke.R --args /Users/tomasz/Library/R/arm64/4.6/library 4 64`
+   - Confirms package code that relies on native entry points behaves identically under `lapply()` and `mtlapply()` for representative workflows.
+   - Also emits `.Internal(mtlrpcstats(FALSE))` for quick visibility into worker->main fallback pressure.
+
+6. **Benchmark checkpoint (always include in flow)**
    - Generate timing artifacts:
      - System R:
        - `/usr/bin/R --vanilla -q -f bench/readme_bench_run.R --args bench/results/system.rds`
@@ -95,7 +102,7 @@ Use this as the standard iteration checklist after runtime changes.
    - Refresh human-readable report:
      - `build-mtl-shlib/bin/R --vanilla -q -e 'rmarkdown::render(\"README.Rmd\", output_format = \"github_document\")'`
 
-6. **Interpretation rule**
+7. **Interpretation rule**
    - Check serial parity first (`lapply` path in MTL build vs R-devel/system R).
    - Then check scaling (`mtlapply(2/4/8)` vs `mtlapply(1)` and `lapply`).
    - Treat benchmark noise seriously: prefer larger workloads and repeated runs before concluding regressions.
@@ -105,7 +112,15 @@ Use this as the standard iteration checklist after runtime changes.
 - Required for each checkpoint:
   - ABI smoke (`tools/mtl-abi-smoke.R`)
   - dplyr smoke (`tools/mtl-dplyr-smoke.R`)
+  - worker-native smoke (`tools/mtl-worker-native-smoke.R`)
 - Any regression here blocks progress, even if internal microbenchmarks improve.
+
+## Active Execution Plan (Current)
+- [x] Add worker->main RPC reason counters and expose stats (`.Internal(mtlrpcstats)`).
+- [x] Add package smoke wrapper (`tools/mtl-package-smoke.sh`) that runs ABI + dplyr checks.
+- [x] Add dedicated worker-native package smoke for `.Call`-heavy paths.
+- [ ] Expand worker-native smoke to more compiled packages (as available in system library).
+- [ ] Keep serial benchmark parity at each checkpoint before increasing worker coverage.
 
 ## Notes / Questions to Keep In Mind
 - Serial parity is non-negotiable: any added checks/atomics/dispatch on hot serial paths must be avoided.

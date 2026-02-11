@@ -121,36 +121,36 @@ them:
 
 | workload | build | label | median_seconds | speedup_vs_rdevel_lapply | speedup_vs_sys_lapply | speedup_vs_mtl_lapply | efficiency_vs_mtl_lapply |
 |:---|:---|:---|---:|---:|---:|---:|---:|
-| alloc_pressure | mtl | lapply | 0.108 | 0.972 | 0.972 | 1.000 | NA |
-| alloc_pressure | mtl | mtlapply(1) | 0.110 | 0.955 | 0.955 | 0.982 | 0.982 |
-| alloc_pressure | mtl | mtlapply(2) | 0.124 | 0.847 | 0.847 | 0.871 | 0.435 |
-| alloc_pressure | mtl | mtlapply(4) | 0.067 | 1.567 | 1.567 | 1.612 | 0.403 |
-| alloc_pressure | mtl | mtlapply(8) | 0.044 | 2.386 | 2.386 | 2.455 | 0.307 |
-| alloc_pressure | rdevel | lapply | 0.105 | 1.000 | 1.000 | 1.029 | NA |
-| alloc_pressure | system | lapply | 0.105 | 1.000 | 1.000 | 1.029 | NA |
-| cos_seq | mtl | lapply | 0.426 | 1.089 | 1.026 | 1.000 | NA |
-| cos_seq | mtl | mtlapply(1) | 0.436 | 1.064 | 1.002 | 0.977 | 0.977 |
-| cos_seq | mtl | mtlapply(2) | 0.316 | 1.468 | 1.383 | 1.348 | 0.674 |
-| cos_seq | mtl | mtlapply(4) | 0.175 | 2.651 | 2.497 | 2.434 | 0.609 |
-| cos_seq | mtl | mtlapply(8) | 0.103 | 4.505 | 4.243 | 4.136 | 0.517 |
-| cos_seq | rdevel | lapply | 0.464 | 1.000 | 0.942 | 0.918 | NA |
-| cos_seq | system | lapply | 0.437 | 1.062 | 1.000 | 0.975 | NA |
-| etl_group_mean | mtl | lapply | 0.928 | 1.111 | 0.958 | 1.000 | NA |
-| etl_group_mean | mtl | mtlapply(1) | 0.929 | 1.110 | 0.957 | 0.999 | 0.999 |
-| etl_group_mean | mtl | mtlapply(2) | 0.598 | 1.724 | 1.487 | 1.552 | 0.776 |
-| etl_group_mean | mtl | mtlapply(4) | 0.307 | 3.358 | 2.896 | 3.023 | 0.756 |
-| etl_group_mean | mtl | mtlapply(8) | 0.154 | 6.695 | 5.773 | 6.026 | 0.753 |
-| etl_group_mean | rdevel | lapply | 1.031 | 1.000 | 0.862 | 0.900 | NA |
-| etl_group_mean | system | lapply | 0.889 | 1.160 | 1.000 | 1.044 | NA |
+| alloc_pressure | mtl | lapply | 0.117 | 0.991 | 0.932 | 1.000 | NA |
+| alloc_pressure | mtl | mtlapply(1) | 0.116 | 1.000 | 0.940 | 1.009 | 1.009 |
+| alloc_pressure | mtl | mtlapply(2) | 0.131 | 0.885 | 0.832 | 0.893 | 0.447 |
+| alloc_pressure | mtl | mtlapply(4) | 0.073 | 1.589 | 1.493 | 1.603 | 0.401 |
+| alloc_pressure | mtl | mtlapply(8) | 0.046 | 2.522 | 2.370 | 2.543 | 0.318 |
+| alloc_pressure | rdevel | lapply | 0.116 | 1.000 | 0.940 | 1.009 | NA |
+| alloc_pressure | system | lapply | 0.109 | 1.064 | 1.000 | 1.073 | NA |
+| cos_seq | mtl | lapply | 0.459 | 1.076 | 0.985 | 1.000 | NA |
+| cos_seq | mtl | mtlapply(1) | 0.461 | 1.072 | 0.980 | 0.996 | 0.996 |
+| cos_seq | mtl | mtlapply(2) | 0.352 | 1.403 | 1.284 | 1.304 | 0.652 |
+| cos_seq | mtl | mtlapply(4) | 0.187 | 2.642 | 2.417 | 2.455 | 0.614 |
+| cos_seq | mtl | mtlapply(8) | 0.105 | 4.705 | 4.305 | 4.371 | 0.546 |
+| cos_seq | rdevel | lapply | 0.494 | 1.000 | 0.915 | 0.929 | NA |
+| cos_seq | system | lapply | 0.452 | 1.093 | 1.000 | 1.015 | NA |
+| etl_group_mean | mtl | lapply | 0.986 | 1.091 | 0.933 | 1.000 | NA |
+| etl_group_mean | mtl | mtlapply(1) | 0.982 | 1.096 | 0.937 | 1.004 | 1.004 |
+| etl_group_mean | mtl | mtlapply(2) | 0.619 | 1.738 | 1.486 | 1.593 | 0.796 |
+| etl_group_mean | mtl | mtlapply(4) | 0.309 | 3.482 | 2.977 | 3.191 | 0.798 |
+| etl_group_mean | mtl | mtlapply(8) | 0.155 | 6.942 | 5.935 | 6.361 | 0.795 |
+| etl_group_mean | rdevel | lapply | 1.076 | 1.000 | 0.855 | 0.916 | NA |
+| etl_group_mean | system | lapply | 0.920 | 1.170 | 1.000 | 1.072 | NA |
 
     ## 
     ## Single-thread overhead check (per workload):
 
 | workload       | ratio_mtl_vs_sys | ratio_mtl_vs_rdevel |
 |:---------------|-----------------:|--------------------:|
-| alloc_pressure |            1.029 |               1.029 |
-| cos_seq        |            0.975 |               0.918 |
-| etl_group_mean |            1.044 |               0.900 |
+| alloc_pressure |            1.073 |               1.009 |
+| cos_seq        |            1.015 |               0.929 |
+| etl_group_mean |            1.072 |               0.916 |
 
     ## 
     ## Scaling (speedup vs `mtl` lapply):
