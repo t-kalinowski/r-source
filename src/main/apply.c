@@ -55,7 +55,7 @@ static const char *mtl_rpc_reason_name_lookup(int reason)
 }
 
 #ifdef HAVE_PTHREAD
-	typedef struct {
+	typedef struct mtl_job_t_ {
 	    SEXP XX;
 	    SEXP FUN;
 	    SEXP eval_env;           /* call-site environment used for evaluation */
@@ -69,6 +69,7 @@ static const char *mtl_rpc_reason_name_lookup(int reason)
 	    atomic_int workers_done;  /* workers that have fully exited this job */
 	    int bg_threads;           /* number of worker threads assigned to this job */
 	    atomic_int refcount;      /* heap lifetime across main + workers */
+	    struct mtl_job_t_ *parent_job;
 	    char errmsg[1024];
 	    pthread_mutex_t err_mutex; /* protects errmsg */
 	    int main_showErrorMessages;
@@ -109,8 +110,8 @@ static const char *mtl_rpc_reason_name_lookup(int reason)
 	    pthread_cond_t cv;
 
 	    unsigned long gen;
-	    int job_nthreads;
-	    mtl_job_t *job; /* owned by the mtlapply() caller thread */
+	    int job_depth;
+	    mtl_job_t *job_top; /* active job stack top */
 
 	    /* Worker->main requests (e.g. global caches that must be mutated by main). */
 	    mtl_main_req_t *rpc_head;
@@ -452,7 +453,7 @@ static void mtl_job_release(mtl_job_t *job)
 	    pthread_cond_init(&r->cv, NULL);
 
 		    pthread_mutex_lock(&mtl_pool.mu);
-		    if (mtl_pool.job == NULL || mtl_pool.rpc_aborted) {
+		    if (mtl_pool.job_top == NULL || mtl_pool.rpc_aborted) {
 		pthread_mutex_unlock(&mtl_pool.mu);
 		pthread_mutex_destroy(&r->mu);
 		pthread_cond_destroy(&r->cv);
@@ -540,7 +541,9 @@ static void mtl_job_release(mtl_job_t *job)
 	    for (;;) {
 		pthread_mutex_lock(&p->mu);
 		while (!p->shutdown &&
-		       (p->job == NULL || w->id >= p->job_nthreads || w->seen_gen == p->gen)) {
+		       (p->job_top == NULL ||
+			w->id >= p->job_top->bg_threads ||
+			w->seen_gen == p->gen)) {
 	    pthread_cond_wait(&p->cv, &p->mu);
 	}
 	if (p->shutdown) {
@@ -548,7 +551,7 @@ static void mtl_job_release(mtl_job_t *job)
 	    break;
 	}
 
-		mtl_job_t *job = p->job;
+		mtl_job_t *job = p->job_top;
 		unsigned long mygen = p->gen;
 		w->seen_gen = mygen;
 		atomic_fetch_add_explicit(&job->refcount, 1, memory_order_relaxed);
@@ -932,23 +935,18 @@ static SEXP mtl_serial_apply_no_pool(SEXP XX, SEXP FUN, SEXP dots, SEXP names, S
 	    pthread_mutex_lock(&mtl_pool.mu);
 	    d->mu_locked = 1;
 
-    /* mtlapply() is restricted to the main thread; concurrent jobs are fatal. */
-    if (mtl_pool.job != NULL) {
-	pthread_mutex_unlock(&mtl_pool.mu);
-	d->mu_locked = 0;
-	R_Suicide("mtlapply internal error: concurrent job");
-    }
+	    if (mtl_pool.job_depth == 0) {
+		/* Enable threaded allocator/GC fast paths only while workers may run. */
+		R_mtl_set_threading_active(1);
+		/* New top-level job: clear any pending/aborted RPC state. */
+		mtl_pool.rpc_aborted = 0;
+		mtl_pool.rpc_head = NULL;
+		mtl_pool.rpc_tail = NULL;
+	    }
 
-	    /* Enable threaded allocator/GC fast paths only while workers may run. */
-	    R_mtl_set_threading_active(1);
-
-	    /* New job: clear any pending/aborted RPC state. */
-	    mtl_pool.rpc_aborted = 0;
-	    mtl_pool.rpc_head = NULL;
-	    mtl_pool.rpc_tail = NULL;
-
-	    mtl_pool.job = d->job;
-	    mtl_pool.job_nthreads = d->n_bg_threads;
+	    d->job->parent_job = mtl_pool.job_top;
+	    mtl_pool.job_top = d->job;
+	    mtl_pool.job_depth++;
 	    mtl_pool.gen++;
 	    pthread_cond_broadcast(&mtl_pool.cv);
 
@@ -964,27 +962,22 @@ static SEXP mtl_serial_apply_no_pool(SEXP XX, SEXP FUN, SEXP dots, SEXP names, S
 	    while (atomic_load_explicit(&d->job->workers_done, memory_order_relaxed) < d->n_bg_threads) {
 		/* Service any worker->main requests (e.g. install/mkChar) while waiting. */
 		mtl_rpc_service_locked();
-		/* Fail-fast on worker errors: once no worker is actively evaluating,
-		   detach this job and return immediately on the main thread. */
-		if (atomic_load_explicit(&d->job->cancel_requested, memory_order_relaxed) &&
-		    atomic_load_explicit(&d->job->active_eval_workers, memory_order_relaxed) == 0) {
-		    mtl_rpc_abort_all_locked();
-		    mtl_pool.job = NULL;
-		    pthread_cond_broadcast(&mtl_pool.cv);
-		    break;
-		}
 		if (atomic_load_explicit(&d->job->workers_done, memory_order_relaxed) < d->n_bg_threads)
 		    pthread_cond_wait(&mtl_pool.cv, &mtl_pool.mu);
 	    }
 
 	    /* Drain any remaining requests before tearing down the job. */
-	    mtl_rpc_service_locked();
-	    if (mtl_pool.job == d->job) {
-		mtl_pool.job = NULL;
-		pthread_cond_broadcast(&mtl_pool.cv);
-	    }
+		    mtl_rpc_service_locked();
+		    if (mtl_pool.job_top == d->job) {
+			mtl_pool.job_top = d->job->parent_job;
+			if (mtl_pool.job_depth > 0)
+			    mtl_pool.job_depth--;
+			mtl_pool.gen++;
+			pthread_cond_broadcast(&mtl_pool.cv);
+		    }
 
-	    R_mtl_set_threading_active(0);
+		    if (mtl_pool.job_depth == 0)
+			R_mtl_set_threading_active(0);
 
 	    pthread_mutex_unlock(&mtl_pool.mu);
 	    d->mu_locked = 0;
@@ -1012,21 +1005,19 @@ static void mtlapply_run_cleanup(void *vp, Rboolean jump)
 	   to avoid races/deadlocks with concurrent cleanup. */
 	mtl_rpc_abort_all_locked();
 
-	/* Keep mtl_pool.job valid until all workers have reported done. */
-	if (mtl_pool.job == d->job) {
+	/* Keep current top job valid until all workers have reported done. */
+	if (mtl_pool.job_top == d->job) {
 	    while (atomic_load_explicit(&d->job->workers_done, memory_order_relaxed) < d->n_bg_threads) {
 		mtl_rpc_service_locked();
-		if (atomic_load_explicit(&d->job->active_eval_workers, memory_order_relaxed) == 0) {
-		    mtl_pool.job = NULL;
-		    pthread_cond_broadcast(&mtl_pool.cv);
-		    break;
-		}
 		if (atomic_load_explicit(&d->job->workers_done, memory_order_relaxed) < d->n_bg_threads)
 		    pthread_cond_wait(&mtl_pool.cv, &mtl_pool.mu);
 	    }
 	    mtl_rpc_service_locked();
-	    if (mtl_pool.job == d->job) {
-		mtl_pool.job = NULL;
+	    if (mtl_pool.job_top == d->job) {
+		mtl_pool.job_top = d->job->parent_job;
+		if (mtl_pool.job_depth > 0)
+		    mtl_pool.job_depth--;
+		mtl_pool.gen++;
 		pthread_cond_broadcast(&mtl_pool.cv);
 	    }
 	}
@@ -1043,7 +1034,8 @@ static void mtlapply_run_cleanup(void *vp, Rboolean jump)
 	d->mu_locked = 0;
     }
 
-    R_mtl_set_threading_active(0);
+    if (mtl_pool.job_depth == 0)
+	R_mtl_set_threading_active(0);
 }
 #endif /* HAVE_PTHREAD */
 
@@ -1184,6 +1176,7 @@ attribute_hidden SEXP do_mtlapply(SEXP call, SEXP op, SEXP args, SEXP rho)
 		    atomic_init(&job->active_eval_workers, 0);
 		    atomic_init(&job->workers_done, 0);
 		    job->bg_threads = n_bg_threads;
+		    job->parent_job = NULL;
 		    atomic_init(&job->refcount, 1); /* main owner; workers acquire when job starts */
 		    job->errmsg[0] = '\0';
 		    job->main_showErrorMessages = R_ShowErrorMessages;
@@ -1276,6 +1269,7 @@ attribute_hidden SEXP do_mtlparallelmax(SEXP call, SEXP op, SEXP args, SEXP rho)
  * - threads.created: cumulative threads spawned
  * - threads.current: current pool size
  * - job.active: whether a job is currently attached to the pool
+ * - job.depth: active nested job depth
  */
 attribute_hidden SEXP do_mtlpoolstats(SEXP call, SEXP op, SEXP args, SEXP rho)
 {
@@ -1285,34 +1279,39 @@ attribute_hidden SEXP do_mtlpoolstats(SEXP call, SEXP op, SEXP args, SEXP rho)
 	error(_("invalid '%s' value"), "reset");
 
     SEXP out, nms;
-    PROTECT(out = allocVector(INTSXP, 3));
-    PROTECT(nms = allocVector(STRSXP, 3));
+    PROTECT(out = allocVector(INTSXP, 4));
+    PROTECT(nms = allocVector(STRSXP, 4));
 
 #ifndef HAVE_PTHREAD
     INTEGER(out)[0] = 0;
     INTEGER(out)[1] = 0;
     INTEGER(out)[2] = 0;
+    INTEGER(out)[3] = 0;
 #else
     unsigned long created = reset
 	? atomic_exchange_explicit(&mtl_pool_threads_created, 0, memory_order_relaxed)
 	: atomic_load_explicit(&mtl_pool_threads_created, memory_order_relaxed);
     int current = 0;
     int active = 0;
+    int depth = 0;
     if (mtl_pool.inited) {
 	pthread_mutex_lock(&mtl_pool.mu);
 	current = mtl_pool.nthreads;
-	active = (mtl_pool.job != NULL);
+	active = (mtl_pool.job_top != NULL);
+	depth = mtl_pool.job_depth;
 	pthread_mutex_unlock(&mtl_pool.mu);
     }
     if (created > INT_MAX) created = INT_MAX;
     INTEGER(out)[0] = (int) created;
     INTEGER(out)[1] = current;
     INTEGER(out)[2] = active;
+    INTEGER(out)[3] = depth;
 #endif
 
     SET_STRING_ELT(nms, 0, mkChar("threads.created"));
     SET_STRING_ELT(nms, 1, mkChar("threads.current"));
     SET_STRING_ELT(nms, 2, mkChar("job.active"));
+    SET_STRING_ELT(nms, 3, mkChar("job.depth"));
     setAttrib(out, R_NamesSymbol, nms);
     UNPROTECT(2);
     return out;
