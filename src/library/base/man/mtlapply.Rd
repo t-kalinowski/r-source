@@ -30,22 +30,17 @@ mtlapply(X, FUN, \dots, threads = 2L)
   (as in \code{\link[parallel]{mclapply}} on Unix-alikes), and the worker
   threads evaluate \code{FUN} concurrently.
 
-  The R heap is still shared between threads, and some operations may
-  involve coarse internal synchronization (for example, allocation and
-  garbage collection).  This means \code{mtlapply} is not expected to
-  speed up allocation-heavy workloads, but can speed up computations that
-  spend most of their time in allocation-free code.
-
-  Each worker evaluates \code{FUN} with a thread-local "global"
-  environment whose parent is the real global environment.
-  \code{globalenv()} in a worker returns this thread-local environment,
-  so top-level assignments (e.g. \code{x <- 1}) do not affect the main
-  thread.
+  Workers use the real \code{globalenv()}. Reads from global bindings are
+  allowed, but writes to \code{globalenv()} from worker threads are rejected
+  with an error.
 
   The worker function must not attempt to mutate process-global state.
-  In particular, superassignment (\code{<<-}) and setting options via
-  \code{options(name = value)} are not supported in worker threads and
-  result in an error.
+  In particular, superassignment (\code{<<-}) is not supported in worker
+  threads and results in an error.
+
+  Worker \code{options()} writes are job-local: each worker starts from a
+  snapshot of main-thread options, and changes do not propagate back to
+  the main thread.
 
   Some operations that rely on shared process-wide state may run under a
   global internal lock (for example, \code{tempfile()}), and can

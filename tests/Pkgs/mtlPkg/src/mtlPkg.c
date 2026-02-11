@@ -12,7 +12,7 @@ static SEXP mtlPkg_add(SEXP x, SEXP y)
 static SEXP mtlPkg_define_global(SEXP x)
 {
     /* This intentionally uses the public symbol R_GlobalEnv so we can test that
-       mtlapply() redirects worker-thread "global" writes into a per-call env. */
+       mtlapply() rejects worker-thread writes to globalenv(). */
     SEXP sym = install("mtl_test_var");
     defineVar(sym, x, R_GlobalEnv);
     return R_NilValue;
@@ -29,4 +29,3 @@ void R_init_mtlPkg(DllInfo *dll)
     R_registerRoutines(dll, NULL, CallEntries, NULL, NULL);
     R_useDynamicSymbols(dll, FALSE);
 }
-

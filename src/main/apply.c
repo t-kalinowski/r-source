@@ -174,15 +174,14 @@ static pthread_t mtl_main_thread;
 
 static mtl_pool_t mtl_pool;
 static atomic_int mtl_pool_threads_created = 0;
-static SEXP mtl_dotGlobalEnvSym = NULL;
 static SEXP mtl_dotOptionsSym = NULL;
 
 			static void mtl_interp_init_from_main(R_InterpreterState *st)
 			{
-			    st->heap = NULL;
-			    st->gcEnabled = 1;
-			    st->in_gc = 0;
-			    st->mtlGlobalEnvRedirect = 1;
+		    st->heap = NULL;
+		    st->gcEnabled = 1;
+		    st->in_gc = 0;
+		    st->mtlGlobalEnvRedirect = 0;
 			    st->currentExpr = NULL;
 			    st->returnedValue = R_NilValue;
 			    st->handlerStack = R_NilValue;
@@ -295,7 +294,6 @@ static void mtl_ensure_main_thread(void)
 		    memset(&mtl_pool, 0, sizeof(mtl_pool));
 		    pthread_mutex_init(&mtl_pool.mu, NULL);
 		    pthread_cond_init(&mtl_pool.cv, NULL);
-		    mtl_dotGlobalEnvSym = install(".GlobalEnv");
 		    mtl_dotOptionsSym = install(".Options");
 		    mtl_pool.inited = 1;
 		}
@@ -555,15 +553,6 @@ static void mtl_job_release(mtl_job_t *job)
 		atomic_fetch_add_explicit(&job->refcount, 1, memory_order_relaxed);
 		pthread_mutex_unlock(&p->mu);
 
-			/* Create a fresh worker "global" environment for this job.
-			   Parent is the real global env, so reads see main-session bindings. */
-			{
-			    SEXP wenv = PROTECT(NewEnvironment(R_NilValue, R_NilValue, R_GlobalEnv));
-			    w->interp.workerGlobalEnv = wenv;
-			    defineVar(mtl_dotGlobalEnvSym, wenv, wenv); /* shadow .GlobalEnv */
-			    UNPROTECT(1);
-			}
-
 			/* Snapshot global options into the worker heap for this job.
 			   The worker sees/sets options against this snapshot (copy-on-write),
 			   so packages using withr::with_options() work without mutating global
@@ -647,7 +636,7 @@ static void mtl_job_release(mtl_job_t *job)
 				(void *)w, (long long)i);
 		fflush(stderr);
 	    }
-		    SEXP val = R_tryEvalSilent(fcall, w->interp.workerGlobalEnv, &err);
+		    SEXP val = R_tryEvalSilent(fcall, R_GlobalEnv, &err);
 		    if (mtl_trace_enabled()) {
 			fprintf(stderr, "[mtl] worker=%p eval i=%lld end err=%d\n",
 				(void *)w, (long long)i, err);
@@ -676,8 +665,6 @@ static void mtl_job_release(mtl_job_t *job)
 
 			UNPROTECT(3); /* tail, argcell, fcall */
 
-				/* Drop the job-global env so it won't be kept alive across adoption. */
-				w->interp.workerGlobalEnv = NULL;
 				/* Drop worker-local options before GC/adoption: keep them job-local. */
 				w->interp.mtlOptions = R_NilValue;
 				w->interp.mtlOptionsBase = R_NilValue;
@@ -775,10 +762,7 @@ attribute_hidden void R_mtlpool_shutdown(void)
 	typedef struct {
 	    mtl_job_t *job;
 	    int n_bg_threads;
-	    SEXP main_env;
 	    SEXP ans;
-	    int saved_redirect;
-	    SEXP saved_worker_env;
 	    int mu_locked;
 	} mtlapply_run_data_t;
 
@@ -871,15 +855,9 @@ attribute_hidden void R_mtlpool_shutdown(void)
 	{
 	    mtlapply_run_data_t *d = (mtlapply_run_data_t *) vp;
 
-	    /* Redirect globalenv()/R_GlobalEnv lookups for the main thread too. */
-	    R_Interpreter->mtlGlobalEnvRedirect = 1;
-	    R_Interpreter->workerGlobalEnv = d->main_env;
-
 	    if (d->n_bg_threads == 0) {
 		/* threads=1: stay on the main thread (no pool). */
-		mtl_main_eval_loop(d->job, d->main_env, d->ans);
-		R_Interpreter->workerGlobalEnv = d->saved_worker_env;
-		R_Interpreter->mtlGlobalEnvRedirect = d->saved_redirect;
+		mtl_main_eval_loop(d->job, R_GlobalEnv, d->ans);
 		return R_NilValue;
 	    }
 
@@ -944,9 +922,6 @@ attribute_hidden void R_mtlpool_shutdown(void)
 	    pthread_mutex_unlock(&mtl_pool.mu);
 	    d->mu_locked = 0;
 
-	    R_Interpreter->workerGlobalEnv = d->saved_worker_env;
-	    R_Interpreter->mtlGlobalEnvRedirect = d->saved_redirect;
-
 	    return R_NilValue;
 	}
 
@@ -1002,8 +977,6 @@ static void mtlapply_run_cleanup(void *vp, Rboolean jump)
     }
 
     R_mtl_set_threading_active(0);
-    R_Interpreter->workerGlobalEnv = d->saved_worker_env;
-    R_Interpreter->mtlGlobalEnvRedirect = d->saved_redirect;
 }
 #endif /* HAVE_PTHREAD */
 
@@ -1124,11 +1097,6 @@ attribute_hidden SEXP do_mtlapply(SEXP call, SEXP op, SEXP args, SEXP rho)
 	    SEXP ans = PROTECT(allocVector(VECSXP, n)); nprotect++;
 	    if (!isNull(names)) setAttrib(ans, R_NamesSymbol, names);
 
-		    /* Create a per-call "global" env (parent is the real global env). */
-		    SEXP dotGlobalEnvSym = install(".GlobalEnv");
-		    SEXP main_env = PROTECT(NewEnvironment(R_NilValue, R_NilValue, R_GlobalEnv)); nprotect++;
-		    defineVar(dotGlobalEnvSym, main_env, main_env); /* shadow .GlobalEnv */
-
 		    mtl_job_t *job = (mtl_job_t *) calloc(1, sizeof(mtl_job_t));
 		    if (job == NULL)
 			error(_("cannot allocate memory"));
@@ -1157,10 +1125,7 @@ attribute_hidden SEXP do_mtlapply(SEXP call, SEXP op, SEXP args, SEXP rho)
 			    mtlapply_run_data_t run_data;
 			    run_data.job = job;
 			    run_data.n_bg_threads = n_bg_threads;
-			    run_data.main_env = main_env;
 			    run_data.ans = ans;
-			    run_data.saved_redirect = R_Interpreter->mtlGlobalEnvRedirect;
-			    run_data.saved_worker_env = R_Interpreter->workerGlobalEnv;
 			    run_data.mu_locked = 0;
 				    /* R_UnwindProtect tells the cleanup whether we are unwinding due
 				       to an error/non-local jump. We need that to safely stop worker

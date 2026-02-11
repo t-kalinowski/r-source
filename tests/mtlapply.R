@@ -18,7 +18,7 @@ stopifnot(length(x) == 100L)
 stopifnot(isTRUE(all.equal(x[[3]]$v, cos(1:3))))
 
 # Package/native-code story: install a minimal package with .Call() and ensure
-# calls from mtlapply() workers work and do not leak to the real global env.
+# calls from mtlapply() workers work, while writes to globalenv() error.
 pkg_src <- file.path(Sys.getenv("SRCDIR"), "Pkgs", "mtlPkg")
 if (dir.exists(pkg_src)) {
   lib <- tempfile("mtlLib-")
@@ -31,9 +31,37 @@ if (dir.exists(pkg_src)) {
 
   if (exists("mtl_test_var", envir = .GlobalEnv, inherits = FALSE))
     rm(mtl_test_var, envir = .GlobalEnv)
-  invisible(mtlapply(1:8, function(i) mtlPkg::mtl_define_global(i), threads = 2L))
+  err_global_call <- try(mtlapply(1:8, function(i) mtlPkg::mtl_define_global(i), threads = 2L),
+                         silent = TRUE)
+  stopifnot(inherits(err_global_call, "try-error"))
   stopifnot(!exists("mtl_test_var", envir = .GlobalEnv, inherits = FALSE))
 }
+
+# Pure R writes to globalenv() from workers should also error.
+if (exists("mtl_test_var", envir = .GlobalEnv, inherits = FALSE))
+  rm(mtl_test_var, envir = .GlobalEnv)
+err_global_assign <- try(mtlapply(1:8, function(i) {
+  assign("mtl_test_var", i, envir = globalenv())
+  i
+}, threads = 2L), silent = TRUE)
+stopifnot(inherits(err_global_assign, "try-error"))
+stopifnot(!exists("mtl_test_var", envir = .GlobalEnv, inherits = FALSE))
+
+err_global_eval <- try(mtlapply(1:8, function(i) {
+  eval(quote(mtl_test_var <- i), envir = globalenv())
+  i
+}, threads = 2L), silent = TRUE)
+stopifnot(inherits(err_global_eval, "try-error"))
+stopifnot(!exists("mtl_test_var", envir = .GlobalEnv, inherits = FALSE))
+
+# options() writes in workers are local to the worker/job.
+digits0 <- getOption("digits")
+digits_vals <- mtlapply(1:3, function(i) {
+  options(digits = 7L + i)
+  getOption("digits")
+}, threads = 2L)
+stopifnot(identical(as.integer(unlist(digits_vals, use.names = FALSE)), c(8L, 9L, 10L)))
+stopifnot(identical(getOption("digits"), digits0))
 
 # Ensure we got actual overlap in worker evaluation.
 invisible(.Internal(mtlparallelmax()))

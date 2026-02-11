@@ -1229,13 +1229,11 @@ static R_INLINE SEXP findGlobalVar(SEXP symbol)
 }
 #endif
 
-static R_INLINE SEXP mtl_translate_globalenv(SEXP rho)
+static R_INLINE void mtl_check_globalenv_assignment(SEXP rho)
 {
-    R_InterpreterState *ist = R_Interpreter;
-    if (ist != NULL && ist->mtlGlobalEnvRedirect && ist->workerGlobalEnv != NULL &&
-	rho == R_GlobalEnv)
-	return ist->workerGlobalEnv;
-    return rho;
+    if (rho == R_GlobalEnv &&
+	R_Interpreter != NULL && R_Interpreter->isMTLWorker)
+	error(_("assignment to the global environment is not allowed in mtlapply() worker threads"));
 }
 
 attribute_hidden SEXP R_findVar(SEXP symbol, SEXP rho)
@@ -1247,8 +1245,6 @@ attribute_hidden SEXP R_findVar(SEXP symbol, SEXP rho)
 
     if (!isEnvironment(rho))
 	error(_("argument to '%s' is not an environment"), "findVar");
-
-    rho = mtl_translate_globalenv(rho);
 
 #ifdef USE_GLOBAL_CACHE
     /* This first loop handles local frames, if there are any.  It
@@ -1287,8 +1283,6 @@ static SEXP findVarLoc(SEXP symbol, SEXP rho)
 
     if (!isEnvironment(rho))
 	error(_("argument to '%s' is not an environment"), "findVarLoc");
-
-    rho = mtl_translate_globalenv(rho);
 
 #ifdef USE_GLOBAL_CACHE
     /* This first loop handles local frames, if there are any.  It
@@ -1647,10 +1641,9 @@ void defineVar(SEXP symbol, SEXP value, SEXP rho)
     int hashcode;
     SEXP frame, c;
 
-    rho = mtl_translate_globalenv(rho);
-
     if (value == R_UnboundValue)
 	error("attempt to bind a variable to R_UnboundValue");
+    mtl_check_globalenv_assignment(rho);
     /* R_DirtyImage should only be set if assigning to R_GlobalEnv. */
     if (rho == R_GlobalEnv) R_DirtyImage = 1;
 
@@ -1782,6 +1775,7 @@ static SEXP setVarInFrame(SEXP rho, SEXP symbol, SEXP value)
     int hashcode;
     SEXP frame, c;
 
+    mtl_check_globalenv_assignment(rho);
     /* R_DirtyImage should only be set if assigning to R_GlobalEnv. */
     if (rho == R_GlobalEnv) R_DirtyImage = 1;
     if (rho == R_EmptyEnv) return R_NilValue;
@@ -1852,13 +1846,12 @@ static SEXP setVarInFrame(SEXP rho, SEXP symbol, SEXP value)
 void setVar(SEXP symbol, SEXP value, SEXP rho)
 {
     SEXP vl;
-    rho = mtl_translate_globalenv(rho);
     while (rho != R_EmptyEnv) {
 	vl = setVarInFrame(rho, symbol, value);
 	if (vl != R_NilValue) return;
 	rho = ENCLOS(rho);
     }
-    defineVar(symbol, value, mtl_translate_globalenv(R_GlobalEnv));
+    defineVar(symbol, value, R_GlobalEnv);
 }
 
 
@@ -2507,9 +2500,6 @@ attribute_hidden SEXP do_missing(SEXP call, SEXP op, SEXP args, SEXP rho)
 attribute_hidden SEXP do_globalenv(SEXP call, SEXP op, SEXP args, SEXP rho)
 {
     checkArity(op, args);
-    R_InterpreterState *ist = R_Interpreter;
-    if (ist != NULL && ist->mtlGlobalEnvRedirect && ist->workerGlobalEnv != NULL)
-	return ist->workerGlobalEnv;
     return R_GlobalEnv;
 }
 
