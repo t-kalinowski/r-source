@@ -3285,18 +3285,20 @@ attribute_hidden void R_DestroyInterpreterHeap(R_InterpreterState *st)
     st->heap = NULL;
 }
 
-/* Adopt an mtlapply() worker heap into the main heap.
+/* Adopt an mtlapply() worker heap into the current interpreter heap.
  *
  * This is a coarse "heap transfer" mechanism: after first running a worker-local
- * GC to drop garbage, we splice the worker heap's node/page lists into the main
- * heap and reset the worker heap to an empty state.
+ * GC to drop garbage, we splice the worker heap's node/page lists into the
+ * destination heap and reset the worker heap to an empty state.
  *
- * The main heap lock is taken while mutating main heap lists. Worker evaluation
+ * The heap lock is taken while mutating destination lists. Worker evaluation
  * should not be concurrent with adoption (mtlapply() only adopts between jobs).
  */
 attribute_hidden void R_mtl_adopt_worker_heap(R_InterpreterState *st)
 {
     if (st == NULL || st->heap == NULL || st->heap == &R_MainHeapState)
+	return;
+    if (st->heap == R_HEAP)
 	return;
 
     R_mtl_heap_state *src = st->heap;
@@ -3306,10 +3308,10 @@ attribute_hidden void R_mtl_adopt_worker_heap(R_InterpreterState *st)
     /* The worker thread runs a worker-local GC at the end of each job to move
        all live nodes out of New space before adoption. */
 
-    /* Now splice lists into the main heap. */
+    /* Now splice lists into the destination heap. */
     R_mtl_heap_lock();
 
-    R_mtl_heap_state *dst = &R_MainHeapState;
+    R_mtl_heap_state *dst = R_HEAP;
 
     /* Transfer page-managed node pages for each node class. */
     for (int i = 0; i < NUM_NODE_CLASSES; i++) {

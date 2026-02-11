@@ -953,21 +953,19 @@ static SEXP mtl_serial_apply_no_pool(SEXP XX, SEXP FUN, SEXP dots, SEXP names, S
 	    pthread_mutex_unlock(&mtl_pool.mu);
 	    d->mu_locked = 0;
 
-    /* For threaded jobs, keep the main thread as coordinator only.
-       Running FUN concurrently on the main thread and worker threads
-       can corrupt error/unwind state when one branch raises an error. */
-
-	    pthread_mutex_lock(&mtl_pool.mu);
-	    d->mu_locked = 1;
+    pthread_mutex_lock(&mtl_pool.mu);
+    d->mu_locked = 1;
 	    while (atomic_load_explicit(&d->job->workers_done, memory_order_relaxed) < d->n_bg_threads) {
-		/* Service any worker->main requests (e.g. install/mkChar) while waiting. */
-		mtl_rpc_service_locked();
+		/* Service worker->main requests while waiting from the main thread only. */
+		if (mtl_is_main_thread())
+		    mtl_rpc_service_locked();
 		if (atomic_load_explicit(&d->job->workers_done, memory_order_relaxed) < d->n_bg_threads)
 		    pthread_cond_wait(&mtl_pool.cv, &mtl_pool.mu);
 	    }
 
 	    /* Drain any remaining requests before tearing down the job. */
-		    mtl_rpc_service_locked();
+		    if (mtl_is_main_thread())
+			mtl_rpc_service_locked();
 		    if (mtl_pool.job_top == d->job) {
 			mtl_pool.job_top = d->job->parent_job;
 			if (mtl_pool.job_depth > 0)
@@ -1008,11 +1006,13 @@ static void mtlapply_run_cleanup(void *vp, Rboolean jump)
 	/* Keep current top job valid until all workers have reported done. */
 	if (mtl_pool.job_top == d->job) {
 	    while (atomic_load_explicit(&d->job->workers_done, memory_order_relaxed) < d->n_bg_threads) {
-		mtl_rpc_service_locked();
+		if (mtl_is_main_thread())
+		    mtl_rpc_service_locked();
 		if (atomic_load_explicit(&d->job->workers_done, memory_order_relaxed) < d->n_bg_threads)
 		    pthread_cond_wait(&mtl_pool.cv, &mtl_pool.mu);
 	    }
-	    mtl_rpc_service_locked();
+	    if (mtl_is_main_thread())
+		mtl_rpc_service_locked();
 	    if (mtl_pool.job_top == d->job) {
 		mtl_pool.job_top = d->job->parent_job;
 		if (mtl_pool.job_depth > 0)
@@ -1132,18 +1132,18 @@ attribute_hidden SEXP do_mtlapply(SEXP call, SEXP op, SEXP args, SEXP rho)
     if (!is_main && !in_worker)
 	error("mtlapply() may only be called from the main thread");
 
-    if (in_worker)
-	return mtl_serial_apply_no_pool(XX, FUN, dots, names, rho);
-
 	    if (n == 0) {
 		SEXP ans = allocVector(VECSXP, 0);
 		if (!isNull(names)) setAttrib(ans, R_NamesSymbol, names);
 		return ans;
 	    }
 
-	    /* 'threads' is the number of worker threads (main thread coordinates). */
+	    /* 'threads' is the number of worker slots for this call. */
 	    if (nthreads > n) nthreads = (int) n;
 	    int n_bg_threads = nthreads;
+
+	    if (in_worker)
+		return mtl_serial_apply_no_pool(XX, FUN, dots, names, rho);
 
 	    if (n_bg_threads > 0) {
 		mtl_pool_init_if_needed();
