@@ -58,4 +58,30 @@ stopifnot(inherits(bad, "try-error"))
 ok <- lapply(1:100, function(i) i + 1L)
 stopifnot(identical(unlist(ok, use.names = FALSE), 2:101))
 
+# User-handled worker errors should behave like lapply().
+handled_ref <- lapply(1:40, function(i) {
+  tryCatch({
+    if (i %% 9L == 0L) stop("boom")
+    i
+  }, error = function(e) -i)
+})
+handled_mtl <- mtlapply(1:40, function(i) {
+  tryCatch({
+    if (i %% 9L == 0L) stop("boom")
+    i
+  }, error = function(e) -i)
+}, threads = 4L)
+stopifnot(identical(handled_ref, handled_mtl))
+
+# Repeated worker failures should not poison later runs.
+for (k in 1:10) {
+  errk <- try(mtlapply(1:128, function(i) {
+    if (i == 37L) stop("boom")
+    i
+  }, threads = 4L), silent = TRUE)
+  stopifnot(inherits(errk, "try-error"))
+}
+ok2 <- mtlapply(1:50, function(i) i + 3L, threads = 4L)
+stopifnot(identical(unlist(ok2, use.names = FALSE), 4:53))
+
 cat("mtlapply ok\n")

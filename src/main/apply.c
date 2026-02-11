@@ -63,6 +63,9 @@ static const char *mtl_rpc_reason_name_lookup(int reason)
 	    SEXP *results;            /* C array of worker-owned SEXPs (adopted after join) */
 	    atomic_long next;         /* next index to claim */
 	    atomic_int error;         /* 0/1 */
+	    atomic_int cancel_requested; /* 0/1 cooperative cancellation */
+	    atomic_int active_eval_workers; /* workers currently evaluating/writing one item */
+	    atomic_int refcount;      /* heap lifetime across main + workers */
 	    char errmsg[1024];
 	    pthread_mutex_t err_mutex; /* protects errmsg */
 	    int main_showErrorMessages;
@@ -394,6 +397,29 @@ static void mtl_rpc_abort_all_locked(void)
     }
 }
 
+static void mtl_job_set_error(mtl_job_t *job, const char *msg)
+{
+    if (atomic_exchange_explicit(&job->error, 1, memory_order_relaxed) == 0) {
+	pthread_mutex_lock(&job->err_mutex);
+	if (msg == NULL || msg[0] == '\0')
+	    msg = "error";
+	snprintf(job->errmsg, sizeof(job->errmsg), "%s", msg);
+	pthread_mutex_unlock(&job->err_mutex);
+    }
+    atomic_store_explicit(&job->cancel_requested, 1, memory_order_relaxed);
+}
+
+static void mtl_job_release(mtl_job_t *job)
+{
+    if (job == NULL)
+	return;
+    if (atomic_fetch_sub_explicit(&job->refcount, 1, memory_order_acq_rel) == 1) {
+	pthread_mutex_destroy(&job->err_mutex);
+	free(job->results);
+	free(job);
+    }
+}
+
 		attribute_hidden SEXP R_mtl_invoke_on_main(SEXP (*fun)(void *), void *data)
 		{
 		    return R_mtl_invoke_on_main_reason(fun, data, R_MTL_RPC_OTHER);
@@ -526,6 +552,7 @@ static void mtl_rpc_abort_all_locked(void)
 		mtl_job_t *job = p->job;
 		unsigned long mygen = p->gen;
 		w->seen_gen = mygen;
+		atomic_fetch_add_explicit(&job->refcount, 1, memory_order_relaxed);
 		pthread_mutex_unlock(&p->mu);
 
 			/* Create a fresh worker "global" environment for this job.
@@ -557,7 +584,7 @@ static void mtl_rpc_abort_all_locked(void)
 		MARK_NOT_MUTABLE(fcall);
 
 		for (;;) {
-		    if (atomic_load_explicit(&job->error, memory_order_relaxed))
+		    if (atomic_load_explicit(&job->cancel_requested, memory_order_relaxed))
 			break;
 		    long idx = atomic_fetch_add_explicit(&job->next, 1, memory_order_relaxed);
 		    if (idx < 0 || (R_xlen_t) idx >= job->n)
@@ -599,17 +626,20 @@ static void mtl_rpc_abort_all_locked(void)
 			    }
 			    break;
 			default:
-			    if (atomic_exchange_explicit(&job->error, 1, memory_order_relaxed) == 0) {
-				pthread_mutex_lock(&job->err_mutex);
-				snprintf(job->errmsg, sizeof(job->errmsg),
+			    {
+				char msg[128];
+				snprintf(msg, sizeof(msg),
 					 "mtlapply: unsupported type '%s'", R_typeToChar(job->XX));
-				pthread_mutex_unlock(&job->err_mutex);
+				mtl_job_set_error(job, msg);
 			    }
 			    break;
 			}
-			if (atomic_load_explicit(&job->error, memory_order_relaxed))
+			if (atomic_load_explicit(&job->cancel_requested, memory_order_relaxed))
 			    break;
 		    }
+		    if (atomic_load_explicit(&job->cancel_requested, memory_order_relaxed))
+			break;
+		    atomic_fetch_add_explicit(&job->active_eval_workers, 1, memory_order_relaxed);
 		    int err = 0;
 		    mtl_parallel_begin();
 		    if (mtl_trace_enabled()) {
@@ -625,13 +655,9 @@ static void mtl_rpc_abort_all_locked(void)
 		    }
 	    mtl_parallel_end();
 		    if (err || val == NULL) {
-			if (atomic_exchange_explicit(&job->error, 1, memory_order_relaxed) == 0) {
-			    pthread_mutex_lock(&job->err_mutex);
-			    const char *msg = R_curErrorBuf();
-		    if (msg == NULL) msg = "error";
-		    snprintf(job->errmsg, sizeof(job->errmsg), "%s", msg);
-		    pthread_mutex_unlock(&job->err_mutex);
-		}
+			const char *msg = R_curErrorBuf();
+			mtl_job_set_error(job, msg);
+			atomic_fetch_sub_explicit(&job->active_eval_workers, 1, memory_order_relaxed);
 			break;
 		    }
 
@@ -645,6 +671,7 @@ static void mtl_rpc_abort_all_locked(void)
 		    R_PreserveObject(val);
 		    job->results[i] = val;
 		    UNPROTECT(1);
+		    atomic_fetch_sub_explicit(&job->active_eval_workers, 1, memory_order_relaxed);
 		}
 
 			UNPROTECT(3); /* tail, argcell, fcall */
@@ -667,6 +694,7 @@ static void mtl_rpc_abort_all_locked(void)
 			    pthread_cond_broadcast(&p->cv);
 	}
 	pthread_mutex_unlock(&p->mu);
+	mtl_job_release(job);
     }
 
     R_InterpreterTLS = saved_interp;
@@ -762,9 +790,9 @@ attribute_hidden void R_mtlpool_shutdown(void)
 	    SEXP fcall = PROTECT(LCONS(job->FUN, argcell));
 	    MARK_NOT_MUTABLE(fcall);
 
-	    for (;;) {
-		if (atomic_load_explicit(&job->error, memory_order_relaxed))
-		    break;
+		for (;;) {
+		    if (atomic_load_explicit(&job->cancel_requested, memory_order_relaxed))
+			break;
 		long idx = atomic_fetch_add_explicit(&job->next, 1, memory_order_relaxed);
 		if (idx < 0 || (R_xlen_t) idx >= job->n)
 		    break;
@@ -802,15 +830,15 @@ attribute_hidden void R_mtlpool_shutdown(void)
 			}
 			break;
 		    default:
-			if (atomic_exchange_explicit(&job->error, 1, memory_order_relaxed) == 0) {
-			    pthread_mutex_lock(&job->err_mutex);
-			    snprintf(job->errmsg, sizeof(job->errmsg),
+			{
+			    char msg[128];
+			    snprintf(msg, sizeof(msg),
 				     "mtlapply: unsupported type '%s'", R_typeToChar(job->XX));
-			    pthread_mutex_unlock(&job->err_mutex);
+			    mtl_job_set_error(job, msg);
 			}
 			break;
 		    }
-		    if (atomic_load_explicit(&job->error, memory_order_relaxed))
+		    if (atomic_load_explicit(&job->cancel_requested, memory_order_relaxed))
 			break;
 		}
 
@@ -819,13 +847,8 @@ attribute_hidden void R_mtlpool_shutdown(void)
 		SEXP val = R_tryEvalSilent(fcall, env, &err);
 		mtl_parallel_end();
 		if (err || val == NULL) {
-		    if (atomic_exchange_explicit(&job->error, 1, memory_order_relaxed) == 0) {
-			pthread_mutex_lock(&job->err_mutex);
-			const char *msg = R_curErrorBuf();
-			if (msg == NULL) msg = "error";
-			snprintf(job->errmsg, sizeof(job->errmsg), "%s", msg);
-			pthread_mutex_unlock(&job->err_mutex);
-		    }
+		    const char *msg = R_curErrorBuf();
+		    mtl_job_set_error(job, msg);
 		    break;
 		}
 
@@ -896,15 +919,25 @@ attribute_hidden void R_mtlpool_shutdown(void)
 	    while (mtl_pool.job_done < d->n_bg_threads) {
 		/* Service any worker->main requests (e.g. install/mkChar) while waiting. */
 		mtl_rpc_service_locked();
+		/* Fail-fast on worker errors: once no worker is actively evaluating,
+		   detach this job and return immediately on the main thread. */
+		if (atomic_load_explicit(&d->job->cancel_requested, memory_order_relaxed) &&
+		    atomic_load_explicit(&d->job->active_eval_workers, memory_order_relaxed) == 0) {
+		    mtl_rpc_abort_all_locked();
+		    mtl_pool.job = NULL;
+		    pthread_cond_broadcast(&mtl_pool.cv);
+		    break;
+		}
 		if (mtl_pool.job_done < d->n_bg_threads)
 		    pthread_cond_wait(&mtl_pool.cv, &mtl_pool.mu);
 	    }
 
 	    /* Drain any remaining requests before tearing down the job. */
 	    mtl_rpc_service_locked();
-
-	    mtl_pool.job = NULL;
-	    pthread_cond_broadcast(&mtl_pool.cv);
+	    if (mtl_pool.job == d->job) {
+		mtl_pool.job = NULL;
+		pthread_cond_broadcast(&mtl_pool.cv);
+	    }
 
 	    R_mtl_set_threading_active(0);
 
@@ -921,11 +954,12 @@ static void mtlapply_run_cleanup(void *vp, Rboolean jump)
 {
     mtlapply_run_data_t *d = (mtlapply_run_data_t *) vp;
 
-    /* On unwind, force workers to stop touching the stack-allocated job and
+    /* On unwind, force workers to stop touching this job and
        wait for them to acknowledge completion before leaving this frame.
        While waiting, keep servicing worker->main RPCs to avoid deadlock. */
     if (jump && d->job && d->n_bg_threads > 0) {
 	atomic_store_explicit(&d->job->error, 1, memory_order_relaxed);
+	atomic_store_explicit(&d->job->cancel_requested, 1, memory_order_relaxed);
 
 	if (!d->mu_locked) {
 	    pthread_mutex_lock(&mtl_pool.mu);
@@ -940,12 +974,19 @@ static void mtlapply_run_cleanup(void *vp, Rboolean jump)
 	if (mtl_pool.job == d->job) {
 	    while (mtl_pool.job_done < d->n_bg_threads) {
 		mtl_rpc_service_locked();
+		if (atomic_load_explicit(&d->job->active_eval_workers, memory_order_relaxed) == 0) {
+		    mtl_pool.job = NULL;
+		    pthread_cond_broadcast(&mtl_pool.cv);
+		    break;
+		}
 		if (mtl_pool.job_done < d->n_bg_threads)
 		    pthread_cond_wait(&mtl_pool.cv, &mtl_pool.mu);
 	    }
 	    mtl_rpc_service_locked();
-	    mtl_pool.job = NULL;
-	    pthread_cond_broadcast(&mtl_pool.cv);
+	    if (mtl_pool.job == d->job) {
+		mtl_pool.job = NULL;
+		pthread_cond_broadcast(&mtl_pool.cv);
+	    }
 	}
     } else if (jump) {
 	/* No active workers for this job, but still abort pending RPCs. */
@@ -1088,29 +1129,33 @@ attribute_hidden SEXP do_mtlapply(SEXP call, SEXP op, SEXP args, SEXP rho)
 		    SEXP main_env = PROTECT(NewEnvironment(R_NilValue, R_NilValue, R_GlobalEnv)); nprotect++;
 		    defineVar(dotGlobalEnvSym, main_env, main_env); /* shadow .GlobalEnv */
 
-		    mtl_job_t job;
-		    memset(&job, 0, sizeof(job));
-		    job.XX = XX;
-		    job.FUN = FUN;
-		    job.tail0 = tail0;
-		    job.n = n;
-		    job.results = NULL;
-		    atomic_init(&job.next, 0);
-		    atomic_init(&job.error, 0);
-		    job.errmsg[0] = '\0';
-		    job.main_showErrorMessages = R_ShowErrorMessages;
-		    pthread_mutex_init(&job.err_mutex, NULL);
+		    mtl_job_t *job = (mtl_job_t *) calloc(1, sizeof(mtl_job_t));
+		    if (job == NULL)
+			error(_("cannot allocate memory"));
+		    job->XX = XX;
+		    job->FUN = FUN;
+		    job->tail0 = tail0;
+		    job->n = n;
+		    job->results = NULL;
+		    atomic_init(&job->next, 0);
+		    atomic_init(&job->error, 0);
+		    atomic_init(&job->cancel_requested, 0);
+		    atomic_init(&job->active_eval_workers, 0);
+		    atomic_init(&job->refcount, 1); /* main owner; workers acquire when job starts */
+		    job->errmsg[0] = '\0';
+		    job->main_showErrorMessages = R_ShowErrorMessages;
+		    pthread_mutex_init(&job->err_mutex, NULL);
 
 		    if (n_bg_threads > 0) {
 			if (n > (R_xlen_t) (SIZE_MAX / sizeof(SEXP)))
 			    error(_("invalid length"));
-			job.results = (SEXP *) calloc((size_t) n, sizeof(SEXP));
-			if (job.results == NULL)
+			job->results = (SEXP *) calloc((size_t) n, sizeof(SEXP));
+			if (job->results == NULL)
 			    error(_("cannot allocate memory"));
 		    }
 
 			    mtlapply_run_data_t run_data;
-			    run_data.job = &job;
+			    run_data.job = job;
 			    run_data.n_bg_threads = n_bg_threads;
 			    run_data.main_env = main_env;
 			    run_data.ans = ans;
@@ -1125,15 +1170,16 @@ attribute_hidden SEXP do_mtlapply(SEXP call, SEXP op, SEXP args, SEXP rho)
 						    mtlapply_run_cleanup, &run_data,
 						    NULL);
 
-			    pthread_mutex_destroy(&job.err_mutex);
-
-			    if (atomic_load_explicit(&job.error, memory_order_relaxed)) {
+			    if (atomic_load_explicit(&job->error, memory_order_relaxed)) {
+				char msg[1024];
+				snprintf(msg, sizeof(msg), "%s",
+					 job->errmsg[0] ? job->errmsg : "mtlapply error");
 			/* Ensure worker heaps don't keep partial results rooted. */
 			for (int t = 0; t < n_bg_threads; t++)
 			    mtl_pool.workers[t]->interp.preciousList = R_NilValue;
-			free(job.results);
+			mtl_job_release(job);
 			UNPROTECT(nprotect);
-			error("%s", job.errmsg[0] ? job.errmsg : "mtlapply error");
+			error("%s", msg);
 		    }
 
 			    /* Adopt all worker heaps into main before touching the results. */
@@ -1144,10 +1190,9 @@ attribute_hidden SEXP do_mtlapply(SEXP call, SEXP op, SEXP args, SEXP rho)
 					R_mtl_adopt_worker_heap(&mtl_pool.workers[t]->interp);
 				}
 				for (R_xlen_t i = 0; i < n; i++) {
-				    if (job.results[i] != NULL)
-					SET_VECTOR_ELT(ans, i, job.results[i]);
+				    if (job->results[i] != NULL)
+					SET_VECTOR_ELT(ans, i, job->results[i]);
 				}
-				free(job.results);
 			    }
 
 			    /* Optional debugging guard: if enabled, do a few cheap checks to
@@ -1165,8 +1210,9 @@ attribute_hidden SEXP do_mtlapply(SEXP call, SEXP op, SEXP args, SEXP rho)
 			    R_Suicide("mtlapply: corrupted R_BaseEnv hashtab");
 		    }
 
-		    UNPROTECT(nprotect);
-		    return ans;
+			    mtl_job_release(job);
+			    UNPROTECT(nprotect);
+			    return ans;
 		#endif
 		}
 
