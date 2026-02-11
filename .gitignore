@@ -1,6 +1,7 @@
 .codex/
 build-mtl/
 build-mtl-clang/
+build-mtl-shlib/
 build-debug/
 build-ubsan/
 bench/results/

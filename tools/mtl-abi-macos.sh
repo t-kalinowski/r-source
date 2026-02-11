@@ -1,0 +1,51 @@
+#!/bin/sh
+#
+# Make an in-tree --enable-R-shlib build ABI-compatible with macOS binary
+# packages built against the R.framework.
+#
+# The key trick: set LC_ID_DYLIB of our in-tree libR.dylib (and libRblas/lapack)
+# to the same absolute install-name used by the framework build:
+#
+#   /Library/Frameworks/R.framework/Versions/<ver>/Resources/lib/libR.dylib
+#
+# Once R has loaded our libR (via the normal build-tree paths), dyld considers
+# that install-name already satisfied, so subsequently dlopening a package that
+# depends on the framework libR will *not* load a second libR copy.
+#
+# This avoids crashes from having two libR instances in one process, and does
+# not require rewriting installed packages.
+#
+# Usage:
+#   tools/mtl-abi-macos.sh build-mtl-shlib
+#
+# Then you can run (example):
+#   build-mtl-shlib/bin/R --vanilla -q -e \
+#     '.libPaths(c("~/Library/R/arm64/4.6/library", .libPaths())); library(digest)'
+#
+
+set -eu
+
+build_dir="${1:-build-mtl-shlib}"
+
+if [ ! -d "${build_dir}" ]; then
+  echo "error: build dir not found: ${build_dir}" >&2
+  exit 1
+fi
+
+if [ ! -f "${build_dir}/lib/libR.dylib" ]; then
+  echo "error: ${build_dir}/lib/libR.dylib not found. Build with --enable-R-shlib first." >&2
+  exit 1
+fi
+
+fw_ver="${R_MTL_FRAMEWORK_VER:-4.6-arm64}"
+abi_lib_root="/Library/Frameworks/R.framework/Versions/${fw_ver}/Resources/lib"
+
+install_name_tool -id "${abi_lib_root}/libR.dylib" "${build_dir}/lib/libR.dylib"
+install_name_tool -id "${abi_lib_root}/libRblas.dylib" "${build_dir}/lib/libRblas.dylib"
+install_name_tool -id "${abi_lib_root}/libRlapack.dylib" "${build_dir}/lib/libRlapack.dylib"
+
+echo "ok: set install-names for:"
+echo "  ${build_dir}/lib/libR.dylib -> ${abi_lib_root}/libR.dylib"
+echo "  ${build_dir}/lib/libRblas.dylib -> ${abi_lib_root}/libRblas.dylib"
+echo "  ${build_dir}/lib/libRlapack.dylib -> ${abi_lib_root}/libRlapack.dylib"
+
