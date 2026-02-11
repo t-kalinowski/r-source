@@ -1270,6 +1270,54 @@ attribute_hidden SEXP do_mtlparallelmax(SEXP call, SEXP op, SEXP args, SEXP rho)
 #endif
 }
 
+/* .Internal(mtlpoolstats(reset))
+ *
+ * Returns named integer stats for the worker pool:
+ * - threads.created: cumulative threads spawned
+ * - threads.current: current pool size
+ * - job.active: whether a job is currently attached to the pool
+ */
+attribute_hidden SEXP do_mtlpoolstats(SEXP call, SEXP op, SEXP args, SEXP rho)
+{
+    checkArity(op, args);
+    int reset = asLogical(CAR(args));
+    if (reset == NA_LOGICAL)
+	error(_("invalid '%s' value"), "reset");
+
+    SEXP out, nms;
+    PROTECT(out = allocVector(INTSXP, 3));
+    PROTECT(nms = allocVector(STRSXP, 3));
+
+#ifndef HAVE_PTHREAD
+    INTEGER(out)[0] = 0;
+    INTEGER(out)[1] = 0;
+    INTEGER(out)[2] = 0;
+#else
+    unsigned long created = reset
+	? atomic_exchange_explicit(&mtl_pool_threads_created, 0, memory_order_relaxed)
+	: atomic_load_explicit(&mtl_pool_threads_created, memory_order_relaxed);
+    int current = 0;
+    int active = 0;
+    if (mtl_pool.inited) {
+	pthread_mutex_lock(&mtl_pool.mu);
+	current = mtl_pool.nthreads;
+	active = (mtl_pool.job != NULL);
+	pthread_mutex_unlock(&mtl_pool.mu);
+    }
+    if (created > INT_MAX) created = INT_MAX;
+    INTEGER(out)[0] = (int) created;
+    INTEGER(out)[1] = current;
+    INTEGER(out)[2] = active;
+#endif
+
+    SET_STRING_ELT(nms, 0, mkChar("threads.created"));
+    SET_STRING_ELT(nms, 1, mkChar("threads.current"));
+    SET_STRING_ELT(nms, 2, mkChar("job.active"));
+    setAttrib(out, R_NamesSymbol, nms);
+    UNPROTECT(2);
+    return out;
+}
+
 /* .Internal(mtlrpcstats(reset))
  *
  * Returns named integer stats for worker->main RPC traffic, optionally

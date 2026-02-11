@@ -659,6 +659,7 @@ FUNTAB R_FunTab[] =
 {"lapply",	do_lapply,	0,	10,	2,	{PP_FUNCALL, PREC_FN,	0}},
 {"mtlapply",	do_mtlapply,	0,	11,	4,	{PP_FUNCALL, PREC_FN,	0}},
 {"mtlparallelmax", do_mtlparallelmax, 0,     11,     0,      {PP_FUNCALL, PREC_FN,	0}},
+{"mtlpoolstats", do_mtlpoolstats, 0,	11,	1,	{PP_FUNCALL, PREC_FN,	0}},
 {"mtlrpcstats", do_mtlrpcstats, 0,	11,	1,	{PP_FUNCALL, PREC_FN,	0}},
 {"vapply",	do_vapply,	0,	10,	4,	{PP_FUNCALL, PREC_FN,	0}},
 {"mapply",	do_mapply,	0,	11,	3,	{PP_FUNCALL, PREC_FN,	0}},
