@@ -77,6 +77,9 @@ Work towards making this build of R usable for package code that calls `.Call()`
 - Prefer running long or kill-prone commands via the MCP console:
   - Spawn work with `system2()` inside the console session.
   - If something wedges or spawns children, use `manage_session(\"restart\")` to cleanly kill the session and its children, then continue.
+- For direct shell runs outside MCP console, wrap risky/experimental repros in
+  `gtimeout` (macOS coreutils) so hangs self-terminate:
+  - `/opt/homebrew/bin/gtimeout 30 build-mtl-shlib/bin/R --vanilla -q -f <script.R>`
 
 ## Default Validation Ladder (Run in This Order)
 Use this as the standard iteration checklist after runtime changes.
@@ -166,3 +169,10 @@ Use this as the standard iteration checklist after runtime changes.
 - R does not have true refcounting (only a few bits in the header), so cross-heap ownership/transfer needs an approach that does not depend on unbounded refcounts.
 - `.Call` / `.External` compatibility is part of baseline package usability; package authors should not need a new registration model.
 - Loading packages can stay main-thread-only initially, but calling already-registered routines must remain transparent.
+- Current safety tradeoff in `mtlapply` error handling:
+  - For `threads > 1`, the main thread is currently coordinator-only (workers evaluate `FUN`; main services RPC/waits).
+  - This avoids concurrent main+worker error-unwind corruption seen in mixed-error workloads.
+  - Effective parallel workers are `threads - 1` for now; revisit once cross-thread error machinery is hardened.
+- Keep this regression in the default loop:
+  - `mtlapply(..., threads > 1)` with a deliberate `stop()` must return a recoverable error.
+  - A subsequent regular `lapply()` call and regular main-thread error handling must still work.
