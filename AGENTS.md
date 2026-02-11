@@ -3,7 +3,8 @@
 ## Overall Goal
 Add support for running R code in parallel on multiple OS threads inside one R process, conceptually as subinterpreters (per-thread interpreter state), exposed initially as a very simple interface:
 
-- `mtlapply(X, FUN, ..., threads=)` modelled after `lapply()` / `mclapply()`
+- `mtlapply(X, FUN, ...)` modelled after `lapply()` / `mclapply()`
+- thread-pool size is controlled via `options(mtlapply.threads = n)`
 - Evaluate `FUN` across multiple threads/subinterpreters
 - Transfer results back to the main thread (goal: move/transfer, not serialize/copy)
 
@@ -162,6 +163,8 @@ Use this as the standard iteration checklist after runtime changes.
 - [x] Move `mtlapply` job state to heap-owned lifetime (worker refs + main owner).
 - [x] Add fail-fast cancellation path on worker/main error (`cancel_requested` + active-eval quiescence gate).
 - [x] Add user-facing regressions for handled worker errors and repeated failure/recovery in `tests/mtlapply.R`.
+- [x] Move worker-completion tracking to per-job state (`job->workers_done`) to decouple scheduling state from global pool bookkeeping.
+- [x] Add pool-reuse observability (`.Internal(mtlpoolstats)`) and assert nested `mtlapply()` does not spawn extra workers.
 - [ ] Expand worker-native smoke to more compiled packages (as available in system library).
 - [ ] Keep serial benchmark parity at each checkpoint before increasing worker coverage.
 
