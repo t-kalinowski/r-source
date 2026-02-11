@@ -10,6 +10,20 @@ The hook is simple: when your workload is “a lot of independent R work”
 `mtlapply()` can give near-linear speedups without forking and without
 serializing return values.
 
+## Build (Canonical Target)
+
+Use the canonical build target `build-mtl`:
+
+``` sh
+tools/mtl-configure.sh build-mtl -- --without-x --disable-java --without-recommended-packages \
+  LDFLAGS='-L/opt/homebrew/lib' CPPFLAGS='-I/opt/homebrew/include'
+make -C build-mtl -j8
+tools/mtl-abi-macos.sh build-mtl
+```
+
+`config.site` now defaults `enable_R_shlib=yes`, so shared `libR` is
+the default unless explicitly disabled.
+
 ## A Benchmark You Can Read (And Reproduce)
 
 The “unit of parallelism” here is a shard id. There is no up-front
@@ -68,10 +82,10 @@ system.time(reduce(mtlapply(ids, worker, threads = 8L)))[["elapsed"]]
 The benchmark is run as a standalone base-R script under:
 
 - the system `R` (to check for single-threaded regressions)
-- `./build-mtl-shlib/bin/R` from this tree (to measure `mtlapply()` scaling)
+- `./build-mtl/bin/R` from this tree (to measure `mtlapply()` scaling)
 
 For binary-package ABI compatibility on macOS, use the `--enable-R-shlib` build
-(`build-mtl-shlib`). Non-shlib executables can load a second `libR.dylib` when
+(`build-mtl`). Non-shlib executables can load a second `libR.dylib` when
 loading prebuilt package binaries.
 
 Generate the timing artifacts:
@@ -86,11 +100,11 @@ R --vanilla -q -f bench/readme_bench_run.R --args bench/results/system.rds
 /usr/local/bin/R-devel --vanilla -q -f bench/readme_bench_run.R --args bench/results/rdevel.rds
 
 # experimental build (has mtlapply)
-./build-mtl-shlib/bin/R --vanilla -q -f bench/readme_bench_run.R --args bench/results/mtl.rds
+./build-mtl/bin/R --vanilla -q -f bench/readme_bench_run.R --args bench/results/mtl.rds
 
 # optional: generate a bench::mark artifact under the experimental build
 R_LIBS_USER=/private/tmp/mtl-proof-lib-MW1vv9 R_LIBS_SITE='' \
-  ./build-mtl-shlib/bin/R --vanilla -q -f bench/readme_bench_mark.R --args bench/results/mtl_bench_mark.rds
+  ./build-mtl/bin/R --vanilla -q -f bench/readme_bench_mark.R --args bench/results/mtl_bench_mark.rds
 ```
 
 Then render this README, which loads those artifacts and summarizes

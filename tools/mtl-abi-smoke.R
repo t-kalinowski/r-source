@@ -1,12 +1,12 @@
 ## Smoke test for ABI compatibility with macOS R.framework-linked binary packages.
 ##
 ## Intended usage:
-## 1) Build an in-tree R with --enable-R-shlib (e.g. build-mtl-shlib)
+## 1) Build an in-tree R with --enable-R-shlib (e.g. build-mtl)
 ## 2) Run tools/mtl-abi-macos.sh on that build dir
 ## 3) Run this script with that R, pointing at an existing binary package library.
 ##
 ## Example:
-##   build-mtl-shlib/bin/R --vanilla -q -f tools/mtl-abi-smoke.R \
+##   build-mtl/bin/R --vanilla -q -f tools/mtl-abi-smoke.R \
 ##     --args /Users/tomasz/Library/R/arm64/4.6/library
 ##
 

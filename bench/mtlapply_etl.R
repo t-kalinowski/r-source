@@ -9,7 +9,7 @@
 ## - reduce results back on the main thread
 ##
 ## Usage:
-##   ./build-mtl-shlib/bin/R --vanilla -q -f bench/mtlapply_etl.R
+##   ./build-mtl/bin/R --vanilla -q -f bench/mtlapply_etl.R
 ##
 ## Controls:
 ## - MTL_ETL_N: number of rows, default 8000000

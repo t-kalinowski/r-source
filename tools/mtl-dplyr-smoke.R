@@ -2,7 +2,7 @@
 ## representative operations.
 ##
 ## Usage:
-##   build-mtl-shlib/bin/R --vanilla -q -f tools/mtl-dplyr-smoke.R --args \
+##   build-mtl/bin/R --vanilla -q -f tools/mtl-dplyr-smoke.R --args \
 ##     /Users/tomasz/Library/R/arm64/4.6/library [threads]
 ##
 ## This is intentionally base-R-only (no testthat).

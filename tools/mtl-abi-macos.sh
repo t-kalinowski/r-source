@@ -16,16 +16,16 @@
 # not require rewriting installed packages.
 #
 # Usage:
-#   tools/mtl-abi-macos.sh build-mtl-shlib
+#   tools/mtl-abi-macos.sh build-mtl
 #
 # Then you can run (example):
-#   build-mtl-shlib/bin/R --vanilla -q -e \
+#   build-mtl/bin/R --vanilla -q -e \
 #     '.libPaths(c("~/Library/R/arm64/4.6/library", .libPaths())); library(digest)'
 #
 
 set -eu
 
-build_dir="${1:-build-mtl-shlib}"
+build_dir="${1:-build-mtl}"
 
 if [ "$(uname -s)" != "Darwin" ]; then
   echo "skip: mtl-abi-macos is only needed on macOS"

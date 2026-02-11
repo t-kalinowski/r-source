@@ -10,7 +10,7 @@
 set -eu
 
 repo_root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
-build_dir="${1:-build-mtl-shlib}"
+build_dir="${1:-build-mtl}"
 framework_lib="${2:-/Library/Frameworks/R.framework/Versions/4.6-arm64/Resources/library}"
 mtl_r="${repo_root}/${build_dir}/bin/R"
 

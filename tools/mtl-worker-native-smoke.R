@@ -1,7 +1,7 @@
 ## Smoke test: exercise common package native-code paths from worker threads.
 ##
 ## Usage:
-##   build-mtl-shlib/bin/R --vanilla -q -f tools/mtl-worker-native-smoke.R --args \
+##   build-mtl/bin/R --vanilla -q -f tools/mtl-worker-native-smoke.R --args \
 ##     /Users/tomasz/Library/R/arm64/4.6/library [threads] [n]
 
 args <- commandArgs(trailingOnly = TRUE)

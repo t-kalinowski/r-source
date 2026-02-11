@@ -8,7 +8,7 @@
 ##
 ## Usage:
 ##   R --vanilla -q -f bench/readme_bench_run.R --args bench/results/system.rds
-##   ./build-mtl-shlib/bin/R --vanilla -q -f bench/readme_bench_run.R --args bench/results/mtl.rds
+##   ./build-mtl/bin/R --vanilla -q -f bench/readme_bench_run.R --args bench/results/mtl.rds
 ##
 ## Controls (env vars):
 ## - README_N: rows, default 2000000

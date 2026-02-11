@@ -260,9 +260,9 @@ AC_ARG_ENABLE([R-framework],
 ## framework-linked binary packages without post-link rewriting.
 AC_ARG_WITH([mtl-abi-libroot],
 [AS_HELP_STRING([--with-mtl-abi-libroot@<:@=DIR|auto|no@:>@],[macOS only: set install_name root for libR family
-                 @<:@auto@:>@])],
+                 @<:@no@:>@])],
 [R_MTL_ABI_LIBROOT="${withval}"],
-[R_MTL_ABI_LIBROOT=auto])
+[R_MTL_ABI_LIBROOT=no])
 ## Can only build frameworks on Darwin.
 if test "${want_R_framework}" != no; then
   case "${host_os}" in

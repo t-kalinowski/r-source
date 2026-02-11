@@ -14,7 +14,7 @@
 set -eu
 
 repo_root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
-build_dir="${1:-build-mtl-shlib}"
+build_dir="${1:-build-mtl}"
 sys_lib="${2:-/Users/tomasz/Library/R/arm64/4.6/library}"
 threads="${3:-4}"
 

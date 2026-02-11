@@ -1,7 +1,17 @@
 ## Load all package namespaces from one or more libraries.
 ##
+## For packages with native code, also exercise minimal runtime/native paths in
+## an isolated child R process:
+## - inspect loaded DLL registration tables
+## - resolve at least one registered symbol per routine table when available
+##
 ## Usage:
 ##   R --vanilla -q -f tools/mtl-load-library-smoke.R --args <lib1> [<lib2> ...]
+##
+## Optional env vars:
+## - MTL_LOAD_TIMEOUT_SEC: per-package child timeout (default 20)
+## - MTL_LOAD_EXERCISE_NATIVE: 1/0 toggle for compiled-package native checks
+##   (default 1)
 
 args <- commandArgs(trailingOnly = TRUE)
 if (length(args) < 1L) stop("usage: <lib1> [<lib2> ...]", call. = FALSE)
@@ -49,8 +59,13 @@ if (length(skip_pkg)) {
 
 fail_pkg <- character()
 fail_msg <- character()
+compiled_pkg <- character()
+compiled_no_registered <- character()
+compiled_resolved <- 0L
+compiled_dlls <- 0L
 pkg_timeout <- as.double(Sys.getenv("MTL_LOAD_TIMEOUT_SEC", "20"))
 if (!is.finite(pkg_timeout) || pkg_timeout <= 0) pkg_timeout <- 20
+exercise_native <- !identical(Sys.getenv("MTL_LOAD_EXERCISE_NATIVE", "1"), "0")
 r_bin <- file.path(R.home("bin"), "R")
 if (!file.exists(r_bin))
   stop("cannot find R binary for child namespace checks: ", r_bin, call. = FALSE)
@@ -65,9 +80,29 @@ load_in_child <- function(pkg, libs, timeout_sec) {
   lines <- c(
     sprintf("libs <- %s", as_literal(libs)),
     sprintf("pkg <- %s", as_literal(pkg)),
+    sprintf("exercise_native <- %s", if (exercise_native) "TRUE" else "FALSE"),
     ".libPaths(unique(c(libs, .libPaths())))",
-    "suppressPackageStartupMessages(loadNamespace(pkg))",
-    "cat('ok\\n')"
+    "suppressPackageStartupMessages(ns <- loadNamespace(pkg))",
+    "dlls <- tryCatch(getNamespaceInfo(ns, 'DLLs'), error = function(e) list())",
+    "n_dll <- length(dlls)",
+    "n_registered <- 0L",
+    "n_resolved <- 0L",
+    "if (exercise_native && n_dll > 0L) {",
+    "  for (dll in dlls) {",
+    "    rr <- getDLLRegisteredRoutines(dll)",
+    "    tables <- rr[c('.Call', '.External', '.C', '.Fortran')]",
+    "    for (tbl in tables) {",
+    "      if (is.null(tbl) || length(tbl) == 0L) next",
+    "      n_registered <- n_registered + length(tbl)",
+    "      nm <- names(tbl)[[1L]]",
+    "      if (!is.null(nm) && nzchar(nm)) {",
+    "        getNativeSymbolInfo(nm, PACKAGE = dll)",
+    "        n_resolved <- n_resolved + 1L",
+    "      }",
+    "    }",
+    "  }",
+    "}",
+    "cat(sprintf('ok dlls=%d registered=%d resolved=%d\\n', n_dll, n_registered, n_resolved))"
   )
   writeLines(lines, tf, useBytes = TRUE)
   out <- suppressWarnings(
@@ -89,6 +124,23 @@ for (pkg in pkgs) {
       msg <- paste0("timeout after ", pkg_timeout, "s: ", msg)
     fail_pkg <- c(fail_pkg, pkg)
     fail_msg <- c(fail_msg, msg)
+    next
+  }
+
+  out_line <- if (length(res$output)) tail(res$output, 1L) else ""
+  m <- regexec("^ok dlls=([0-9]+) registered=([0-9]+) resolved=([0-9]+)$", out_line)
+  g <- regmatches(out_line, m)[[1L]]
+  if (length(g) == 4L) {
+    n_dll <- as.integer(g[[2L]])
+    n_registered <- as.integer(g[[3L]])
+    n_resolved <- as.integer(g[[4L]])
+    if (is.finite(n_dll) && n_dll > 0L) {
+      compiled_pkg <- c(compiled_pkg, pkg)
+      compiled_dlls <- compiled_dlls + n_dll
+      compiled_resolved <- compiled_resolved + n_resolved
+      if (n_registered == 0L)
+        compiled_no_registered <- c(compiled_no_registered, pkg)
+    }
   }
 }
 
@@ -102,3 +154,9 @@ if (length(fail_pkg)) {
 }
 
 cat(sprintf("\nLoaded %d/%d packages successfully\n", length(pkgs), length(pkgs)))
+cat(sprintf("Compiled packages observed: %d (DLLs=%d, resolved symbols=%d)\n",
+            length(compiled_pkg), compiled_dlls, compiled_resolved))
+if (length(compiled_no_registered)) {
+  cat("Compiled packages with no registered routines:\n")
+  for (pkg in compiled_no_registered) cat("  - ", pkg, "\n", sep = "")
+}

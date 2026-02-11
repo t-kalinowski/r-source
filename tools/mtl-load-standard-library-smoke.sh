@@ -8,7 +8,7 @@
 set -eu
 
 repo_root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
-build_dir="${1:-build-mtl-shlib}"
+build_dir="${1:-build-mtl}"
 mtl_r="${repo_root}/${build_dir}/bin/R"
 lib_path="${2:-${repo_root}/${build_dir}/library}"
 

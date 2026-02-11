@@ -44,24 +44,25 @@ Work towards making this build of R usable for package code that calls `.Call()`
 ### Build/Run Loops
 - Maintain separate build directories for faster iteration (e.g. `build-mtl`, `build-mtl-clang`).
 - Rebuild incrementally with `make -j`.
+- Canonical configure entrypoint:
+  - `tools/mtl-configure.sh build-mtl -- --without-x --disable-java --without-recommended-packages ...`
 - On macOS, relinking often requires re-signing the `R` executable:
   - `codesign --force --sign - build-*/bin/exec/R`
 
 ### Current Default Build Target (for ABI-compatible package smoke tests)
 - Use a shared-lib build for binary-package ABI testing:
-  - `build-mtl-shlib` configured with `--enable-R-shlib`
+  - `build-mtl` configured with `--enable-R-shlib`
 - Repo default now enforces this via `config.site`:
   - `enable_R_shlib=yes`
   - so plain `../configure ...` in build dirs will build shared `libR` unless explicitly overridden with `--disable-R-shlib`.
-- On macOS, configure this build as framework-ABI-identical by default:
-  - `./configure --enable-R-shlib --with-mtl-abi-libroot=auto ...`
-  - Optional explicit root:
-    - `--with-mtl-abi-libroot=/Library/Frameworks/R.framework/Versions/4.6-arm64/Resources/lib`
+- On macOS, keep configure/build local first, then apply framework ABI install-name mapping post-build:
+  - `bash tools/mtl-abi-macos.sh build-mtl`
+  - (avoids linking the build-time `R` executable directly against the system framework `libR`)
 - Default package-library behavior in this tree:
   - `R_LIBS_USER` defaults to `'%S-mtl:%U'` so the build-local library is used first,
     then the normal user library fallback (`~/Library/R/<arch>/<x.y>/library` on macOS).
-- After each relink in `build-mtl-shlib`, re-apply install-name fixups:
-  - `bash tools/mtl-abi-macos.sh build-mtl-shlib`
+- After each relink in `build-mtl`, re-apply install-name fixups:
+  - `bash tools/mtl-abi-macos.sh build-mtl`
 - Reason: existing macOS binary packages are linked against framework install names; this avoids loading a second `libR.dylib`.
 
 ### Benchmarks and Regression Checks
@@ -78,33 +79,34 @@ Work towards making this build of R usable for package code that calls `.Call()`
 Use this as the standard iteration checklist after runtime changes.
 
 1. **Incremental rebuild**
-   - `make -C build-mtl-shlib -j8`
-   - `bash tools/mtl-abi-macos.sh build-mtl-shlib`
+   - `make -C build-mtl -j8`
+   - `bash tools/mtl-abi-macos.sh build-mtl`
 
 2. **Core threaded runtime smoke**
-   - `build-mtl-shlib/bin/R --vanilla -q -f tests/mtlapply.R`
+   - `build-mtl/bin/R --vanilla -q -f tests/mtlapply.R`
 
 3. **Binary package ABI smoke (minimal)**
-   - `build-mtl-shlib/bin/R --vanilla -q -f tools/mtl-abi-smoke.R --args /Users/tomasz/Library/R/arm64/4.6/library`
+   - `build-mtl/bin/R --vanilla -q -f tools/mtl-abi-smoke.R --args /Users/tomasz/Library/R/arm64/4.6/library`
    - Confirms existing compiled packages (e.g. `digest`, `Rcpp`) load in this build.
 
 4. **Binary package ABI smoke (real workflow via dplyr)**
-   - `tools/mtl-dplyr-smoke.sh build-mtl-shlib /Users/tomasz/Library/R/arm64/4.6/library 4`
+   - `tools/mtl-dplyr-smoke.sh build-mtl /Users/tomasz/Library/R/arm64/4.6/library 4`
    - Confirms package load and representative main-thread dplyr/tibble flows.
    - Optional worker-side dplyr check is opt-in:
-     - `MTL_DPLYR_WORKER=1 build-mtl-shlib/bin/R --vanilla -q -f tools/mtl-dplyr-smoke.R --args /Users/tomasz/Library/R/arm64/4.6/library 4`
+     - `MTL_DPLYR_WORKER=1 build-mtl/bin/R --vanilla -q -f tools/mtl-dplyr-smoke.R --args /Users/tomasz/Library/R/arm64/4.6/library 4`
 
 5. **Worker-native package smoke (`.Call`-heavy paths)**
-   - `build-mtl-shlib/bin/R --vanilla -q -f tools/mtl-worker-native-smoke.R --args /Users/tomasz/Library/R/arm64/4.6/library 4 64`
+   - `build-mtl/bin/R --vanilla -q -f tools/mtl-worker-native-smoke.R --args /Users/tomasz/Library/R/arm64/4.6/library 4 64`
    - Confirms package code that relies on native entry points behaves identically under `lapply()` and `mtlapply()` for representative workflows.
    - Also emits `.Internal(mtlrpcstats(FALSE))` for quick visibility into worker->main fallback pressure.
 
 6. **Standard-build package load sweep**
-   - `tools/mtl-load-standard-library-smoke.sh build-mtl-shlib build-mtl-shlib/library`
+   - `tools/mtl-load-standard-library-smoke.sh build-mtl build-mtl/library`
    - Confirms this build can load all package namespaces from the standard built package set (base/recommended in `build-*/library`).
+   - For compiled packages, also exercises minimal native runtime paths by inspecting registration tables and resolving representative registered symbols in isolated child processes.
 
 7. **Framework-binary package load sweep (macOS)**
-   - `tools/mtl-framework-library-smoke.sh build-mtl-shlib /Library/Frameworks/R.framework/Versions/4.6-arm64/Resources/library`
+   - `tools/mtl-framework-library-smoke.sh build-mtl /Library/Frameworks/R.framework/Versions/4.6-arm64/Resources/library`
    - Confirms in-tree MTL build can load prebuilt framework package binaries without loading a second `libR`.
 
 8. **Benchmark checkpoint (always include in flow)**
@@ -114,14 +116,14 @@ Use this as the standard iteration checklist after runtime changes.
      - R-devel:
        - `/usr/local/bin/R-devel --vanilla -q -f bench/readme_bench_run.R --args bench/results/rdevel.rds`
      - MTL build:
-       - `build-mtl-shlib/bin/R --vanilla -q -f bench/readme_bench_run.R --args bench/results/mtl.rds`
+       - `build-mtl/bin/R --vanilla -q -f bench/readme_bench_run.R --args bench/results/mtl.rds`
    - Optional richer benchmark object:
-     - `build-mtl-shlib/bin/R --vanilla -q -f bench/readme_bench_mark.R --args bench/results/bench_mark.rds`
+     - `build-mtl/bin/R --vanilla -q -f bench/readme_bench_mark.R --args bench/results/bench_mark.rds`
    - Refresh human-readable report:
-     - `build-mtl-shlib/bin/R --vanilla -q -e 'rmarkdown::render(\"README.Rmd\", output_format = \"github_document\")'`
+     - `build-mtl/bin/R --vanilla -q -e 'rmarkdown::render(\"README.Rmd\", output_format = \"github_document\")'`
 
 9. **Serial regression guard**
-   - `tools/mtl-perf-smoke.sh build-mtl-shlib /usr/local/bin/R-devel 1.10`
+   - `tools/mtl-perf-smoke.sh build-mtl /usr/local/bin/R-devel 1.10`
    - Fails if `lapply` median runtime in MTL build exceeds baseline by more than threshold (default `1.10`).
 
 10. **Interpretation rule**
@@ -129,7 +131,7 @@ Use this as the standard iteration checklist after runtime changes.
    - Then check scaling (`mtlapply(2/4/8)` vs `mtlapply(1)` and `lapply`).
    - Treat benchmark noise seriously: prefer larger workloads and repeated runs before concluding regressions.
    - Convenience wrapper for 3-9:
-     - `tools/mtl-validation-smoke.sh build-mtl-shlib /Users/tomasz/Library/R/arm64/4.6/library 4 build-mtl-shlib/library /usr/local/bin/R-devel 1.10`
+     - `tools/mtl-validation-smoke.sh build-mtl /Users/tomasz/Library/R/arm64/4.6/library 4 build-mtl/library /usr/local/bin/R-devel 1.10`
 
 ## Package Compatibility Goal (Current Concrete Target)
 - Short term target: this build should load and run already-built CRAN binaries (no package code changes required).

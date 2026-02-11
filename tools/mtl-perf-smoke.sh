@@ -10,7 +10,7 @@
 set -eu
 
 repo_root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
-build_dir="${1:-build-mtl-shlib}"
+build_dir="${1:-build-mtl}"
 baseline_r="${2:-/usr/local/bin/R-devel}"
 serial_max_ratio="${3:-1.10}"
 mtl_r="${repo_root}/${build_dir}/bin/R"

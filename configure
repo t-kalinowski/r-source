@@ -4505,7 +4505,7 @@ if test ${with_mtl_abi_libroot+y}
 then :
   withval=$with_mtl_abi_libroot; R_MTL_ABI_LIBROOT="${withval}"
 else case e in #(
-  e) R_MTL_ABI_LIBROOT=auto ;;
+  e) R_MTL_ABI_LIBROOT=no ;;
 esac
 fi
 
