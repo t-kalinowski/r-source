@@ -1078,6 +1078,7 @@ enable_R_shlib
 enable_R_static_lib
 with_C23
 with_CXX20
+with_mtl_abi_libroot
 enable_BLAS_shlib
 enable_maintainer_mode
 enable_strict_barrier
@@ -4494,6 +4495,17 @@ then :
   enableval=$enable_R_framework; want_R_framework="${enableval}"
 else case e in #(
   e) want_R_framework=no ;;
+esac
+fi
+
+## Allow overriding the macOS ABI install-name root used by
+## libR/libRblas/libRlapack.
+# Check whether --with-mtl-abi-libroot was given.
+if test ${with_mtl_abi_libroot+y}
+then :
+  withval=$with_mtl_abi_libroot; R_MTL_ABI_LIBROOT="${withval}"
+else case e in #(
+  e) R_MTL_ABI_LIBROOT=auto ;;
 esac
 fi
 
@@ -30312,10 +30324,29 @@ case "${host_os}" in
     DYLIB_EXT=".dylib"
     dylib_ldflags="${darwin_dylib_ldflags}"
     MAJR_VERSION=`echo "${PACKAGE_VERSION}" | sed  -e "s/[\.][1-9]$/.0/"`
-    LIBR_LDFLAGS="-install_name libR.dylib -compatibility_version ${MAJR_VERSION}  -current_version ${PACKAGE_VERSION}  -headerpad_max_install_names"
-    RLAPACK_LDFLAGS="-install_name libRlapack.dylib -compatibility_version ${MAJR_VERSION} -current_version ${PACKAGE_VERSION}  -headerpad_max_install_names"
+    if test "x${R_MTL_ABI_LIBROOT}" = xauto; then
+      mtl_fw_base=`echo "${PACKAGE_VERSION}" | sed -e "s/[\.][0-9]$//"`
+      mtl_fw_arch=`uname -m 2>/dev/null || echo ""`
+      if test -n "${mtl_fw_arch}"; then
+        mtl_fw_version="${mtl_fw_base}-${mtl_fw_arch}"
+      else
+        mtl_fw_version="${mtl_fw_base}"
+      fi
+      R_MTL_ABI_LIBROOT="/Library/Frameworks/R.framework/Versions/${mtl_fw_version}/Resources/lib"
+    fi
+    if test "x${R_MTL_ABI_LIBROOT}" = xno || test -z "${R_MTL_ABI_LIBROOT}"; then
+      libr_install_name="libR.dylib"
+      rlapack_install_name="libRlapack.dylib"
+      rblas_install_name="libRblas.dylib"
+    else
+      libr_install_name="${R_MTL_ABI_LIBROOT}/libR.dylib"
+      rlapack_install_name="${R_MTL_ABI_LIBROOT}/libRlapack.dylib"
+      rblas_install_name="${R_MTL_ABI_LIBROOT}/libRblas.dylib"
+    fi
+    LIBR_LDFLAGS="-install_name ${libr_install_name} -compatibility_version ${MAJR_VERSION}  -current_version ${PACKAGE_VERSION}  -headerpad_max_install_names"
+    RLAPACK_LDFLAGS="-install_name ${rlapack_install_name} -compatibility_version ${MAJR_VERSION} -current_version ${PACKAGE_VERSION}  -headerpad_max_install_names"
     ## don't use version in libRblas so we can replace it with any BLAS implementation
-    RBLAS_LDFLAGS="-install_name libRblas.dylib -headerpad_max_install_names"
+    RBLAS_LDFLAGS="-install_name ${rblas_install_name} -headerpad_max_install_names"
     ;;
   openbsd*)
     if test -z "${R_DYLIB_VERSION}"; then
@@ -64206,4 +64237,3 @@ fi
 ### mode: outline-minor ***
 ### outline-regexp: "### [*]+" ***
 ### End: ***
-

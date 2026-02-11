@@ -254,6 +254,15 @@ AC_ARG_ENABLE([R-framework],
                  its installation prefix @<:@no, /Library/Frameworks@:>@])],
 [want_R_framework="${enableval}"],
 [want_R_framework=no])
+
+## Allow overriding the macOS ABI install-name root used by libR/libRblas/libRlapack.
+## This makes in-tree --enable-R-shlib builds act as drop-in replacements for
+## framework-linked binary packages without post-link rewriting.
+AC_ARG_WITH([mtl-abi-libroot],
+[AS_HELP_STRING([--with-mtl-abi-libroot@<:@=DIR|auto|no@:>@],[macOS only: set install_name root for libR family
+                 @<:@auto@:>@])],
+[R_MTL_ABI_LIBROOT="${withval}"],
+[R_MTL_ABI_LIBROOT=auto])
 ## Can only build frameworks on Darwin.
 if test "${want_R_framework}" != no; then
   case "${host_os}" in
@@ -1873,10 +1882,29 @@ dnl     ;;
     DYLIB_EXT=".dylib"
     dylib_ldflags="${darwin_dylib_ldflags}"
     MAJR_VERSION=`echo "${PACKAGE_VERSION}" | sed  -e "s/[[\.]][[1-9]]$/.0/"` 
-    LIBR_LDFLAGS="-install_name libR.dylib -compatibility_version ${MAJR_VERSION}  -current_version ${PACKAGE_VERSION}  -headerpad_max_install_names"
-    RLAPACK_LDFLAGS="-install_name libRlapack.dylib -compatibility_version ${MAJR_VERSION} -current_version ${PACKAGE_VERSION}  -headerpad_max_install_names"
+    if test "x${R_MTL_ABI_LIBROOT}" = xauto; then
+      mtl_fw_base=`echo "${PACKAGE_VERSION}" | sed -e "s/[[\.]][[0-9]]$//"`
+      mtl_fw_arch=`uname -m 2>/dev/null || echo ""`
+      if test -n "${mtl_fw_arch}"; then
+        mtl_fw_version="${mtl_fw_base}-${mtl_fw_arch}"
+      else
+        mtl_fw_version="${mtl_fw_base}"
+      fi
+      R_MTL_ABI_LIBROOT="/Library/Frameworks/R.framework/Versions/${mtl_fw_version}/Resources/lib"
+    fi
+    if test "x${R_MTL_ABI_LIBROOT}" = xno || test -z "${R_MTL_ABI_LIBROOT}"; then
+      libr_install_name="libR.dylib"
+      rlapack_install_name="libRlapack.dylib"
+      rblas_install_name="libRblas.dylib"
+    else
+      libr_install_name="${R_MTL_ABI_LIBROOT}/libR.dylib"
+      rlapack_install_name="${R_MTL_ABI_LIBROOT}/libRlapack.dylib"
+      rblas_install_name="${R_MTL_ABI_LIBROOT}/libRblas.dylib"
+    fi
+    LIBR_LDFLAGS="-install_name ${libr_install_name} -compatibility_version ${MAJR_VERSION}  -current_version ${PACKAGE_VERSION}  -headerpad_max_install_names"
+    RLAPACK_LDFLAGS="-install_name ${rlapack_install_name} -compatibility_version ${MAJR_VERSION} -current_version ${PACKAGE_VERSION}  -headerpad_max_install_names"
     ## don't use version in libRblas so we can replace it with any BLAS implementation
-    RBLAS_LDFLAGS="-install_name libRblas.dylib -headerpad_max_install_names"
+    RBLAS_LDFLAGS="-install_name ${rblas_install_name} -headerpad_max_install_names"
     ;;
 dnl   hpux*)
 dnl     ## Needs to avoid embedding a relative path ../../../bin.
@@ -1941,6 +1969,7 @@ AC_SUBST(LIBR_LDFLAGS)
 AC_SUBST(RBLAS_LDFLAGS)
 AC_SUBST(RLAPACK_LDFLAGS)
 AC_SUBST(LAPACK_LDFLAGS)
+AC_SUBST(R_MTL_ABI_LIBROOT)
 AC_SUBST(FW_VERSION)
 AC_SUBST(STATICR1)
 AC_SUBST(STATICR2)

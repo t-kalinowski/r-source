@@ -42,12 +42,36 @@ if [ ! -f "${build_dir}/lib/libR.dylib" ]; then
   exit 1
 fi
 
-fw_ver="${R_MTL_FRAMEWORK_VER:-4.6-arm64}"
-abi_lib_root="/Library/Frameworks/R.framework/Versions/${fw_ver}/Resources/lib"
+current_id() {
+  otool -D "$1" 2>/dev/null | sed -n '2p'
+}
 
-install_name_tool -id "${abi_lib_root}/libR.dylib" "${build_dir}/lib/libR.dylib"
-install_name_tool -id "${abi_lib_root}/libRblas.dylib" "${build_dir}/lib/libRblas.dylib"
-install_name_tool -id "${abi_lib_root}/libRlapack.dylib" "${build_dir}/lib/libRlapack.dylib"
+current_r_id="$(current_id "${build_dir}/lib/libR.dylib")"
+if [ -n "${R_MTL_ABI_LIBROOT:-}" ]; then
+  abi_lib_root="${R_MTL_ABI_LIBROOT}"
+elif printf "%s" "${current_r_id}" | grep -q '^/Library/Frameworks/R\.framework/Versions/.*/Resources/lib/libR\.dylib$'; then
+  abi_lib_root="$(dirname "${current_r_id}")"
+else
+  fw_ver="${R_MTL_FRAMEWORK_VER:-4.6-arm64}"
+  abi_lib_root="/Library/Frameworks/R.framework/Versions/${fw_ver}/Resources/lib"
+fi
+id_r="${abi_lib_root}/libR.dylib"
+id_blas="${abi_lib_root}/libRblas.dylib"
+id_lapack="${abi_lib_root}/libRlapack.dylib"
+
+if [ "$(current_id "${build_dir}/lib/libR.dylib")" = "${id_r}" ] &&
+   [ "$(current_id "${build_dir}/lib/libRblas.dylib")" = "${id_blas}" ] &&
+   [ "$(current_id "${build_dir}/lib/libRlapack.dylib")" = "${id_lapack}" ]; then
+  echo "ok: install-names already mapped to framework ABI root"
+  echo "  ${build_dir}/lib/libR.dylib -> ${id_r}"
+  echo "  ${build_dir}/lib/libRblas.dylib -> ${id_blas}"
+  echo "  ${build_dir}/lib/libRlapack.dylib -> ${id_lapack}"
+  exit 0
+fi
+
+install_name_tool -id "${id_r}" "${build_dir}/lib/libR.dylib"
+install_name_tool -id "${id_blas}" "${build_dir}/lib/libRblas.dylib"
+install_name_tool -id "${id_lapack}" "${build_dir}/lib/libRlapack.dylib"
 
 # Keep macOS code signing happy after install_name edits.
 if [ -x "${build_dir}/bin/exec/R" ]; then
@@ -59,6 +83,6 @@ if [ -x "${build_dir}/bin/exec/R" ]; then
 fi
 
 echo "ok: set install-names for:"
-echo "  ${build_dir}/lib/libR.dylib -> ${abi_lib_root}/libR.dylib"
-echo "  ${build_dir}/lib/libRblas.dylib -> ${abi_lib_root}/libRblas.dylib"
-echo "  ${build_dir}/lib/libRlapack.dylib -> ${abi_lib_root}/libRlapack.dylib"
+echo "  ${build_dir}/lib/libR.dylib -> ${id_r}"
+echo "  ${build_dir}/lib/libRblas.dylib -> ${id_blas}"
+echo "  ${build_dir}/lib/libRlapack.dylib -> ${id_lapack}"
