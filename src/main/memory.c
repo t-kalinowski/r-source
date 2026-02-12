@@ -3008,6 +3008,11 @@ attribute_hidden SEXP do_gctorture2(SEXP call, SEXP op, SEXP args, SEXP rho)
     return ScalarInteger(old);
 }
 
+attribute_hidden int R_gc_torture_is_active(void)
+{
+    return gc_force_wait > 0;
+}
+
 /* initialize gctorture settings from environment variables */
 static void init_gctorture(void)
 {

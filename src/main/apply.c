@@ -1162,6 +1162,12 @@ attribute_hidden SEXP do_mtlapply(SEXP call, SEXP op, SEXP args, SEXP rho)
 	    if (nthreads > n) nthreads = (int) n;
 	    int n_bg_threads = nthreads;
 
+	    /* gc.torture exercises collector paths that are not currently safe to
+	       run concurrently across worker interpreters. Keep semantics by running
+	       serially in this mode. */
+	    if (n_bg_threads > 1 && R_gc_torture_is_active())
+		n_bg_threads = 0;
+
 	    if (in_worker)
 		return mtl_serial_apply_no_pool(XX, FUN, dots, names, rho);
 
