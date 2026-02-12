@@ -23,6 +23,8 @@ cd "${repo_root}"
 
 "${repo_root}/${build_dir}/bin/R" --vanilla -q -e "cat('startup ok\\n')"
 
+"${repo_root}/tools/mtl-core-runtime-smoke.sh" "${build_dir}" "3"
+
 "${repo_root}/tools/mtl-package-smoke.sh" "${build_dir}" "${sys_lib}" "${threads}" "${standard_lib}"
 "${repo_root}/tools/mtl-perf-smoke.sh" "${build_dir}" "${baseline_r}" "${serial_max_ratio}"
 if [ "$(uname -s)" = "Darwin" ] && [ -d "${framework_lib}" ]; then
