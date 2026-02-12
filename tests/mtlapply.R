@@ -133,6 +133,26 @@ stopifnot(pool_before[["threads.current"]] >= 1L)
 stopifnot(identical(pool_after[["threads.current"]], pool_before[["threads.current"]]))
 stopifnot(identical(pool_after[["threads.created"]], pool_before[["threads.created"]]))
 
+# Large allocation-heavy jobs are chunked internally; repeated runs should remain
+# stable and return complete results.
+old_chunk <- getOption("mtlapply.chunk_size")
+on.exit(options(mtlapply.chunk_size = old_chunk), add = TRUE)
+options(mtlapply.chunk_size = 50000L)
+for (k in 1:2) {
+  big <- mtlapply_with_threads(4L, 1:150000, function(i) i + 1L)
+  stopifnot(length(big) == 150000L)
+  stopifnot(identical(big[[1]], 2L))
+  stopifnot(identical(big[[150000]], 150001L))
+}
+
+# Invalid chunk-size options should fail fast.
+err_chunk <- try({
+  options(mtlapply.chunk_size = 0L)
+  mtlapply_with_threads(2L, 1:3, identity)
+}, silent = TRUE)
+stopifnot(inherits(err_chunk, "try-error"))
+options(mtlapply.chunk_size = old_chunk)
+
 # Nested workload should speed up with more worker threads.
 ncores <- parallel::detectCores(logical = FALSE)
 if (!is.na(ncores) && ncores >= 2L) {

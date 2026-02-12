@@ -3235,8 +3235,6 @@ attribute_hidden void R_InitInterpreterHeap(R_InterpreterState *st)
 
     h->isWorker = st->isMTLWorker ? 1 : 0;
 
-    /* Default worker heaps are smaller; they can still grow by allocating pages,
-       but will run GC sooner based on these thresholds. */
     if (h->isWorker) {
 	h->NSize = R_NSize / 8;
 	if (h->NSize < 10000) h->NSize = 10000;

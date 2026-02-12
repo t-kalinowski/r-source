@@ -178,6 +178,7 @@ static pthread_t mtl_main_thread;
 static mtl_pool_t mtl_pool;
 static atomic_int mtl_pool_threads_created = 0;
 static SEXP mtl_dotOptionsSym = NULL;
+#define MTL_WORK_CHUNK 4L
 
 			static void mtl_interp_init_from_main(R_InterpreterState *st)
 			{
@@ -582,10 +583,18 @@ static void mtl_job_release(mtl_job_t *job)
 		for (;;) {
 		    if (atomic_load_explicit(&job->cancel_requested, memory_order_relaxed))
 			break;
-		    long idx = atomic_fetch_add_explicit(&job->next, 1, memory_order_relaxed);
-		    if (idx < 0 || (R_xlen_t) idx >= job->n)
-		break;
-	    R_xlen_t i = (R_xlen_t) idx;
+		    long start = atomic_fetch_add_explicit(&job->next, MTL_WORK_CHUNK,
+							   memory_order_relaxed);
+		    if (start < 0 || (R_xlen_t) start >= job->n)
+			break;
+		    long end = start + MTL_WORK_CHUNK;
+		    if ((R_xlen_t) end > job->n)
+			end = (long) job->n;
+
+		    for (long idx = start; idx < end; idx++) {
+			R_xlen_t i = (R_xlen_t) idx;
+			if (atomic_load_explicit(&job->cancel_requested, memory_order_relaxed))
+			    break;
 
 		    /* Reset per-interpreter stacks/slots for this evaluation. */
 		    mtl_interp_reset_for_eval(&w->interp, job);
@@ -689,6 +698,9 @@ static void mtl_job_release(mtl_job_t *job)
 		    job->results[i] = val;
 		    UNPROTECT(1);
 		    atomic_fetch_sub_explicit(&job->active_eval_workers, 1, memory_order_relaxed);
+		    }
+		    if (atomic_load_explicit(&job->cancel_requested, memory_order_relaxed))
+			break;
 		}
 
 			UNPROTECT(3); /* tail, argcell, fcall */
@@ -799,10 +811,18 @@ static void mtl_main_eval_loop(mtl_job_t *job, SEXP env, SEXP ans)
 		for (;;) {
 		    if (atomic_load_explicit(&job->cancel_requested, memory_order_relaxed))
 			break;
-		long idx = atomic_fetch_add_explicit(&job->next, 1, memory_order_relaxed);
-		if (idx < 0 || (R_xlen_t) idx >= job->n)
-		    break;
-		R_xlen_t i = (R_xlen_t) idx;
+		    long start = atomic_fetch_add_explicit(&job->next, MTL_WORK_CHUNK,
+							   memory_order_relaxed);
+		    if (start < 0 || (R_xlen_t) start >= job->n)
+			break;
+		    long end = start + MTL_WORK_CHUNK;
+		    if ((R_xlen_t) end > job->n)
+			end = (long) job->n;
+
+		    for (long idx = start; idx < end; idx++) {
+			R_xlen_t i = (R_xlen_t) idx;
+			if (atomic_load_explicit(&job->cancel_requested, memory_order_relaxed))
+			    break;
 
 		/* Set the function's first argument for this iteration. */
 		if (TYPEOF(job->XX) == VECSXP || TYPEOF(job->XX) == EXPRSXP) {
@@ -868,10 +888,20 @@ static void mtl_main_eval_loop(mtl_job_t *job, SEXP env, SEXP ans)
 		/* Root via the answer list (scanned by GC); no PreserveObject here. */
 		SET_VECTOR_ELT(ans, i, val);
 		UNPROTECT(1);
+		    }
+		    if (atomic_load_explicit(&job->cancel_requested, memory_order_relaxed))
+			break;
 	    }
 
 	    UNPROTECT(3); /* tail, argcell, fcall */
 	}
+
+static SEXP mtl_box_vector_args(SEXP XX)
+{
+    if (TYPEOF(XX) == VECSXP || TYPEOF(XX) == EXPRSXP)
+	return XX;
+    return coerceVector(XX, VECSXP);
+}
 
 static SEXP mtl_serial_apply_no_pool(SEXP XX, SEXP FUN, SEXP dots, SEXP names, SEXP eval_env)
 {
@@ -1148,6 +1178,7 @@ attribute_hidden SEXP do_mtlapply(SEXP call, SEXP op, SEXP args, SEXP rho)
 	error(_("invalid length"));
 
     SEXP names = getAttrib(XX, R_NamesSymbol);
+    SEXP XX_work = XX;
 
     if (!is_main && !in_worker)
 	error("mtlapply() may only be called from the main thread");
@@ -1168,8 +1199,17 @@ attribute_hidden SEXP do_mtlapply(SEXP call, SEXP op, SEXP args, SEXP rho)
 	    if (n_bg_threads > 1 && R_gc_torture_is_active())
 		n_bg_threads = 0;
 
-	    if (in_worker)
-		return mtl_serial_apply_no_pool(XX, FUN, dots, names, rho);
+	    int nprotect = 0;
+	    if (TYPEOF(XX) != VECSXP && TYPEOF(XX) != EXPRSXP) {
+		XX_work = PROTECT(mtl_box_vector_args(XX)); nprotect++;
+	    } else {
+		PROTECT(XX_work); nprotect++;
+	    }
+	    if (in_worker) {
+		SEXP out = mtl_serial_apply_no_pool(XX_work, FUN, dots, names, rho);
+		UNPROTECT(nprotect);
+		return out;
+	    }
 
 	    if (n_bg_threads > 0) {
 		mtl_pool_init_if_needed();
@@ -1177,8 +1217,6 @@ attribute_hidden SEXP do_mtlapply(SEXP call, SEXP op, SEXP args, SEXP rho)
 	    }
 
 		    /* Convert DOTS list to a pairlist once; workers duplicate in their heaps. */
-		    int nprotect = 0;
-		    PROTECT(XX); nprotect++;
 		    PROTECT(FUN); nprotect++;
 		    PROTECT(dots); nprotect++;
 		    SEXP tail0 = PROTECT(VectorToPairList(dots)); nprotect++;
@@ -1190,7 +1228,7 @@ attribute_hidden SEXP do_mtlapply(SEXP call, SEXP op, SEXP args, SEXP rho)
 		    mtl_job_t *job = (mtl_job_t *) calloc(1, sizeof(mtl_job_t));
 		    if (job == NULL)
 			error(_("cannot allocate memory"));
-		    job->XX = XX;
+		    job->XX = XX_work;
 		    job->FUN = FUN;
 		    job->eval_env = rho;
 		    job->tail0 = tail0;
