@@ -6,6 +6,17 @@ old_threads <- getOption("mtlapply.threads")
 on.exit(options(mtlapply.threads = old_threads), add = TRUE)
 options(mtlapply.threads = 4L)
 
+## Busy-loop helper to exercise worker CPU (not sleep/wait).
+burn_cpu <- function(iterations = 1e6L) {
+    i <- 1L
+    acc <- 0L
+    while (i <= iterations) {
+        acc <- acc + (i %% 97L)
+        i <- i + 1L
+    }
+    acc
+}
+
 ## Basic wait-any semantics and value propagation.
 futs <- lapply(1:40, function(i) background(i + 100L))
 stopifnot(all(vapply(futs, function(f) identical(f$value, quote(.mt_unresolved)), logical(1))))
@@ -23,9 +34,9 @@ while (length(pending)) {
 stopifnot(identical(sort(vals), 101:140))
 
 ## timeout=0 should return NULL when no future has completed yet.
-f_slow <- background({ Sys.sleep(0.2); 42L })
+stopifnot(inherits(try(wait(list(), timeout = -1), silent = TRUE), "try-error"))
+f_slow <- background({ burn_cpu(1e6L); 42L })
 stopifnot(is.null(wait(list(f_slow), timeout = 0)))
-stopifnot(inherits(try(wait(list(f_slow), timeout = -1), silent = TRUE), "try-error"))
 stopifnot(identical(wait(f_slow)$value, 42L))
 
 ## Worker error should be surfaced in the returned future value.
@@ -35,7 +46,7 @@ stopifnot(inherits(got_err$value, "error"))
 stopifnot(grepl("boom from background", conditionMessage(got_err$value), fixed = TRUE))
 
 ## Cancel should mark pending/running jobs as cancelled.
-f_cancel <- background({ Sys.sleep(0.2); 99L })
+f_cancel <- background({ burn_cpu(3e6L); 99L })
 stopifnot(isTRUE(cancel(f_cancel)))
 got_cancel <- wait(f_cancel)
 stopifnot(isTRUE(attr(got_cancel, "cancelled")))

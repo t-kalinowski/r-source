@@ -13,6 +13,8 @@
 ## - MTLBENCH_SIZE: size knob for some workloads, default 2000
 ## - MTLBENCH_LOOPN: iterations for the pure-R loop workload, default 200000
 ## - MTLBENCH_STRITER: iterations for the string/symbol interning stress workload, default 5000
+## - MTLBENCH_IO_FILES: number of files for I/O benchmark, default NTASKS
+## - MTLBENCH_IO_SIZE_KB: per-file size in KiB for I/O benchmark, default 2048
 ## - MTLBENCH_CALL: "1" to include an extra .Call() benchmark (needs a compiler)
 
 stopifnot(exists("mtlapply"))
@@ -34,6 +36,8 @@ ntasks <- parse_int(Sys.getenv("MTLBENCH_NTASKS"), 16L)
 size <- parse_int(Sys.getenv("MTLBENCH_SIZE"), 2000L)
 loop_n <- parse_int(Sys.getenv("MTLBENCH_LOOPN"), 200000L)
 str_iter <- parse_int(Sys.getenv("MTLBENCH_STRITER"), 5000L)
+io_files <- parse_int(Sys.getenv("MTLBENCH_IO_FILES"), ntasks)
+io_size_kb <- parse_int(Sys.getenv("MTLBENCH_IO_SIZE_KB"), 2048L)
 include_call <- identical(Sys.getenv("MTLBENCH_CALL"), "1")
 nested_outer <- parse_int(Sys.getenv("MTLBENCH_NEST_OUTER"), 64L)
 nested_mid <- parse_int(Sys.getenv("MTLBENCH_NEST_MID"), 8L)
@@ -43,6 +47,7 @@ nested_work_reps <- parse_int(Sys.getenv("MTLBENCH_NEST_WORK_REPS"), 8L)
 
 stopifnot(all(is.finite(threads)))
 stopifnot(iters >= 1L, warmup >= 0L, ntasks >= 1L, size >= 1L, loop_n >= 1L, str_iter >= 1L)
+stopifnot(io_files >= 1L, io_size_kb >= 1L)
 stopifnot(nested_outer >= 1L, nested_mid >= 1L, nested_inner >= 1L)
 stopifnot(nested_work_n >= 1L, nested_work_reps >= 1L)
 
@@ -111,12 +116,39 @@ cat("mtlbench settings:\n")
 cat("threads=", paste(threads, collapse = ","), "\n", sep = "")
 cat("iters=", iters, " warmup=", warmup,
     " ntasks=", ntasks, " size=", size,
-    " loop_n=", loop_n, " str_iter=", str_iter, "\n", sep = "")
+    " loop_n=", loop_n, " str_iter=", str_iter,
+    " io_files=", io_files, " io_size_kb=", io_size_kb, "\n", sep = "")
 cat("nested_outer=", nested_outer,
     " nested_mid=", nested_mid,
     " nested_inner=", nested_inner,
     " nested_work_n=", nested_work_n,
     " nested_work_reps=", nested_work_reps, "\n", sep = "")
+
+mk_io_fixture <- function(nfiles, size_kb) {
+    d <- tempfile("mtlbench-io-")
+    dir.create(d)
+    paths <- file.path(d, sprintf("io-%05d.bin", seq_len(nfiles)))
+    need <- as.integer(size_kb) * 1024L
+    payload <- charToRaw(paste(rep("mtlbench-io-0123456789abcdef", 128L), collapse = ""))
+    payload_n <- length(payload)
+    for (p in paths) {
+        con <- file(p, "wb")
+        remaining <- need
+        while (remaining > 0L) {
+            n <- min(remaining, payload_n)
+            if (n == payload_n) {
+                writeBin(payload, con, useBytes = TRUE)
+            } else {
+                writeBin(payload[seq_len(n)], con, useBytes = TRUE)
+            }
+            remaining <- remaining - n
+        }
+        close(con)
+    }
+    list(dir = d, paths = paths)
+}
+
+io_fixture <- mk_io_fixture(io_files, io_size_kb)
 
 cases <- list(
     list(
@@ -147,30 +179,17 @@ cases <- list(
         }
     ),
     list(
-        name = "pure R loop (interpreter bound, no big alloc)",
-        x = rep.int(loop_n, ntasks),
-        fun = function(n) {
-            # Avoid allocating a big sequence by using a while loop.
-            i <- 1L
-            acc <- 0L
-            while (i <= n) {
-                acc <- acc + (i %% 97L)
-                i <- i + 1L
-            }
-            acc
+        name = "filesystem I/O (md5sum over independent files)",
+        x = io_fixture$paths,
+        fun = function(path) {
+            unname(tools::md5sum(path))
         }
     ),
     list(
-        name = "string + symbol interning stress (paste0/as.name loop)",
-        x = seq_len(ntasks),
-        fun = function(i) {
-            s <- ""
-            sym <- NULL
-            for (j in seq_len(str_iter)) {
-                s <- paste0("sym", i, "-", j)
-                sym <- as.name(s)
-            }
-            list(s = s, sym = sym)
+        name = "pure R loop (interpreter bound, no big alloc)",
+        x = rep.int(loop_n, ntasks),
+        fun = function(n) {
+            sum(seq_len(n) %% 97L)
         }
     )
 )
@@ -214,6 +233,64 @@ if (include_call) {
 for (c in cases) {
     bench_case(c$name, c$x, c$fun, threads, iters, warmup)
 }
+
+bench_background_io <- function(paths, threads, iters, warmup) {
+    cat("\n== background()/wait() queue benchmark (filesystem I/O) ==\n")
+
+    io_fun <- function(path) unname(tools::md5sum(path))
+
+    run_background_wait <- function(x) {
+        futs <- lapply(x, function(path) background(io_fun(path)))
+        pending <- futs
+        idx_map <- seq_along(futs)
+        out <- vector("list", length(futs))
+        while (length(pending)) {
+            got <- wait(pending)
+            k <- attr(got, "index")
+            out[[idx_map[[k]]]] <- got$value
+            pending <- pending[-k]
+            idx_map <- idx_map[-k]
+        }
+        out
+    }
+
+    x_check <- paths[seq_len(min(8L, length(paths)))]
+    ref <- lapply(x_check, io_fun)
+    cur <- with_mtl_threads(max(threads), run_background_wait(x_check))
+    stopifnot(identical(ref, cur))
+
+    run_method <- function(label, expr) {
+        invisible(gc())
+        exprq <- substitute(expr)
+        if (warmup > 0L) {
+            for (i in seq_len(warmup)) invisible(eval(exprq, parent.frame()))
+        }
+        ts <- numeric(iters)
+        for (i in seq_len(iters)) ts[[i]] <- time_elapsed(exprq, parent.frame())
+        invisible(gc())
+        s <- summarize_times(ts)
+        cat(sprintf("%-18s  median=%8.3f  mean=%8.3f  min=%8.3f  max=%8.3f\n",
+                    label, s[["median"]], s[["mean"]], s[["min"]], s[["max"]]))
+        s
+    }
+
+    base <- run_method("lapply", lapply(paths, io_fun))
+    for (t in threads) {
+        s_mtl <- run_method(sprintf("mtlapply(%d)", t),
+                            with_mtl_threads(t, mtlapply(paths, io_fun)))
+        sp_mtl <- if (base[["median"]] > 0 && s_mtl[["median"]] > 0) base[["median"]] / s_mtl[["median"]] else NA_real_
+        cat(sprintf("%-18s  speedup=%8s (vs lapply median)\n",
+                    "", if (is.na(sp_mtl)) "NA" else sprintf("%.2fx", sp_mtl)))
+
+        s_bg <- run_method(sprintf("bg+wait(%d)", t),
+                           with_mtl_threads(t, run_background_wait(paths)))
+        sp_bg <- if (base[["median"]] > 0 && s_bg[["median"]] > 0) base[["median"]] / s_bg[["median"]] else NA_real_
+        cat(sprintf("%-18s  speedup=%8s (vs lapply median)\n",
+                    "", if (is.na(sp_bg)) "NA" else sprintf("%.2fx", sp_bg)))
+    }
+}
+
+bench_background_io(io_fixture$paths, threads, iters, warmup)
 
 bench_nested_case <- function(threads, iters, warmup, outer_n, mid_n, inner_n, work_n, work_reps) {
     cat("\n== nested 3-level apply: lapply/lapply/lapply vs mtlapply/mtlapply/mtlapply ==\n")
@@ -281,5 +358,7 @@ bench_nested_case <- function(threads, iters, warmup, outer_n, mid_n, inner_n, w
 bench_nested_case(threads, iters, warmup,
                   nested_outer, nested_mid, nested_inner,
                   nested_work_n, nested_work_reps)
+
+unlink(io_fixture$dir, recursive = TRUE, force = TRUE)
 
 cat("\nDone.\n")
