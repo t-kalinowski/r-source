@@ -28,6 +28,10 @@ if (!exists("mtlapply")) {
   quit(status = 0L)
 }
 
+old_threads <- getOption("mtlapply.threads")
+on.exit(options(mtlapply.threads = old_threads), add = TRUE)
+options(mtlapply.threads = threads)
+
 f <- function(i) {
   payload <- paste0("payload-", i)
   h <- digest(payload, algo = "xxhash64", serialize = FALSE)
@@ -46,12 +50,12 @@ f <- function(i) {
 
 ## Compare serial vs worker results.
 ref <- lapply(seq_len(n), f)
-got <- mtlapply(seq_len(n), f, threads = threads)
+got <- mtlapply(seq_len(n), f)
 stopifnot(isTRUE(all.equal(ref, got, tolerance = 0)))
 
 ## Run a short stress loop to exercise repeated worker dispatch of package code.
 for (k in 1:3) {
-  got2 <- mtlapply(seq_len(n), f, threads = threads)
+  got2 <- mtlapply(seq_len(n), f)
   stopifnot(identical(got, got2))
 }
 

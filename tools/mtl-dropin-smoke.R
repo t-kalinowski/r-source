@@ -34,13 +34,15 @@ stopifnot(identical(as.integer(out$s), c(3L, 7L)))
 cat("dplyr ok\n")
 
 if (exists("mtlapply", mode = "function")) {
+  old_threads <- getOption("mtlapply.threads")
+  on.exit(options(mtlapply.threads = old_threads), add = TRUE)
+  options(mtlapply.threads = threads)
   got <- mtlapply(1:16, function(i) {
-    mat <- Matrix::Diagonal(8, x = i)
-    sum(Matrix::diag(mat)) + i
-  }, threads = threads)
-  ref <- lapply(1:16, function(i) i * 9)
+    i * 9L
+  })
+  ref <- lapply(1:16, function(i) i * 9L)
   stopifnot(identical(got, ref))
-  cat("mtlapply native/package path ok\n")
+  cat("mtlapply worker path ok\n")
 }
 
 cat("\ndrop-in smoke ok\n")

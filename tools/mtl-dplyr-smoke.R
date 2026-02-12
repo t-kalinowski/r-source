@@ -53,6 +53,10 @@ stopifnot(identical(as.integer(j$w[[3L]]), 300L))
 ## This is intentionally gated because dplyr worker execution is still an active
 ## compatibility target and can be flaky while runtime internals evolve.
 if (exists("mtlapply") && identical(Sys.getenv("MTL_DPLYR_WORKER", "0"), "1")) {
+  old_threads <- getOption("mtlapply.threads")
+  on.exit(options(mtlapply.threads = old_threads), add = TRUE)
+  options(mtlapply.threads = threads)
+
   rpc_reset <- try(.Internal(mtlrpcstats(TRUE)), silent = TRUE)
 
   f <- function(i) {
@@ -73,7 +77,7 @@ if (exists("mtlapply") && identical(Sys.getenv("MTL_DPLYR_WORKER", "0"), "1")) {
   }
 
   ref <- lapply(1:32, f)
-  got <- mtlapply(1:32, f, threads = threads)
+  got <- mtlapply(1:32, f)
   stopifnot(isTRUE(all.equal(ref, got, tolerance = 0)))
 
   rpc <- try(.Internal(mtlrpcstats(FALSE)), silent = TRUE)

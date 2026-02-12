@@ -19,3 +19,16 @@ else
   @Rshlibpath_var@="${R_LD_LIBRARY_PATH}:${@Rshlibpath_var@}"
 fi
 export @Rshlibpath_var@
+
+## On macOS, prebuilt packages often encode framework absolute install-names
+## for libR/libRblas/libRlapack. Prefer this build's lib directory first so
+## those references resolve to the in-tree dylibs and we do not load a second
+## libR image into the process.
+if test "@Rshlibpath_var@" = "DYLD_FALLBACK_LIBRARY_PATH"; then
+  if test -z "${DYLD_LIBRARY_PATH}"; then
+    DYLD_LIBRARY_PATH="${R_LD_LIBRARY_PATH}"
+  else
+    DYLD_LIBRARY_PATH="${R_LD_LIBRARY_PATH}:${DYLD_LIBRARY_PATH}"
+  fi
+  export DYLD_LIBRARY_PATH
+fi

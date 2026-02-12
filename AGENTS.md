@@ -65,6 +65,9 @@ Work towards making this build of R usable for package code that calls `.Call()`
 - On macOS shared-lib builds, `src/library/profile/Rprofile.unix` appends the matching
   framework library path (`/Library/Frameworks/R.framework/Versions/<x.y>-<arch>/Resources/library`)
   so framework-linked binaries (e.g. `Matrix`) are found automatically.
+- `etc/ldpaths` prepends `${R_HOME}/lib` to both `DYLD_FALLBACK_LIBRARY_PATH` and
+  `DYLD_LIBRARY_PATH` on macOS so framework-encoded package dependencies resolve to
+  this build's local `libR/libRblas/libRlapack` first (prevents loading a second `libR` image).
 - After each relink in `build-mtl-shlib`, re-apply install-name fixups:
   - `bash tools/mtl-abi-macos.sh build-mtl-shlib`
 - Reason: existing macOS binary packages are linked against framework install names; this avoids loading a second `libR.dylib`.
@@ -104,7 +107,7 @@ Use this as the standard iteration checklist after runtime changes.
 
 5. **Drop-in binary package smoke (macOS framework libs)**
    - `build-mtl-shlib/bin/R --vanilla -q -f tools/mtl-dropin-smoke.R --args 4`
-   - Confirms `Matrix`, `reticulate`, `dplyr`, and an `mtlapply()` package-native path.
+   - Confirms `Matrix`, `reticulate`, `dplyr`, and a basic `mtlapply()` worker path.
 
 6. **Worker-native package smoke (`.Call`-heavy paths)**
    - `build-mtl-shlib/bin/R --vanilla -q -f tools/mtl-worker-native-smoke.R --args /Users/tomasz/Library/R/arm64/4.6/library 4 64`
