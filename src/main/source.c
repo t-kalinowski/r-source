@@ -215,9 +215,14 @@ static SEXP mtl_do_parse_main(void *vp)
 attribute_hidden SEXP do_parse(SEXP call, SEXP op, SEXP args, SEXP env)
 {
     if (R_Interpreter != NULL && R_Interpreter->isMTLWorker) {
-	mtl_do_parse_t d = {.call = call, .op = op, .args = args, .env = env};
-	return R_mtl_invoke_on_main_reason(mtl_do_parse_main, &d,
-					   R_MTL_RPC_DO_PARSE);
+	SEXP out;
+	/* Parse arguments may reference worker-heap objects (e.g. parse(text=...)).
+	   Keep evaluation in the worker and serialize parser globals via the
+	   global lock instead of passing worker-owned SEXPs to the main thread. */
+	R_mtl_global_lock();
+	out = do_parse_impl(call, op, args, env);
+	R_mtl_global_unlock();
+	return out;
     }
     return do_parse_impl(call, op, args, env);
 }

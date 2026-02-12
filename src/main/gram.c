@@ -4317,11 +4317,15 @@ attribute_hidden
 SEXP R_ParseConn(Rconnection con, int n, ParseStatus *status, SEXP srcfile)
 {
     if (R_Interpreter != NULL && R_Interpreter->isMTLWorker) {
-	mtl_parse_conn_t d = {.con = con, .n = n, .srcfile = srcfile, .status = PARSE_NULL};
-	SEXP res = R_mtl_invoke_on_main_reason(mtl_parse_conn_main, &d,
-					      R_MTL_RPC_PARSE_CONN);
-	if (status)
-	    *status = d.status;
+	SEXP res;
+	/* 'con' and related parse state may be worker-local. Evaluate in the
+	   worker and serialize parser globals with the global lock. */
+	R_mtl_global_lock();
+	GenerateCode = 1;
+	con_parse = con;
+	ptr_getc = con_getc;
+	res = R_Parse(n, status, srcfile);
+	R_mtl_global_unlock();
 	return res;
     }
 
@@ -4335,23 +4339,32 @@ SEXP R_ParseConn(Rconnection con, int n, ParseStatus *status, SEXP srcfile)
 SEXP R_ParseVector(SEXP text, int n, ParseStatus *status, SEXP srcfile)
 {
     if (R_Interpreter != NULL && R_Interpreter->isMTLWorker) {
-	mtl_parse_vector_t d = {.text = text, .n = n, .srcfile = srcfile, .status = PARSE_NULL};
-	SEXP res = R_mtl_invoke_on_main_reason(mtl_parse_vector_main, &d,
-					      R_MTL_RPC_PARSE_VECTOR);
-	if (status)
-	    *status = d.status;
-	return res;
+	SEXP rval;
+	TextBuffer textb;
+	/* 'text' may be worker-heap owned. Avoid main-thread RPC with foreign
+	   SEXPs; parse locally under the global lock. */
+	R_mtl_global_lock();
+	R_TextBufferInit(&textb, text);
+	txtb = &textb;
+	GenerateCode = 1;
+	ptr_getc = text_getc;
+	rval = R_Parse(n, status, srcfile);
+	R_TextBufferFree(&textb);
+	R_mtl_global_unlock();
+	return rval;
     }
 
-    SEXP rval;
-    TextBuffer textb;
-    R_TextBufferInit(&textb, text);
-    txtb = &textb;
-    GenerateCode = 1;
-    ptr_getc = text_getc;
-    rval = R_Parse(n, status, srcfile);
-    R_TextBufferFree(&textb);
-    return rval;
+    {
+	SEXP rval;
+	TextBuffer textb;
+	R_TextBufferInit(&textb, text);
+	txtb = &textb;
+	GenerateCode = 1;
+	ptr_getc = text_getc;
+	rval = R_Parse(n, status, srcfile);
+	R_TextBufferFree(&textb);
+	return rval;
+    }
 }
 
 static const char *Prompt(SEXP prompt, int type)
