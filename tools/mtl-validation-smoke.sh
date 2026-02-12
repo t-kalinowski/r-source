@@ -18,12 +18,16 @@ standard_lib="${4:-${repo_root}/${build_dir}/library}"
 baseline_r="${5:-/usr/local/bin/R-devel}"
 serial_max_ratio="${6:-1.10}"
 framework_lib="${7:-/Library/Frameworks/R.framework/Versions/4.6-arm64/Resources/library}"
+soak_reps="${MTL_SOAK_REPS:-0}"
 
 cd "${repo_root}"
 
 "${repo_root}/${build_dir}/bin/R" --vanilla -q -e "cat('startup ok\\n')"
 
 "${repo_root}/tools/mtl-core-runtime-smoke.sh" "${build_dir}" "3"
+if [ "${soak_reps}" != "0" ]; then
+  "${repo_root}/tools/mtl-soak-smoke.sh" "${build_dir}" "${soak_reps}"
+fi
 
 "${repo_root}/tools/mtl-package-smoke.sh" "${build_dir}" "${sys_lib}" "${threads}" "${standard_lib}"
 "${repo_root}/tools/mtl-perf-smoke.sh" "${build_dir}" "${baseline_r}" "${serial_max_ratio}"
