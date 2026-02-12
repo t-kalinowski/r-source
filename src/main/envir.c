@@ -1284,7 +1284,7 @@ static R_INLINE int mtl_worker_shared_env_write(SEXP rho)
 	return 0;
     /* Worker-owned environments (closure locals/temporaries) are safe to
        mutate directly. Shared environments (namespace/search path/base/etc.)
-       must receive main-heap values under the global lock. */
+       are read-only in worker threads. */
     return !R_mtl_current_heap_owns(rho);
 }
 
@@ -1816,17 +1816,8 @@ void defineVar(SEXP symbol, SEXP value, SEXP rho)
 	error("attempt to bind a variable to R_UnboundValue");
     mtl_check_globalenv_assignment(rho);
 
-    if (mtl_worker_shared_env_write(rho)) {
-	R_InterpreterState *st = R_Interpreter;
-	R_mtl_global_lock();
-	struct R_mtl_heap_state_ *saved_heap = R_mtl_switch_to_main_heap(st);
-	SEXP v_main = PROTECT(duplicate(value));
-	defineVar_impl(symbol, v_main, rho);
-	UNPROTECT(1);
-	R_mtl_restore_heap(st, saved_heap);
-	R_mtl_global_unlock();
-	return;
-    }
+    if (mtl_worker_shared_env_write(rho))
+	error(_("assignment to shared environments is not allowed in mtlapply() worker threads"));
 
     defineVar_impl(symbol, value, rho);
 }
@@ -1955,17 +1946,8 @@ static SEXP setVarInFrame(SEXP rho, SEXP symbol, SEXP value)
 {
     mtl_check_globalenv_assignment(rho);
 
-    if (mtl_worker_shared_env_write(rho)) {
-	R_InterpreterState *st = R_Interpreter;
-	R_mtl_global_lock();
-	struct R_mtl_heap_state_ *saved_heap = R_mtl_switch_to_main_heap(st);
-	SEXP v_main = PROTECT(duplicate(value));
-	SEXP out = setVarInFrame_impl(rho, symbol, v_main);
-	UNPROTECT(1);
-	R_mtl_restore_heap(st, saved_heap);
-	R_mtl_global_unlock();
-	return out;
-    }
+    if (mtl_worker_shared_env_write(rho))
+	error(_("assignment to shared environments is not allowed in mtlapply() worker threads"));
 
     return setVarInFrame_impl(rho, symbol, value);
 }

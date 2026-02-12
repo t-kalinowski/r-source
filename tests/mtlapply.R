@@ -60,22 +60,24 @@ if (dir.exists(pkg_src)) {
   vals <- mtlapply_with_threads(2L, 1:100, function(i) mtlPkg::mtl_add(i, i + 1))
   stopifnot(identical(unlist(vals, use.names = FALSE), as.double(1:100 + (1:100 + 1))))
 
-  # Worker-side package attach should succeed for an installed package.
-  attached <- mtlapply_with_threads(2L, 1:8, function(i) {
+  # Worker-side package attach mutates shared search path/namespace state and
+  # must fail deterministically (workers are read-only over shared envs).
+  attached_err <- try(mtlapply_with_threads(2L, 1:8, function(i) {
     suppressPackageStartupMessages(library("mtlPkg", character.only = TRUE))
     mtl_add(i, i + 2)
-  })
-  stopifnot(identical(unlist(attached, use.names = FALSE), as.double(1:8 + (1:8 + 2))))
+  }), silent = TRUE)
+  stopifnot(inherits(attached_err, "try-error"))
+  stopifnot(grepl("shared environments", as.character(attached_err), fixed = TRUE))
 
-  # Worker-side package attach via character.only + local symbol should work:
-  # main-thread dispatch must not depend on worker stack environments.
-  pkg_name <- "mtlPkg"
-  attached_sym <- mtlapply_with_threads(2L, 1:8, function(i) {
-    nm <- pkg_name
-    suppressPackageStartupMessages(library(nm, character.only = TRUE))
-    mtl_add(i, i + 3)
+  # Worker-side registration/lookup of C callables must stay valid for
+  # subsequent main-thread use (regression for embedded/autocomplete crashes).
+  callable_vals <- mtlapply_with_threads(2L, 1:16, function(i) {
+    mtlPkg::mtl_register_callable()
+    mtlPkg::mtl_call_callable(i, i + 4)
   })
-  stopifnot(identical(unlist(attached_sym, use.names = FALSE), as.double(1:8 + (1:8 + 3))))
+  stopifnot(identical(unlist(callable_vals, use.names = FALSE),
+                      as.double(1:16 + (1:16 + 4))))
+  stopifnot(identical(mtlPkg::mtl_call_callable(2, 3), 5))
 
   if (exists("mtl_test_var", envir = .GlobalEnv, inherits = FALSE))
     rm(mtl_test_var, envir = .GlobalEnv)
