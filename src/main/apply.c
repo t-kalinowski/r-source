@@ -109,14 +109,15 @@ static const char *mtl_rpc_reason_name_lookup(int reason)
 		    R_InterpreterState interp;
 		} mtl_worker_t;
 
-	typedef struct mtl_main_req_t {
+typedef struct mtl_main_req_t {
 	    /* Function to execute on the main thread (must not escape data). */
 	    SEXP (*fun)(void *);
 	    void *data;
 	    int reason;
 
-	    SEXP result;          /* valid when ok==1 */
-	    int ok;               /* 1 success, 0 error/abort */
+    SEXP result;          /* valid when ok==1 */
+    int result_preserved; /* result is currently R_PreserveObject()-rooted */
+    int ok;               /* 1 success, 0 error/abort */
 	    char errmsg[1024];    /* valid when ok==0 */
 
 	    pthread_mutex_t mu;
@@ -362,10 +363,17 @@ static Rboolean mtl_is_main_thread(void)
 	    r->result = r->fun(r->data);
 	}
 
-	static void mtl_rpc_complete(mtl_main_req_t *r, int ok, const char *msg)
-	{
-	    pthread_mutex_lock(&r->mu);
-	    r->ok = ok;
+static void mtl_rpc_complete(mtl_main_req_t *r, int ok, const char *msg)
+{
+    if (ok) {
+	/* Worker threads may block waiting for this request while main continues
+	   servicing other work (including allocations/GC). Keep the result rooted
+	   until the requester thread has received it. */
+	R_PreserveObject(r->result);
+	r->result_preserved = 1;
+    }
+    pthread_mutex_lock(&r->mu);
+    r->ok = ok;
 	    if (!ok) {
 		const char *m = (msg && msg[0]) ? msg : "error";
 		snprintf(r->errmsg, sizeof(r->errmsg), "%s", m);
@@ -700,8 +708,9 @@ static int mtl_timeout_to_deadline(double timeout, struct timespec *out)
 		    r->fun = fun;
 		    r->data = data;
 		    r->reason = reason;
-		    r->result = R_NilValue;
-	    r->ok = 0;
+    r->result = R_NilValue;
+    r->result_preserved = 0;
+    r->ok = 0;
 	    r->done = 0;
 	    r->next = NULL;
 	    pthread_mutex_init(&r->mu, NULL);
@@ -733,14 +742,23 @@ static int mtl_timeout_to_deadline(double timeout, struct timespec *out)
 		pthread_cond_wait(&r->cv, &r->mu);
 	    pthread_mutex_unlock(&r->mu);
 
-	    SEXP res = r->result;
-	    int ok = r->ok;
+    SEXP res = r->result;
+    int ok = r->ok;
 	    char msg[1024];
 	    msg[0] = '\0';
 	    if (!ok)
 		snprintf(msg, sizeof(msg), "%s", r->errmsg);
 
-	    pthread_mutex_destroy(&r->mu);
+    if (ok && r->result_preserved) {
+	/* Match the preserve in mtl_rpc_complete(). Protect during release so the
+	   result remains valid across any allocations in release bookkeeping. */
+	PROTECT(res);
+	R_ReleaseObject(res);
+	UNPROTECT(1);
+	r->result_preserved = 0;
+    }
+
+    pthread_mutex_destroy(&r->mu);
 	    pthread_cond_destroy(&r->cv);
 	    free(r);
 
