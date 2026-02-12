@@ -1216,6 +1216,36 @@ GetFullDLLPath(SEXP call, char *buf, size_t bufsize, const char *const path)
 	error(_("path too long")); 
 }
 
+typedef struct {
+    char *buf;
+    int asLocal;
+    int now;
+    const char *search_path;
+    DllInfo *info;
+} mtl_dynload_req_t;
+
+static SEXP mtl_dynload_on_main(void *vp)
+{
+    mtl_dynload_req_t *d = (mtl_dynload_req_t *) vp;
+    /* AddDLL does this DeleteDLL(path) first. */
+    d->info = AddDLL(d->buf, d->asLocal, d->now, d->search_path);
+    if (!d->info)
+	error(_("unable to load shared object '%s':\n  %s"), d->buf, DLLerror);
+    return Rf_MakeDLLInfo(d->info);
+}
+
+typedef struct {
+    char *buf;
+} mtl_dynunload_req_t;
+
+static SEXP mtl_dynunload_on_main(void *vp)
+{
+    mtl_dynunload_req_t *d = (mtl_dynunload_req_t *) vp;
+    if (!DeleteDLL(d->buf))
+	error(_("shared object '%s\' was not loaded"), d->buf);
+    return R_NilValue;
+}
+
 	/* do_dynload implements the R-Interface for the */
 	/* loading of shared objects */
 
@@ -1236,38 +1266,57 @@ GetFullDLLPath(SEXP call, char *buf, size_t bufsize, const char *const path)
 
 attribute_hidden SEXP do_dynload(SEXP call, SEXP op, SEXP args, SEXP env)
 {
-    char buf[2 * R_PATH_MAX];
+    char buf[2 * R_PATH_MAX], dllsearch[R_PATH_MAX];
     DllInfo *info;
-
-    if (R_Interpreter != NULL && R_Interpreter->isMTLWorker)
-	errorcall(call, _("dyn.load is not supported in mtlapply() worker threads"));
+    int asLocal, now;
+    const char *search_path;
 
     checkArity(op,args);
     if (!isString(CAR(args)) || LENGTH(CAR(args)) != 1)
 	error(_("character argument expected"));
     GetFullDLLPath(call, buf, sizeof(buf),
                    translateCharFP(STRING_ELT(CAR(args), 0)));
+    asLocal = LOGICAL(CADR(args))[0];
+    now = LOGICAL(CADDR(args))[0];
+    strncpy(dllsearch, translateCharFP(STRING_ELT(CADDDR(args), 0)),
+	    sizeof(dllsearch) - 1);
+    dllsearch[sizeof(dllsearch) - 1] = '\0';
+    search_path = dllsearch;
+
+    if (R_Interpreter != NULL && R_Interpreter->isMTLWorker) {
+	mtl_dynload_req_t d = {
+	    .buf = buf,
+	    .asLocal = asLocal,
+	    .now = now,
+	    .search_path = search_path,
+	    .info = NULL
+	};
+	return R_mtl_invoke_on_main_reason(mtl_dynload_on_main, &d, R_MTL_RPC_OTHER);
+    }
+
     /* AddDLL does this DeleteDLL(buf); */
-    info = AddDLL(buf, LOGICAL(CADR(args))[0], LOGICAL(CADDR(args))[0],
-		  translateCharFP(STRING_ELT(CADDDR(args), 0)));
-    if(!info)
+    info = AddDLL(buf, asLocal, now, search_path);
+    if (!info)
 	error(_("unable to load shared object '%s':\n  %s"), buf, DLLerror);
-    return(Rf_MakeDLLInfo(info));
+    return Rf_MakeDLLInfo(info);
 }
 
 attribute_hidden SEXP do_dynunload(SEXP call, SEXP op, SEXP args, SEXP env)
 {
     char buf[2 * R_PATH_MAX];
 
-    if (R_Interpreter != NULL && R_Interpreter->isMTLWorker)
-	errorcall(call, _("dyn.unload is not supported in mtlapply() worker threads"));
-
     checkArity(op,args);
     if (!isString(CAR(args)) || LENGTH(CAR(args)) != 1)
 	error(_("character argument expected"));
     GetFullDLLPath(call, buf, sizeof(buf),
                    translateCharFP(STRING_ELT(CAR(args), 0)));
-    if(!DeleteDLL(buf))
+
+    if (R_Interpreter != NULL && R_Interpreter->isMTLWorker) {
+	mtl_dynunload_req_t d = { .buf = buf };
+	return R_mtl_invoke_on_main_reason(mtl_dynunload_on_main, &d, R_MTL_RPC_OTHER);
+    }
+
+    if (!DeleteDLL(buf))
 	error(_("shared object '%s\' was not loaded"), buf);
     return R_NilValue;
 }

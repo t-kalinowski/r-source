@@ -75,11 +75,7 @@ function(package, help, pos = 2, lib.loc = NULL, character.only = FALSE,
             mc$package <- pkg
             mc$character.only <- TRUE
         }
-        ans <- .Internal(mtonmain(mc, globalenv()))
-        if (!is.null(pkg) && nzchar(pkg))
-            .Internal(mtonmain(substitute(base:::.mtl_force_namespace(PKG),
-                                          list(PKG = pkg)), globalenv()))
-        return(ans)
+        return(.Internal(mtonmain(mc, globalenv())))
     }
 
     conf.ctrl <- getOption("conflicts.policy")

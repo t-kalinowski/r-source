@@ -110,7 +110,16 @@ local({
         suppressWarnings(RNGversion(rv))
 })
 
-.sys.timezone <- NA_character_
+local({
+    ## Sys.timezone() may be called from C startup paths before this profile
+    ## runs (e.g. to initialize internal tzcode). In that case, the binding
+    ## may already exist and be locked; leave it unchanged.
+    b <- baseenv()
+    if (!exists(".sys.timezone", envir = b, inherits = FALSE) ||
+        !bindingIsLocked(".sys.timezone", b)) {
+        assign(".sys.timezone", NA_character_, envir = b)
+    }
+})
 
 local({
     ## create an active binding for .Library.site, so that it can be

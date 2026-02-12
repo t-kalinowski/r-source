@@ -662,6 +662,8 @@ FUNTAB R_FunTab[] =
 {"mtlpoolstats", do_mtlpoolstats, 0,	11,	1,	{PP_FUNCALL, PREC_FN,	0}},
 {"mtlrpcstats", do_mtlrpcstats, 0,	11,	1,	{PP_FUNCALL, PREC_FN,	0}},
 {"mtlpoolreset", do_mtlpoolreset, 0,	11,	0,	{PP_FUNCALL, PREC_FN,	0}},
+{"mtlisworker", do_mtlisworker, 0,	11,	0,	{PP_FUNCALL, PREC_FN,	0}},
+{"mtonmain", do_mtonmain, 0,	11,	2,	{PP_FUNCALL, PREC_FN,	0}},
 {"mtbackground", do_mtbackground, 0,	11,	2,	{PP_FUNCALL, PREC_FN,	0}},
 {"mtwait", do_mtwait,	0,	11,	2,	{PP_FUNCALL, PREC_FN,	0}},
 {"mtcancel", do_mtcancel, 0,	11,	1,	{PP_FUNCALL, PREC_FN,	0}},
@@ -1315,9 +1317,16 @@ static SEXP mtl_installNoTrChar_on_main(void *data)
 SEXP install(const char *name)
 {
     if (R_Interpreter != NULL && R_Interpreter->isMTLWorker) {
-	mtl_install_data_t d = { .name = name };
-	return R_mtl_invoke_on_main_reason(mtl_install_on_main, &d,
-					   R_MTL_RPC_INSTALL);
+	size_t n = strlen(name);
+	char *buf = (char *) malloc(n + 1);
+	if (buf == NULL)
+	    error(_("cannot allocate memory"));
+	memcpy(buf, name, n + 1);
+	mtl_install_data_t d = { .name = buf };
+	SEXP out = R_mtl_invoke_on_main_reason(mtl_install_on_main, &d,
+					       R_MTL_RPC_INSTALL);
+	free(buf);
+	return out;
     }
     return install_impl(name);
 }
@@ -1370,13 +1379,21 @@ attribute_hidden
 SEXP installNoTrChar(SEXP charSXP)
 {
     if (R_Interpreter != NULL && R_Interpreter->isMTLWorker) {
+	int len = LENGTH(charSXP);
+	char *buf = (char *) malloc((size_t) len + 1);
+	if (buf == NULL)
+	    error(_("cannot allocate memory"));
+	memcpy(buf, CHAR(charSXP), (size_t) len);
+	buf[len] = '\0';
 	mtl_installnotr_data_t d = {
-	    .name = CHAR(charSXP),
-	    .len = LENGTH(charSXP),
+	    .name = buf,
+	    .len = len,
 	    .enc = getCharCE(charSXP),
 	};
-	return R_mtl_invoke_on_main_reason(mtl_installNoTrChar_on_main, &d,
-					   R_MTL_RPC_INSTALL_NOTRCHAR);
+	SEXP out = R_mtl_invoke_on_main_reason(mtl_installNoTrChar_on_main, &d,
+					       R_MTL_RPC_INSTALL_NOTRCHAR);
+	free(buf);
+	return out;
     }
     return installNoTrChar_impl(charSXP);
 }

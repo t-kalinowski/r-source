@@ -248,6 +248,8 @@ SEXP do_mtlparallelmax(SEXP, SEXP, SEXP, SEXP);
 SEXP do_mtlpoolstats(SEXP, SEXP, SEXP, SEXP);
 SEXP do_mtlrpcstats(SEXP, SEXP, SEXP, SEXP);
 SEXP do_mtlpoolreset(SEXP, SEXP, SEXP, SEXP);
+SEXP do_mtlisworker(SEXP, SEXP, SEXP, SEXP);
+SEXP do_mtonmain(SEXP, SEXP, SEXP, SEXP);
 SEXP do_mtbackground(SEXP, SEXP, SEXP, SEXP);
 SEXP do_mtwait(SEXP, SEXP, SEXP, SEXP);
 SEXP do_mtcancel(SEXP, SEXP, SEXP, SEXP);

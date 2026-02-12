@@ -211,6 +211,7 @@ static mtl_pool_t mtl_pool;
 static atomic_int mtl_pool_threads_created = 0;
 static SEXP mtl_dotOptionsSym = NULL;
 static SEXP mtl_futurePtrSym = NULL;
+static SEXP mtl_useFancyQuotesSym = NULL;
 
 			static void mtl_interp_init_from_main(R_InterpreterState *st)
 			{
@@ -284,7 +285,7 @@ static SEXP mtl_futurePtrSym = NULL;
 	    R_InitInterpreterHeap(st);
 	}
 
-static void mtl_interp_reset_for_eval(R_InterpreterState *st, const mtl_job_t *job)
+static void mtl_interp_reset_for_eval(R_InterpreterState *st, const mtl_job_t *job, SEXP eval_env)
 {
     st->currentExpr = NULL;
     st->returnedValue = R_NilValue;
@@ -312,6 +313,13 @@ static void mtl_interp_reset_for_eval(R_InterpreterState *st, const mtl_job_t *j
     st->noBreakWarning = 0;
 #ifdef R_USE_SIGNALS
     st->pendingPromises = NULL;
+    if (TYPEOF(eval_env) == ENVSXP) {
+	R_Toplevel.cloenv = eval_env;
+	R_Toplevel.sysparent = eval_env;
+    } else {
+	R_Toplevel.cloenv = R_BaseEnv;
+	R_Toplevel.sysparent = R_BaseEnv;
+    }
 #endif
 }
 
@@ -334,6 +342,7 @@ static Rboolean mtl_is_main_thread(void)
 		    pthread_cond_init(&mtl_pool.cv, NULL);
 		    mtl_dotOptionsSym = install(".Options");
 		    mtl_futurePtrSym = install("ptr");
+		    mtl_useFancyQuotesSym = install("useFancyQuotes");
 		    mtl_pool.inited = 1;
 		}
 
@@ -571,6 +580,18 @@ static void mtl_future_release_storage(mtl_future_t *f)
     if (f->env != R_NilValue)
 	R_ReleaseObject(f->env);
     free(f);
+}
+
+static void mtl_options_set_logical(SEXP opts, SEXP sym, int value)
+{
+    if (TYPEOF(opts) != LISTSXP || TYPEOF(sym) != SYMSXP)
+	return;
+    for (SEXP node = opts; node != R_NilValue; node = CDR(node)) {
+	if (TAG(node) == sym) {
+	    SETCAR(node, ScalarLogical(value ? TRUE : FALSE));
+	    return;
+	}
+    }
 }
 
 static void mtl_future_sweep_locked(void)
@@ -858,13 +879,18 @@ static void mtl_future_adopt_main_exec(void *vp)
 			   The worker sees/sets options against this snapshot (copy-on-write),
 			   so packages using withr::with_options() work without mutating global
 			   process state. */
-			{
-			    R_mtl_global_lock();
-			    SEXP glob = SYMVALUE(mtl_dotOptionsSym);
-			    w->interp.mtlOptionsBase = R_mtl_shallow_duplicate_pairlist(glob);
-			    w->interp.mtlOptions = w->interp.mtlOptionsBase;
-			    R_mtl_global_unlock();
-			}
+				{
+				    R_mtl_global_lock();
+				    SEXP glob = SYMVALUE(mtl_dotOptionsSym);
+				    w->interp.mtlOptionsBase = R_mtl_shallow_duplicate_pairlist(glob);
+				    /* Keep worker-side condition formatting ASCII-only.
+				       This avoids multibyte quote corruption when multiple
+				       workers signal errors concurrently. */
+				    mtl_options_set_logical(w->interp.mtlOptionsBase,
+							    mtl_useFancyQuotesSym, 0);
+				    w->interp.mtlOptions = w->interp.mtlOptionsBase;
+				    R_mtl_global_unlock();
+				}
 
 			/* Build per-job call objects in the worker heap to avoid mutating
 			   main-heap call structures from worker threads. */
@@ -883,7 +909,7 @@ static void mtl_future_adopt_main_exec(void *vp)
 			    break;
 
 			/* Reset per-interpreter stacks/slots for this evaluation. */
-			mtl_interp_reset_for_eval(&w->interp, job);
+			mtl_interp_reset_for_eval(&w->interp, job, job->eval_env);
 
 			/* job->XX is normalized to VECSXP by do_mtlapply(). */
 			SETCAR(argcell, VECTOR_ELT(job->XX, i));
@@ -913,6 +939,13 @@ static void mtl_future_adopt_main_exec(void *vp)
 			R_Toplevel.srcref = R_Srcref;
 #endif
 			mtl_parallel_begin();
+			int lock_eval = 0;
+			const char *lock_eval_env = getenv("R_MTL_LOCK_EVAL");
+			if (lock_eval_env != NULL && *lock_eval_env != '\0' &&
+			    strcmp(lock_eval_env, "0") != 0) {
+			    R_mtl_global_lock();
+			    lock_eval = 1;
+			}
 			if (mtl_trace_enabled()) {
 			    fprintf(stderr, "[mtl] worker=%p eval i=%lld begin\n",
 				    (void *)w, (long long)i);
@@ -924,6 +957,8 @@ static void mtl_future_adopt_main_exec(void *vp)
 				    (void *)w, (long long)i, err);
 			    fflush(stderr);
 			}
+			if (lock_eval)
+			    R_mtl_global_unlock();
 			mtl_parallel_end();
 			if (err || val == NULL) {
 			    const char *msg = R_curErrorBuf();
@@ -946,7 +981,19 @@ static void mtl_future_adopt_main_exec(void *vp)
 			job->results[i] = val;
 			UNPROTECT(1);
 			atomic_fetch_sub_explicit(&job->active_eval_workers, 1, memory_order_relaxed);
-		    }
+			}
+
+			if (mtl_trace_enabled()) {
+			    fprintf(stderr,
+				    "[mtl] worker=%p post-loop err=%d ppTop=%d interp.ppTop=%d handler=%p restart=%p\n",
+				    (void *)w,
+				    (int) atomic_load_explicit(&job->error, memory_order_relaxed),
+				    (int) R_PPStackTop,
+				    (int) w->interp.ppStackTop,
+				    (void *) R_HandlerStack,
+				    (void *) R_RestartStack);
+			    fflush(stderr);
+			}
 
 			UNPROTECT(3); /* tail, argcell, fcall */
 
@@ -961,13 +1008,13 @@ static void mtl_future_adopt_main_exec(void *vp)
 			pthread_mutex_unlock(&p->mu);
 			mtl_job_release(job);
 			continue;
-		}
+		    }
 
 		if (future != NULL) {
 		    mtl_job_t fake_job;
 		    memset(&fake_job, 0, sizeof(fake_job));
 		    fake_job.main_showErrorMessages = future->main_showErrorMessages;
-		    mtl_interp_reset_for_eval(&w->interp, &fake_job);
+		    mtl_interp_reset_for_eval(&w->interp, &fake_job, future->env);
 
 		    int err = 0;
 		    const char *errmsg = NULL;
@@ -991,7 +1038,16 @@ static void mtl_future_adopt_main_exec(void *vp)
 		    R_Toplevel.srcref = R_Srcref;
 #endif
 		    mtl_parallel_begin();
+		    int lock_eval = 0;
+		    const char *lock_eval_env = getenv("R_MTL_LOCK_EVAL");
+		    if (lock_eval_env != NULL && *lock_eval_env != '\0' &&
+			strcmp(lock_eval_env, "0") != 0) {
+			R_mtl_global_lock();
+			lock_eval = 1;
+		    }
 		    SEXP val = R_tryEvalSilent(future->expr, future->env, &err);
+		    if (lock_eval)
+			R_mtl_global_unlock();
 		    mtl_parallel_end();
 		    int cancelled = 0;
 		    pthread_mutex_lock(&p->mu);
@@ -1041,18 +1097,11 @@ static void mtl_future_adopt_main_exec(void *vp)
     R_InterpreterTLS = saved_interp;
     R_mtl_set_compat_interpreter(saved_compat);
 
-	    /* Worker interpreter stacks are not reused; free its protection stack. */
+	    /* Worker teardown after error-unwind paths can leave transient
+	       allocator metadata inconsistent for explicit frees. Keep shutdown
+	       robust by unregistering interpreter state but letting OS reclaim
+	       worker-local memory at process exit. */
 	    R_UnregisterInterpreterState(&w->interp);
-	    R_DestroyInterpreterHeap(&w->interp);
-	    free(w->interp.ppStack);
-	    w->interp.ppStack = NULL;
-	    w->interp.ppStackTop = 0;
-    free(w->interp.bcNodeStackBase);
-    w->interp.bcNodeStackBase = NULL;
-    w->interp.bcNodeStackTop = NULL;
-    w->interp.bcNodeStackEnd = NULL;
-    w->interp.bcProtTop = NULL;
-    w->interp.bcProtCommitted = NULL;
 
     return NULL;
 }
@@ -1510,7 +1559,11 @@ attribute_hidden SEXP do_mtlapply(SEXP call, SEXP op, SEXP args, SEXP rho)
 		    job->parent_job = NULL;
 		    atomic_init(&job->refcount, 1); /* main owner; workers acquire when job starts */
 		    job->errmsg[0] = '\0';
-		    job->main_showErrorMessages = R_ShowErrorMessages;
+		    /* Worker-thread condition printing is not thread-safe and can
+		       corrupt output/state under concurrent errors. Workers always
+		       evaluate with printing disabled; the main thread rethrows one
+		       consolidated error message for the caller. */
+		    job->main_showErrorMessages = FALSE;
 		    pthread_mutex_init(&job->err_mutex, NULL);
 
 		    if (n_bg_threads > 0) {
@@ -1536,30 +1589,17 @@ attribute_hidden SEXP do_mtlapply(SEXP call, SEXP op, SEXP args, SEXP rho)
 						    NULL);
 
 			    const char *noadopt = getenv("R_MTL_NOADOPT");
-			    if (atomic_load_explicit(&job->error, memory_order_relaxed)) {
-				char msg[1024];
-				snprintf(msg, sizeof(msg), "%s",
-					 job->errmsg[0] ? job->errmsg : "mtlapply error");
-			/* After an error, workers may hold partial allocations/results in
-			   their heaps. Adopt+reset worker heaps now so stale worker state
-			   cannot leak into subsequent jobs. */
-			if (n_bg_threads > 0) {
-			    if (noadopt == NULL || *noadopt == '\0') {
-				for (int t = 0; t < n_bg_threads; t++)
-				    R_mtl_adopt_worker_heap(&mtl_pool.workers[t]->interp);
-			    }
-			    for (int t = 0; t < n_bg_threads; t++)
-				mtl_pool.workers[t]->interp.preciousList = R_NilValue;
-			}
-			mtl_job_release(job);
-			UNPROTECT(nprotect);
-			/* Error paths can leave worker interpreter stacks in an
-			   inconsistent state for subsequent jobs. Reset the pool so
-			   the next mtlapply() starts from fresh worker interpreters. */
-			if (n_bg_threads > 0 && mtl_pool.inited)
-			    R_mtlpool_shutdown();
-			error("%s", msg);
-		    }
+	    if (atomic_load_explicit(&job->error, memory_order_relaxed)) {
+		char msg[1024];
+		snprintf(msg, sizeof(msg), "%s",
+			 job->errmsg[0] ? job->errmsg : "mtlapply error");
+		mtl_job_release(job);
+		UNPROTECT(nprotect);
+		/* Keep the pool alive across errors. Worker eval state is reset per
+		   task, and tearing down interpreters inside an active error unwind
+		   has proven unstable on some paths. */
+		error("%s", msg);
+	    }
 
 			    /* Adopt all worker heaps into main before touching the results. */
 			    if (n_bg_threads > 0) {
@@ -1739,6 +1779,47 @@ attribute_hidden SEXP do_mtlpoolreset(SEXP call, SEXP op, SEXP args, SEXP rho)
 	R_mtlpool_shutdown();
 #endif
     return ScalarLogical(1);
+}
+
+/* .Internal(mtlisworker()) */
+attribute_hidden SEXP do_mtlisworker(SEXP call, SEXP op, SEXP args, SEXP rho)
+{
+    checkArity(op, args);
+    return ScalarLogical((R_Interpreter != NULL && R_Interpreter->isMTLWorker) ? TRUE : FALSE);
+}
+
+typedef struct {
+    SEXP expr;
+    SEXP env;
+} mtl_onmain_eval_t;
+
+static SEXP mtl_onmain_eval(void *vp)
+{
+    mtl_onmain_eval_t *d = (mtl_onmain_eval_t *) vp;
+    if (TYPEOF(d->env) != ENVSXP)
+	error(_("'%s' must be an environment"), "env");
+    /* Duplicate into the main heap before evaluation. The incoming call may
+       originate from a worker heap and must not be mutated in place here. */
+    SEXP expr = PROTECT(duplicate(d->expr));
+    SEXP out = eval(expr, d->env);
+    UNPROTECT(1);
+    return out;
+}
+
+/* .Internal(mtonmain(EXPR, ENV)) */
+attribute_hidden SEXP do_mtonmain(SEXP call, SEXP op, SEXP args, SEXP rho)
+{
+    checkArity(op, args);
+    SEXP expr = CAR(args);
+    SEXP env = CADR(args);
+    if (TYPEOF(env) != ENVSXP)
+	error(_("'%s' must be an environment"), "env");
+
+    if (R_Interpreter != NULL && R_Interpreter->isMTLWorker) {
+	mtl_onmain_eval_t d = { .expr = expr, .env = env };
+	return R_mtl_invoke_on_main_reason(mtl_onmain_eval, &d, R_MTL_RPC_OTHER);
+    }
+    return eval(expr, env);
 }
 
 /* .Internal(mtbackground(EXPR, ENV)) */
