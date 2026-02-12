@@ -30,6 +30,8 @@ cd "${repo_root}"
 
 "${repo_root}/${build_dir}/bin/R" --vanilla -q -f "${repo_root}/tools/mtl-reticulate-smoke.R"
 
+"${repo_root}/tools/mtl-rsession-smoke.sh" "${build_dir}"
+
 "${repo_root}/${build_dir}/bin/R" --vanilla -q -f "${repo_root}/tools/mtl-worker-native-smoke.R" \
   --args "${sys_lib}" "${threads}" "64"
 

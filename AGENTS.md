@@ -109,21 +109,28 @@ Use this as the standard iteration checklist after runtime changes.
    - `build-mtl-shlib/bin/R --vanilla -q -f tools/mtl-dropin-smoke.R --args 4`
    - Confirms `Matrix`, `reticulate`, `dplyr`, and a basic `mtlapply()` worker path.
 
-6. **Worker-native package smoke (`.Call`-heavy paths)**
+6. **RStudio `rsession` smoke (no GUI)**
+   - `tools/mtl-rsession-smoke.sh build-mtl-shlib`
+   - Launches `rsession` directly against this build via `DYLD_INSERT_LIBRARIES`
+     and verifies startup wiring for `RSTUDIO_WHICH_R`/`R_HOME`.
+   - In restricted sandboxes where socket/listener setup is blocked by policy,
+     this reports a skip instead of failing.
+
+7. **Worker-native package smoke (`.Call`-heavy paths)**
    - `build-mtl-shlib/bin/R --vanilla -q -f tools/mtl-worker-native-smoke.R --args /Users/tomasz/Library/R/arm64/4.6/library 4 64`
    - Confirms package code that relies on native entry points behaves identically under `lapply()` and `mtlapply()` for representative workflows.
    - Also emits `.Internal(mtlrpcstats(FALSE))` for quick visibility into worker->main fallback pressure.
 
-7. **Standard-build package load sweep**
+8. **Standard-build package load sweep**
    - `tools/mtl-load-standard-library-smoke.sh build-mtl-shlib build-mtl-shlib/library`
    - Confirms this build can load all package namespaces from the standard built package set (base/recommended in `build-*/library`).
    - For compiled packages, also exercises minimal native runtime paths by inspecting registration tables and resolving representative registered symbols in isolated child processes.
 
-8. **Framework-binary package load sweep (macOS)**
+9. **Framework-binary package load sweep (macOS)**
    - `tools/mtl-framework-library-smoke.sh build-mtl-shlib /Library/Frameworks/R.framework/Versions/4.6-arm64/Resources/library`
    - Confirms in-tree MTL build can load prebuilt framework package binaries without loading a second `libR`.
 
-9. **Benchmark checkpoint (always include in flow)**
+10. **Benchmark checkpoint (always include in flow)**
    - Generate timing artifacts:
      - System R:
        - `/usr/bin/R --vanilla -q -f bench/readme_bench_run.R --args bench/results/system.rds`
@@ -136,11 +143,11 @@ Use this as the standard iteration checklist after runtime changes.
    - Refresh human-readable report:
       - `build-mtl-shlib/bin/R --vanilla -q -e 'rmarkdown::render(\"README.Rmd\", output_format = \"github_document\")'`
 
-10. **Serial regression guard**
+11. **Serial regression guard**
    - `tools/mtl-perf-smoke.sh build-mtl-shlib /usr/local/bin/R-devel 1.10`
    - Fails if `lapply` median runtime in MTL build exceeds baseline by more than threshold (default `1.10`).
 
-11. **Interpretation rule**
+12. **Interpretation rule**
    - Check serial parity first (`lapply` path in MTL build vs R-devel/system R).
    - Then check scaling (`mtlapply(2/4/8)` vs `mtlapply(1)` and `lapply`).
    - Treat benchmark noise seriously: prefer larger workloads and repeated runs before concluding regressions.
@@ -152,6 +159,7 @@ Use this as the standard iteration checklist after runtime changes.
 - Required for each checkpoint:
   - ABI smoke (`tools/mtl-abi-smoke.R`)
   - dplyr smoke (`tools/mtl-dplyr-smoke.R`)
+  - RStudio `rsession` smoke (`tools/mtl-rsession-smoke.sh`)
   - worker-native smoke (`tools/mtl-worker-native-smoke.R`)
   - standard-build library load sweep (`tools/mtl-load-standard-library-smoke.sh`)
   - serial performance guard (`tools/mtl-perf-smoke.sh`)
