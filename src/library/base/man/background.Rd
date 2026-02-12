@@ -33,6 +33,8 @@ were pending or running at cancellation time.
 \details{
 This interface is experimental. The worker pool is shared with
 \code{mtlapply()} and controlled by \code{options(mtlapply.threads = n)}.
+For large \code{mtlapply()} inputs, chunking is controlled by
+\code{options(mtlapply.chunk_size = n)}.
 }
 \examples{
 old <- getOption("mtlapply.threads")

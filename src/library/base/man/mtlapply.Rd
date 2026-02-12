@@ -32,6 +32,10 @@ mtlapply(X, FUN, \dots)
   The worker-pool size is controlled by \code{options(mtlapply.threads = n)}
   and defaults to \code{2L}.
 
+  Large inputs are evaluated in chunks. The chunk size is controlled by
+  \code{options(mtlapply.chunk_size = n)} and defaults to \code{50000L}.
+  This is a tuning knob and does not change results.
+
   Workers use the real \code{globalenv()}. Reads from global bindings are
   allowed, but writes to \code{globalenv()} from worker threads are rejected
   with an error.
