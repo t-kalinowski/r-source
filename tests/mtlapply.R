@@ -85,6 +85,27 @@ err_global_eval <- try(mtlapply_with_threads(2L, 1:8, function(i) {
 stopifnot(inherits(err_global_eval, "try-error"))
 stopifnot(!exists("mtl_test_var", envir = .GlobalEnv, inherits = FALSE))
 
+# Superassignment to closure-local captured state is allowed in workers.
+local_super <- mtlapply_with_threads(2L, 1:8, function(i) {
+  acc <- 0L
+  bump <- function() {
+    acc <<- acc + i
+    acc
+  }
+  c(bump(), bump(), acc)
+})
+stopifnot(identical(local_super[[5]], c(5L, 10L, 10L)))
+
+# Superassignment that resolves to globalenv() must still error.
+if (exists("mtl_test_super", envir = .GlobalEnv, inherits = FALSE))
+  rm(mtl_test_super, envir = .GlobalEnv)
+err_super_global <- try(mtlapply_with_threads(2L, 1:8, function(i) {
+  mtl_test_super <<- i
+  i
+}), silent = TRUE)
+stopifnot(inherits(err_super_global, "try-error"))
+stopifnot(!exists("mtl_test_super", envir = .GlobalEnv, inherits = FALSE))
+
 # options() writes in workers are local to the worker/job.
 digits0 <- getOption("digits")
 digits_vals <- mtlapply_with_threads(2L, 1:3, function(i) {

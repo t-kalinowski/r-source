@@ -3559,12 +3559,8 @@ static SEXP applydefine(SEXP call, SEXP op, SEXP args, SEXP rho)
     SEXP value = eval(expr, rho);
 
     SET_ASSIGNMENT_PENDING(lhsloc.cell, FALSE);
-    if (PRIMVAL(op) == 2)                       /* <<- */
-    {
-	if (R_Interpreter != NULL && R_Interpreter->isMTLWorker)
-	    errorcall(call, _("superassignment is not allowed in mtlapply() worker threads"));
-	setVar(lhsSym, value, ENCLOS(rho));
-    }
+	if (PRIMVAL(op) == 2)                       /* <<- */
+	    setVar(lhsSym, value, ENCLOS(rho));
     else {                                      /* <-, = */
 	if (ALTREP(value)) {
 	    PROTECT(value);
@@ -3619,11 +3615,7 @@ attribute_hidden SEXP do_set(SEXP call, SEXP op, SEXP args, SEXP rho)
 	rhs = eval(CADR(args), rho);
 	INCREMENT_NAMED(rhs);
 	if (PRIMVAL(op) == 2)                       /* <<- */
-	{
-	    if (R_Interpreter != NULL && R_Interpreter->isMTLWorker)
-		errorcall(call, _("superassignment is not allowed in mtlapply() worker threads"));
 	    setVar(lhs, rhs, ENCLOS(rho));
-	}
 	else                                        /* <-, = */
 	    defineVar(lhs, rhs, rho);
 	R_Visible = FALSE;
@@ -8454,8 +8446,6 @@ static SEXP bcEval_loop(struct bcEval_locals *ploc)
     OP(VISIBLE, 0): R_Visible = TRUE; NEXT();
     OP(SETVAR2, 1):
       {
-	if (R_Interpreter != NULL && R_Interpreter->isMTLWorker)
-	    error(_("superassignment is not allowed in mtlapply() worker threads"));
 	SEXP symbol = GETCONST(constants, GETOP());
 	SEXP value = GETSTACK(-1);
 	INCREMENT_NAMED(value);
@@ -8496,8 +8486,6 @@ static SEXP bcEval_loop(struct bcEval_locals *ploc)
 	SEXP symbol = GETCONST(constants, GETOP());
 	SEXP value = GETSTACK(-1); /* leave on stack for GC protection */
 	INCREMENT_NAMED(value);
-	if (R_Interpreter != NULL && R_Interpreter->isMTLWorker)
-	    error(_("superassignment is not allowed in mtlapply() worker threads"));
 	setVar(symbol, value, ENCLOS(rho));
 	R_BCNodeStackTop -= 2; /* now pop cell and LHS value off the stack */
 	/* original right-hand side value is now on top of stack again */

@@ -41,8 +41,9 @@ mtlapply(X, FUN, \dots)
   with an error.
 
   The worker function must not attempt to mutate process-global state.
-  In particular, superassignment (\code{<<-}) is not supported in worker
-  threads and results in an error.
+  Superassignment (\code{<<-}) is allowed when the target resolves to an
+  existing non-global binding (for example, a closure-captured local). Any
+  worker write that resolves to \code{globalenv()} still errors.
 
   Worker \code{options()} writes are job-local: each worker starts from a
   snapshot of main-thread options, and changes do not propagate back to
