@@ -48,7 +48,8 @@ mkdir -p "${tmp_root}/home" "${tmp_root}/data" "${tmp_root}/config" "${tmp_root}
 # Mirror desktop launcher behavior for dyld fallback paths.
 fallback_lib="${tmp_root}/fallback-lib"
 mkdir -p "${fallback_lib}"
-dyld_fallback="${DYLD_FALLBACK_LIBRARY_PATH:-}:${fallback_lib}"
+dyld_fallback="${r_home}/lib:${DYLD_FALLBACK_LIBRARY_PATH:-}:${fallback_lib}"
+dyld_library="${r_home}/lib:${DYLD_LIBRARY_PATH:-}"
 
 log_file="${tmp_root}/rsession.log"
 
@@ -58,8 +59,10 @@ XDG_DATA_HOME="${tmp_root}/data" \
 XDG_CONFIG_HOME="${tmp_root}/config" \
 XDG_CACHE_HOME="${tmp_root}/cache" \
 R_HOME="${r_home}" \
+R_DOC_DIR="${r_home}/doc" \
 DYLD_INSERT_LIBRARIES="${r_lib}" \
 DYLD_FALLBACK_LIBRARY_PATH="${dyld_fallback}" \
+DYLD_LIBRARY_PATH="${dyld_library}" \
 RSTUDIO_WHICH_R="${r_home}/bin/R" \
 "${rsession_bin}" \
   --log-stderr 1 \
