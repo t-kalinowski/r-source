@@ -124,9 +124,10 @@
 #include <trioremap.h>
 #endif
 
-attribute_hidden int R_OutputCon; /* used in printutils.c */
+attribute_hidden R_THREAD_LOCAL int R_OutputCon = 1; /* used in printutils.c */
 
 static void con_destroy(int i);
+static void conFinalizer(SEXP ptr);
 
 #include <errno.h>
 
@@ -167,14 +168,41 @@ static int NCONNECTIONS = 128; /* need one per cluster node */
 static Rconnection * Connections;
 static SEXP OutTextData;
 
-static int R_SinkNumber;
-static int SinkCons[NSINKS], SinkConsClose[NSINKS], R_SinkSplit[NSINKS];
+static R_THREAD_LOCAL int R_SinkNumber;
+static R_THREAD_LOCAL int SinkCons[NSINKS] = {1};
+static R_THREAD_LOCAL int SinkConsClose[NSINKS], R_SinkSplit[NSINKS];
 
 /* We need a unique id for a connection to ensure that the finalizer
    does not try to close it after it is already closed.  And that id
    will be passed as a pointer, so it seemed easiest to use void *.
 */
 static void * current_id = NULL;
+
+static R_INLINE int mtl_connection_lock(void)
+{
+    if (R_MTL_THREADING_ACTIVE) {
+	R_mtl_global_lock();
+	return 1;
+    }
+    return 0;
+}
+
+static R_INLINE void mtl_connection_unlock(int locked)
+{
+    if (locked)
+	R_mtl_global_unlock();
+}
+
+static R_INLINE int mtl_is_worker_thread(void)
+{
+    return (R_Interpreter != NULL && R_Interpreter->isMTLWorker);
+}
+
+static R_INLINE void mtl_register_connection_finalizer(SEXP ex_ptr)
+{
+    if (!mtl_is_worker_thread())
+	R_RegisterCFinalizerEx(ex_ptr, conFinalizer, FALSE);
+}
 
 /* ------------- admin functions (see also at end) ----------------- */
 
@@ -217,6 +245,25 @@ Rconnection getConnection(int n)
 
 }
 
+static Rconnection getConnectionByValue(SEXP rcon, const char *var)
+{
+    if (!inherits(rcon, "connection"))
+	error(_("'%s' is not a connection"), var);
+
+    int n = asInteger(rcon);
+    Rconnection con = getConnection(n);
+
+    /* Guard against stale/reused connection slots under concurrency. */
+    SEXP cid = getAttrib(rcon, R_ConnIdSymbol);
+    if (TYPEOF(cid) == EXTPTRSXP) {
+	void *id = R_ExternalPtrAddr(cid);
+	if (id != NULL && con->id != id)
+	    error(_("invalid connection"));
+    }
+
+    return con;
+}
+
 attribute_hidden
 int getActiveSink(int n)
 {
@@ -230,17 +277,24 @@ int getActiveSink(int n)
 
 static void conFinalizer(SEXP ptr)
 {
+    int mtl_locked = mtl_connection_lock();
     int i, ncon = 0;
     void *cptr = R_ExternalPtrAddr(ptr);
 
-    if(!cptr) return;
+    if(!cptr) {
+	mtl_connection_unlock(mtl_locked);
+	return;
+    }
 
     for(i = 3; i < NCONNECTIONS; i++)
 	if(Connections[i] && Connections[i]->id == cptr) {
 	    ncon = i;
 	    break;
 	}
-    if(i >= NCONNECTIONS) return;
+    if(i >= NCONNECTIONS) {
+	mtl_connection_unlock(mtl_locked);
+	return;
+    }
 
     char buf[R_PATH_MAX + 50]; /* much longer than limit for warning */
     Rboolean warn = FALSE;
@@ -259,6 +313,7 @@ static void conFinalizer(SEXP ptr)
 
     if (warn)
 	warning("%s", buf); /* may be turned into error */
+    mtl_connection_unlock(mtl_locked);
 }
 
 
@@ -1622,7 +1677,7 @@ attribute_hidden SEXP do_fifo(SEXP call, SEXP op, SEXP args, SEXP env)
     SET_STRING_ELT(class, 1, mkChar("connection"));
     classgets(ans, class);
     setAttrib(ans, R_ConnIdSymbol, con->ex_ptr);
-    R_RegisterCFinalizerEx(con->ex_ptr, conFinalizer, FALSE);
+    mtl_register_connection_finalizer(con->ex_ptr);
     UNPROTECT(3);
 
     return ans;
@@ -1803,7 +1858,7 @@ attribute_hidden SEXP do_pipe(SEXP call, SEXP op, SEXP args, SEXP env)
     SET_STRING_ELT(class, 1, mkChar("connection"));
     classgets(ans, class);
     setAttrib(ans, R_ConnIdSymbol, con->ex_ptr);
-    R_RegisterCFinalizerEx(con->ex_ptr, conFinalizer, FALSE);
+    mtl_register_connection_finalizer(con->ex_ptr);
     UNPROTECT(3);
 
     return ans;
@@ -2826,7 +2881,7 @@ attribute_hidden SEXP do_gzfile(SEXP call, SEXP op, SEXP args, SEXP env)
     SET_STRING_ELT(class, 1, mkChar("connection"));
     classgets(ans, class);
     setAttrib(ans, R_ConnIdSymbol, con->ex_ptr);
-    R_RegisterCFinalizerEx(con->ex_ptr, conFinalizer, FALSE);
+    mtl_register_connection_finalizer(con->ex_ptr);
     UNPROTECT(3);
 
     return ans;
@@ -3467,7 +3522,7 @@ attribute_hidden SEXP do_rawconnection(SEXP call, SEXP op, SEXP args, SEXP env)
     classgets(ans, class);
     con->ex_ptr = R_MakeExternalPtr(con->id, install("connection"), R_NilValue);
     setAttrib(ans, R_ConnIdSymbol, con->ex_ptr);
-    R_RegisterCFinalizerEx(con->ex_ptr, conFinalizer, FALSE);
+    mtl_register_connection_finalizer(con->ex_ptr);
     UNPROTECT(2);
     return ans;
 }
@@ -3908,7 +3963,7 @@ attribute_hidden SEXP do_textconnection(SEXP call, SEXP op, SEXP args, SEXP env)
     classgets(ans, class);
     con->ex_ptr = R_MakeExternalPtr(con->id, install("connection"), R_NilValue);
     setAttrib(ans, R_ConnIdSymbol, con->ex_ptr);
-    R_RegisterCFinalizerEx(con->ex_ptr, conFinalizer, FALSE);
+    mtl_register_connection_finalizer(con->ex_ptr);
     UNPROTECT(2);
     return ans;
 }
@@ -4012,7 +4067,7 @@ attribute_hidden SEXP do_sockconn(SEXP call, SEXP op, SEXP args, SEXP env)
     SET_STRING_ELT(class, 1, mkChar("connection"));
     classgets(ans, class);
     setAttrib(ans, R_ConnIdSymbol, con->ex_ptr);
-    R_RegisterCFinalizerEx(con->ex_ptr, conFinalizer, FALSE);
+    mtl_register_connection_finalizer(con->ex_ptr);
     UNPROTECT(3);
     return ans;
 }
@@ -4061,7 +4116,7 @@ attribute_hidden SEXP do_unz(SEXP call, SEXP op, SEXP args, SEXP env)
     SET_STRING_ELT(class, 1, mkChar("connection"));
     classgets(ans, class);
     setAttrib(ans, R_ConnIdSymbol, con->ex_ptr);
-    R_RegisterCFinalizerEx(con->ex_ptr, conFinalizer, FALSE);
+    mtl_register_connection_finalizer(con->ex_ptr);
     UNPROTECT(3);
 
     return ans;
@@ -4217,11 +4272,11 @@ static void con_destroy(int i)
 
 attribute_hidden SEXP do_close(SEXP call, SEXP op, SEXP args, SEXP env)
 {
+    int mtl_locked = mtl_connection_lock();
     int i, j;
+    Rconnection con = NULL;
 
     checkArity(op, args);
-    if(!inherits(CAR(args), "connection"))
-	error(_("'con' is not a connection"));
     i = asInteger(CAR(args));
     if(i < 3) error(_("cannot close standard connections"));
     for(j = 0; j < R_SinkNumber; j++)
@@ -4229,10 +4284,11 @@ attribute_hidden SEXP do_close(SEXP call, SEXP op, SEXP args, SEXP env)
 	    error(_("cannot close 'output' sink connection"));
     if(i == R_ErrorCon)
 	error(_("cannot close 'message' sink connection"));
-    Rconnection con = getConnection(i);
+    con = getConnectionByValue(CAR(args), "con");
     int status = con_close1(con);
     free(Connections[i]);
     Connections[i] = NULL;
+    mtl_connection_unlock(mtl_locked);
     return (status != NA_INTEGER) ? ScalarInteger(status) : R_NilValue;
 }
 
@@ -4400,6 +4456,7 @@ static void con_cleanup(void *data)
 attribute_hidden SEXP do_readLines(SEXP call, SEXP op, SEXP args, SEXP env)
 {
     SEXP ans = R_NilValue, ans2;
+    int mtl_locked = 0;
     int ok, warn, skipNul, c;
     size_t nbuf, buf_size = BUF_SIZE;
     int oenc = CE_NATIVE;
@@ -4411,9 +4468,7 @@ attribute_hidden SEXP do_readLines(SEXP call, SEXP op, SEXP args, SEXP env)
     R_xlen_t i, n, nn, nnn, nread;
 
     checkArity(op, args);
-    if(!inherits(CAR(args), "connection"))
-	error(_("'con' is not a connection"));
-    con = getConnection(asInteger(CAR(args))); args = CDR(args);
+    con = getConnectionByValue(CAR(args), "con"); args = CDR(args);
     n = asVecSize(CAR(args)); args = CDR(args);
     if(n == -999)
 	error(_("invalid '%s' argument"), "n");
@@ -4429,6 +4484,8 @@ attribute_hidden SEXP do_readLines(SEXP call, SEXP op, SEXP args, SEXP env)
     skipNul = asLogical(CAR(args));
     if(skipNul == NA_LOGICAL)
 	error(_("invalid '%s' argument"), "skipNul");
+
+    mtl_locked = mtl_connection_lock();
 
     wasopen = con->isopen;
     if(!wasopen) {
@@ -4505,6 +4562,7 @@ attribute_hidden SEXP do_readLines(SEXP call, SEXP op, SEXP args, SEXP env)
     if(!wasopen) {endcontext(&cntxt); con->close(con);}
     UNPROTECT(1);
     free(buf);
+    mtl_connection_unlock(mtl_locked);
     return ans;
 no_more_lines:
     if(!wasopen) {endcontext(&cntxt); con->close(con);}
@@ -4528,12 +4586,14 @@ no_more_lines:
     for(i = 0; i < nread; i++)
 	SET_STRING_ELT(ans2, i, STRING_ELT(ans, i));
     UNPROTECT(2);
+    mtl_connection_unlock(mtl_locked);
     return ans2;
 }
 
 /* writeLines(text, con = stdout(), sep = "\n", useBytes) */
 attribute_hidden SEXP do_writelines(SEXP call, SEXP op, SEXP args, SEXP env)
 {
+    int mtl_locked = mtl_connection_lock();
     int con_num, useBytes;
     Rboolean wasopen;
     Rconnection con=NULL;
@@ -4544,10 +4604,8 @@ attribute_hidden SEXP do_writelines(SEXP call, SEXP op, SEXP args, SEXP env)
     checkArity(op, args);
     text = CAR(args);
     if(!isString(text)) error(_("invalid '%s' argument"), "text");
-    if(!inherits(CADR(args), "connection"))
-	error(_("'con' is not a connection"));
+    con = getConnectionByValue(CADR(args), "con");
     con_num = asInteger(CADR(args));
-    con = getConnection(con_num);
     sep = CADDR(args);
     if(!isString(sep)) error(_("invalid '%s' argument"), "sep");
     useBytes = asLogical(CADDDR(args));
@@ -4601,6 +4659,7 @@ attribute_hidden SEXP do_writelines(SEXP call, SEXP op, SEXP args, SEXP env)
     	endcontext(&cntxt);
     	checkClose(con);
     }
+    mtl_connection_unlock(mtl_locked);
     return R_NilValue;
 }
 
@@ -5869,6 +5928,7 @@ R_newCurlUrl(const char *description, const char * const mode, SEXP headers, int
 */
 attribute_hidden SEXP do_url(SEXP call, SEXP op, SEXP args, SEXP env)
 {
+    int mtl_locked = mtl_connection_lock();
     SEXP scmd, sopen, ans, class, enc, headers = R_NilValue;
 #ifdef Win32
     SEXP headers_flat = R_NilValue;
@@ -6128,9 +6188,10 @@ attribute_hidden SEXP do_url(SEXP call, SEXP op, SEXP args, SEXP env)
     SET_STRING_ELT(class, 1, mkChar("connection"));
     classgets(ans, class);
     setAttrib(ans, R_ConnIdSymbol, con->ex_ptr);
-    R_RegisterCFinalizerEx(con->ex_ptr, conFinalizer, FALSE);
+    mtl_register_connection_finalizer(con->ex_ptr);
     UNPROTECT(3);
 
+    mtl_connection_unlock(mtl_locked);
     return ans;
 }
 
@@ -6870,7 +6931,7 @@ attribute_hidden SEXP do_serversocket(SEXP call, SEXP op, SEXP args, SEXP rho)
     SET_STRING_ELT(class, 1, mkChar("connection"));
     classgets(ans, class);
     setAttrib(ans, R_ConnIdSymbol, con->ex_ptr);
-    R_RegisterCFinalizerEx(con->ex_ptr, conFinalizer, FALSE);
+    mtl_register_connection_finalizer(con->ex_ptr);
     UNPROTECT(3);
     return ans;
 }
@@ -7453,7 +7514,7 @@ SEXP R_new_custom_connection(const char *description, const char *mode, const ch
     SET_STRING_ELT(class, 1, mkChar("connection"));
     classgets(ans, class);
     setAttrib(ans, R_ConnIdSymbol, new->ex_ptr);
-    R_RegisterCFinalizerEx(new->ex_ptr, conFinalizer, FALSE);
+    mtl_register_connection_finalizer(new->ex_ptr);
     UNPROTECT(3);
 
     if (ptr) ptr[0] = new;

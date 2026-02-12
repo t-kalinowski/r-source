@@ -116,6 +116,7 @@ static const char *mtl_rpc_reason_name_lookup(int reason)
 	    int reason;
 
 	    SEXP result;          /* valid when ok==1 */
+	    int result_preserved; /* result is currently R_PreserveObject()-rooted */
 	    int ok;               /* 1 success, 0 error/abort */
 	    char errmsg[1024];    /* valid when ok==0 */
 
@@ -362,10 +363,15 @@ static Rboolean mtl_is_main_thread(void)
 	    r->result = r->fun(r->data);
 	}
 
-	static void mtl_rpc_complete(mtl_main_req_t *r, int ok, const char *msg)
-	{
-	    pthread_mutex_lock(&r->mu);
-	    r->ok = ok;
+static void mtl_rpc_complete(mtl_main_req_t *r, int ok, const char *msg)
+{
+    if (ok) {
+	/* Keep result rooted until requester thread has consumed it. */
+	R_PreserveObject(r->result);
+	r->result_preserved = 1;
+    }
+    pthread_mutex_lock(&r->mu);
+    r->ok = ok;
 	    if (!ok) {
 		const char *m = (msg && msg[0]) ? msg : "error";
 		snprintf(r->errmsg, sizeof(r->errmsg), "%s", m);
@@ -699,8 +705,9 @@ static int mtl_timeout_to_deadline(double timeout, struct timespec *out)
 			error("cannot allocate memory");
 		    r->fun = fun;
 		    r->data = data;
-		    r->reason = reason;
-		    r->result = R_NilValue;
+	    r->reason = reason;
+	    r->result = R_NilValue;
+	    r->result_preserved = 0;
 	    r->ok = 0;
 	    r->done = 0;
 	    r->next = NULL;
@@ -739,6 +746,13 @@ static int mtl_timeout_to_deadline(double timeout, struct timespec *out)
 	    msg[0] = '\0';
 	    if (!ok)
 		snprintf(msg, sizeof(msg), "%s", r->errmsg);
+
+	    if (ok && r->result_preserved) {
+		PROTECT(res);
+		R_ReleaseObject(res);
+		UNPROTECT(1);
+		r->result_preserved = 0;
+	    }
 
 	    pthread_mutex_destroy(&r->mu);
 	    pthread_cond_destroy(&r->cv);
@@ -975,9 +989,10 @@ static void mtl_future_adopt_main_exec(void *vp)
 			    PROTECT(val);
 			}
 			/* Worker GC is disabled while jobs run, and the whole worker heap
-			   is adopted by main before results are consumed. Preserving each
-			   element individually adds measurable overhead for small closures
-			   and is unnecessary under this lifetime model. */
+			   is adopted by main before results are consumed. In practice some
+			   code paths can still trigger collection pressure in workers, so
+			   root each result explicitly until main-thread consumption. */
+			R_PreserveObject(val);
 			job->results[i] = val;
 			UNPROTECT(1);
 			atomic_fetch_sub_explicit(&job->active_eval_workers, 1, memory_order_relaxed);
@@ -1593,6 +1608,14 @@ attribute_hidden SEXP do_mtlapply(SEXP call, SEXP op, SEXP args, SEXP rho)
 		char msg[1024];
 		snprintf(msg, sizeof(msg), "%s",
 			 job->errmsg[0] ? job->errmsg : "mtlapply error");
+		if (job->results != NULL) {
+		    for (R_xlen_t i = 0; i < n; i++) {
+			if (job->results[i] != NULL) {
+			    R_ReleaseObject(job->results[i]);
+			    job->results[i] = NULL;
+			}
+		    }
+		}
 		mtl_job_release(job);
 		UNPROTECT(nprotect);
 		/* Keep the pool alive across errors. Worker eval state is reset per
@@ -1608,8 +1631,11 @@ attribute_hidden SEXP do_mtlapply(SEXP call, SEXP op, SEXP args, SEXP rho)
 					R_mtl_adopt_worker_heap(&mtl_pool.workers[t]->interp);
 				}
 				for (R_xlen_t i = 0; i < n; i++) {
-				    if (job->results[i] != NULL)
+				    if (job->results[i] != NULL) {
 					SET_VECTOR_ELT(ans, i, job->results[i]);
+					R_ReleaseObject(job->results[i]);
+					job->results[i] = NULL;
+				    }
 				}
 				/* Worker results are preserved in each worker interpreter while
 				   the job is running. Once results are adopted and rooted by 'ans',
