@@ -60,6 +60,23 @@ if (dir.exists(pkg_src)) {
   vals <- mtlapply_with_threads(2L, 1:100, function(i) mtlPkg::mtl_add(i, i + 1))
   stopifnot(identical(unlist(vals, use.names = FALSE), as.double(1:100 + (1:100 + 1))))
 
+  # Worker-side package attach should succeed for an installed package.
+  attached <- mtlapply_with_threads(2L, 1:8, function(i) {
+    suppressPackageStartupMessages(library("mtlPkg", character.only = TRUE))
+    mtl_add(i, i + 2)
+  })
+  stopifnot(identical(unlist(attached, use.names = FALSE), as.double(1:8 + (1:8 + 2))))
+
+  # Worker-side package attach via character.only + local symbol should work:
+  # main-thread dispatch must not depend on worker stack environments.
+  pkg_name <- "mtlPkg"
+  attached_sym <- mtlapply_with_threads(2L, 1:8, function(i) {
+    nm <- pkg_name
+    suppressPackageStartupMessages(library(nm, character.only = TRUE))
+    mtl_add(i, i + 3)
+  })
+  stopifnot(identical(unlist(attached_sym, use.names = FALSE), as.double(1:8 + (1:8 + 3))))
+
   if (exists("mtl_test_var", envir = .GlobalEnv, inherits = FALSE))
     rm(mtl_test_var, envir = .GlobalEnv)
   err_global_call <- try(mtlapply_with_threads(2L, 1:8, function(i) mtlPkg::mtl_define_global(i)),
@@ -105,6 +122,8 @@ err_super_global <- try(mtlapply_with_threads(2L, 1:8, function(i) {
 }), silent = TRUE)
 stopifnot(inherits(err_super_global, "try-error"))
 stopifnot(!exists("mtl_test_super", envir = .GlobalEnv, inherits = FALSE))
+ok_after_super <- lapply(1:40, function(i) i + 100L)
+stopifnot(identical(unlist(ok_after_super, use.names = FALSE), 101:140))
 
 # options() writes in workers are local to the worker/job.
 digits0 <- getOption("digits")
@@ -127,6 +146,18 @@ err_opt_threads <- try(mtlapply_with_threads(2L, 1:3, function(i) {
   i
 }), silent = TRUE)
 stopifnot(inherits(err_opt_threads, "try-error"))
+
+# Worker-side connection/finalizer-heavy paths are currently unsupported and
+# should fail cleanly without poisoning subsequent serial evaluation.
+dcf_err <- try(mtlapply_with_threads(2L, 1:6, function(i) {
+  d <- tempfile(fileext = ".dcf")
+  writeLines(c("Package: mtlTmp", "Version: 1.0.0"), d)
+  read.dcf(d, c("Package", "Version"))[1, "Package"]
+}), silent = TRUE)
+stopifnot(inherits(dcf_err, "try-error"))
+stopifnot(grepl("weak references/finalizers are not supported", as.character(dcf_err),
+                fixed = TRUE))
+stopifnot(identical(unlist(lapply(1:5, function(i) i + 1L), use.names = FALSE), 2:6))
 
 # Nested mtlapply() should preserve closure-captured values.
 outer_off <- 100L
@@ -207,6 +238,26 @@ err <- try(mtlapply_with_threads(4L, 1:64, function(i) {
   i
 }), silent = TRUE)
 stopifnot(inherits(err, "try-error"))
+
+# Missing-package failures from multiple workers should stay recoverable and
+# must not corrupt error strings (e.g. embedded NUL regressions).
+missing_pkg <- ".__mtl_missing_pkg__.definitely.not.installed__"
+for (k in 1:6) {
+  err_missing <- try(mtlapply_with_threads(4L, 1:32, function(i) {
+    library(missing_pkg, character.only = TRUE)
+    i
+  }), silent = TRUE)
+  stopifnot(inherits(err_missing, "try-error"))
+  msg_missing <- if (!is.null(attr(err_missing, "condition")))
+    conditionMessage(attr(err_missing, "condition"))
+  else
+    as.character(err_missing)
+  stopifnot(grepl("there is no package called", msg_missing, fixed = TRUE))
+  stopifnot(!grepl("embedded nul", msg_missing, fixed = TRUE))
+  invisible(gc())
+  okk <- lapply(1:25, function(i) i + 10L)
+  stopifnot(identical(unlist(okk, use.names = FALSE), 11:35))
+}
 
 # Main-thread errors after mtlapply() should remain recoverable.
 bad <- try(system.time(lapply(1:10, function(i) i, threads = 8L)), silent = TRUE)

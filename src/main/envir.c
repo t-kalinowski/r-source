@@ -1194,6 +1194,8 @@ slowpath:
 
 */
 
+static R_INLINE int mtl_worker_shared_env_access(SEXP rho);
+
 #ifdef USE_GLOBAL_CACHE
 /* findGlobalVar searches for a symbol value starting at R_GlobalEnv,
    so the cache can be used. */
@@ -1215,19 +1217,28 @@ static SEXP findGlobalVarLoc(SEXP symbol)
 	    return vl;
     }
     for (rho = R_GlobalEnv; rho != R_EmptyEnv; rho = ENCLOS(rho)) {
+	int locked = mtl_worker_shared_env_access(rho);
+	if (locked)
+	    R_mtl_global_lock();
 	if (rho != R_BaseEnv) { /* we won't have R_BaseNamespace */
 	    vl = findVarLocInFrame(rho, symbol, &canCache);
 	    if (vl != R_NilValue) {
+		if (locked)
+		    R_mtl_global_unlock();
 		if(canCache)
 		    R_AddGlobalCache(symbol, vl);
 		return vl;
 	    }
 	}
 	else {
+	    if (locked)
+		R_mtl_global_unlock();
 	    if (canCache && SYMVALUE(symbol) != R_UnboundValue)
 		R_AddGlobalCache(symbol, symbol);
 	    return symbol;
 	}
+	if (locked)
+	    R_mtl_global_unlock();
     }
     return R_NilValue;
 }
@@ -1262,6 +1273,43 @@ static R_INLINE void mtl_check_globalenv_assignment(SEXP rho)
 	error(_("assignment to the global environment is not allowed in mtlapply() worker threads"));
 }
 
+static R_INLINE int mtl_worker_shared_env_write(SEXP rho)
+{
+    if (R_Interpreter == NULL || !R_Interpreter->isMTLWorker)
+	return 0;
+    if (TYPEOF(rho) != ENVSXP)
+	return 0;
+    /* globalenv() writes are handled separately and rejected */
+    if (rho == R_GlobalEnv || rho == R_EmptyEnv)
+	return 0;
+    /* Worker-owned environments (closure locals/temporaries) are safe to
+       mutate directly. Shared environments (namespace/search path/base/etc.)
+       must receive main-heap values under the global lock. */
+    return !R_mtl_current_heap_owns(rho);
+}
+
+static R_INLINE int mtl_worker_shared_env_access(SEXP rho)
+{
+    if (R_Interpreter == NULL || !R_Interpreter->isMTLWorker)
+	return 0;
+    if (TYPEOF(rho) != ENVSXP)
+	return 0;
+    if (rho == R_EmptyEnv)
+	return 0;
+    return !R_mtl_current_heap_owns(rho);
+}
+
+typedef struct {
+    SEXP promise;
+    SEXP env;
+} mtl_eval_promise_data_t;
+
+static SEXP mtl_eval_promise_on_main(void *vp)
+{
+    mtl_eval_promise_data_t *d = (mtl_eval_promise_data_t *) vp;
+    return eval(d->promise, d->env);
+}
+
 attribute_hidden SEXP R_findVar(SEXP symbol, SEXP rho)
 {
     SEXP vl;
@@ -1277,7 +1325,12 @@ attribute_hidden SEXP R_findVar(SEXP symbol, SEXP rho)
        will also handle all frames if rho is a global frame other than
        R_GlobalEnv */
     while (rho != R_GlobalEnv && rho != R_EmptyEnv) {
+	int locked = mtl_worker_shared_env_access(rho);
+	if (locked)
+	    R_mtl_global_lock();
 	vl = R_findVarInFrame(rho, symbol);
+	if (locked)
+	    R_mtl_global_unlock();
 	if (vl != R_UnboundValue) return (vl);
 	rho = ENCLOS(rho);
     }
@@ -1287,7 +1340,12 @@ attribute_hidden SEXP R_findVar(SEXP symbol, SEXP rho)
 	return R_UnboundValue;
 #else
     while (rho != R_EmptyEnv) {
+	int locked = mtl_worker_shared_env_access(rho);
+	if (locked)
+	    R_mtl_global_lock();
 	vl = R_findVarInFrame(rho, symbol);
+	if (locked)
+	    R_mtl_global_unlock();
 	if (vl != R_UnboundValue) return (vl);
 	rho = ENCLOS(rho);
     }
@@ -1315,7 +1373,12 @@ static SEXP findVarLoc(SEXP symbol, SEXP rho)
        will also handle all frames if rho is a global frame other than
        R_GlobalEnv */
     while (rho != R_GlobalEnv && rho != R_EmptyEnv) {
+	int locked = mtl_worker_shared_env_access(rho);
+	if (locked)
+	    R_mtl_global_lock();
 	vl = findVarLocInFrame(rho, symbol, NULL);
+	if (locked)
+	    R_mtl_global_unlock();
 	if (vl != R_NilValue) return vl;
 	rho = ENCLOS(rho);
     }
@@ -1618,10 +1681,23 @@ SEXP findFun3(SEXP symbol, SEXP rho, SEXP call)
 #else
 	    vl = findGlobalVar(symbol);
 #endif
-	else
+	else {
+	    int locked = mtl_worker_shared_env_access(rho);
+	    if (locked)
+		R_mtl_global_lock();
 	    vl = R_findVarInFrame(rho, symbol);
+	    if (locked)
+		R_mtl_global_unlock();
+	}
 #else
-	vl = R_findVarInFrame(rho, symbol);
+	{
+	    int locked = mtl_worker_shared_env_access(rho);
+	    if (locked)
+		R_mtl_global_lock();
+	    vl = R_findVarInFrame(rho, symbol);
+	    if (locked)
+		R_mtl_global_unlock();
+	}
 #endif
 	if (vl != R_UnboundValue) {
 	    if (TYPEOF(vl) == PROMSXP) {
@@ -1629,7 +1705,13 @@ SEXP findFun3(SEXP symbol, SEXP rho, SEXP call)
 		    vl = PRVALUE(vl);
 		else {
 		    PROTECT(vl);
-		    vl = eval(vl, rho);
+		    if (mtl_worker_shared_env_access(rho) && R_InError == 0) {
+			mtl_eval_promise_data_t d = { .promise = vl, .env = rho };
+			vl = R_mtl_invoke_on_main_reason(mtl_eval_promise_on_main, &d,
+							 R_MTL_RPC_OTHER);
+		    } else {
+			vl = eval(vl, rho);
+		    }
 		    UNPROTECT(1);
 		}
 	    }
@@ -1662,14 +1744,11 @@ SEXP findFun(SEXP symbol, SEXP rho)
 
 */
 
-void defineVar(SEXP symbol, SEXP value, SEXP rho)
+static void defineVar_impl(SEXP symbol, SEXP value, SEXP rho)
 {
     int hashcode;
     SEXP frame, c;
 
-    if (value == R_UnboundValue)
-	error("attempt to bind a variable to R_UnboundValue");
-    mtl_check_globalenv_assignment(rho);
     /* R_DirtyImage should only be set if assigning to R_GlobalEnv. */
     if (rho == R_GlobalEnv) R_DirtyImage = 1;
 
@@ -1729,6 +1808,27 @@ void defineVar(SEXP symbol, SEXP value, SEXP rho)
 		SET_HASHTAB(rho, R_HashResize(HASHTAB(rho)));
 	}
     }
+}
+
+void defineVar(SEXP symbol, SEXP value, SEXP rho)
+{
+    if (value == R_UnboundValue)
+	error("attempt to bind a variable to R_UnboundValue");
+    mtl_check_globalenv_assignment(rho);
+
+    if (mtl_worker_shared_env_write(rho)) {
+	R_InterpreterState *st = R_Interpreter;
+	R_mtl_global_lock();
+	struct R_mtl_heap_state_ *saved_heap = R_mtl_switch_to_main_heap(st);
+	SEXP v_main = PROTECT(duplicate(value));
+	defineVar_impl(symbol, v_main, rho);
+	UNPROTECT(1);
+	R_mtl_restore_heap(st, saved_heap);
+	R_mtl_global_unlock();
+	return;
+    }
+
+    defineVar_impl(symbol, value, rho);
 }
 
 /*----------------------------------------------------------------------
@@ -1796,12 +1896,11 @@ void addMissingVarsToNewEnv(SEXP env, SEXP addVars)
   [ Taken static in 2.4.0: not called for emptyenv or baseenv. ]
 */
 
-static SEXP setVarInFrame(SEXP rho, SEXP symbol, SEXP value)
+static SEXP setVarInFrame_impl(SEXP rho, SEXP symbol, SEXP value)
 {
     int hashcode;
     SEXP frame, c;
 
-    mtl_check_globalenv_assignment(rho);
     /* R_DirtyImage should only be set if assigning to R_GlobalEnv. */
     if (rho == R_GlobalEnv) R_DirtyImage = 1;
     if (rho == R_EmptyEnv) return R_NilValue;
@@ -1850,6 +1949,25 @@ static SEXP setVarInFrame(SEXP rho, SEXP symbol, SEXP value)
 	}
     }
     return R_NilValue; /* -Wall */
+}
+
+static SEXP setVarInFrame(SEXP rho, SEXP symbol, SEXP value)
+{
+    mtl_check_globalenv_assignment(rho);
+
+    if (mtl_worker_shared_env_write(rho)) {
+	R_InterpreterState *st = R_Interpreter;
+	R_mtl_global_lock();
+	struct R_mtl_heap_state_ *saved_heap = R_mtl_switch_to_main_heap(st);
+	SEXP v_main = PROTECT(duplicate(value));
+	SEXP out = setVarInFrame_impl(rho, symbol, v_main);
+	UNPROTECT(1);
+	R_mtl_restore_heap(st, saved_heap);
+	R_mtl_global_unlock();
+	return out;
+    }
+
+    return setVarInFrame_impl(rho, symbol, value);
 }
 
 

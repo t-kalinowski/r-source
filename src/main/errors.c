@@ -718,7 +718,10 @@ static SEXP GetSrcLoc(SEXP srcref)
     return result;
 }
 
-static char errbuf[BUFSIZE + 1]; /* add 1 to leave room for a null byte */
+/* Per-thread error buffer.
+   mtlapply() workers can signal errors concurrently; a process-global
+   buffer causes cross-thread clobbering and corrupted error text. */
+static R_THREAD_LOCAL char errbuf[BUFSIZE + 1]; /* add 1 for trailing NUL */
 
 #define ERRBUFCAT(txt) Rstrncat(errbuf, txt, BUFSIZE - strlen(errbuf))
 
@@ -733,6 +736,16 @@ static void restore_inError(void *data)
     R_Expressions = R_Expressions_keep;
 }
 
+/* Worker threads must avoid full jump_to_top_ex() error machinery:
+   it consults options/handlers that can recurse through worker->main RPC.
+   Use a direct unwind to this interpreter's toplevel context instead. */
+NORET static void mtl_worker_jump_to_top_simple(void)
+{
+    R_Expressions = R_Expressions_keep;
+    R_InError = 0;
+    R_jumpctxt(R_ToplevelContext, 0, NULL);
+}
+
 /* Do not check constants on error more than this number of times per one
    R process lifetime; if so many errors are generated, the performance
    overhead due to the checks would be too high, and the program is doing
@@ -740,7 +753,7 @@ static void restore_inError(void *data)
    checks in GC and session exit (or .Call) do not have such limit. */
 static int allowedConstsChecks = 1000;
 
-/* Construct newline terminated error message, write it to global errbuf, and
+/* Construct newline terminated error message, write it to thread-local errbuf, and
    possibly display with REprintf. */
 NORET static void
 verrorcall_dflt(SEXP call, const char *format, va_list ap)
@@ -748,6 +761,29 @@ verrorcall_dflt(SEXP call, const char *format, va_list ap)
     if (allowedConstsChecks > 0) {
 	allowedConstsChecks--;
 	R_checkConstants(TRUE);
+    }
+
+    if (R_Interpreter != NULL && R_Interpreter->isMTLWorker) {
+	/* Keep worker error handling minimal and non-recursive. */
+	if (R_InError) {
+	    Rvsnprintf_mbcs(errbuf, min(BUFSIZE, R_WarnLength), format, ap);
+	    if (strlen(errbuf) == 0 || errbuf[strlen(errbuf) - 1] != '\n')
+		ERRBUFCAT("\n");
+	    if (R_ShowErrorMessages)
+		REprintf("%s", errbuf);
+	    mtl_worker_jump_to_top_simple();
+	}
+
+	R_InError = 1;
+	Rsnprintf_mbcs(errbuf, BUFSIZE, _("Error: "));
+	char *p = errbuf + strlen(errbuf);
+	Rvsnprintf_mbcs(p, max(min(BUFSIZE, R_WarnLength) - strlen(errbuf), 0),
+			format, ap);
+	if (strlen(errbuf) == 0 || errbuf[strlen(errbuf) - 1] != '\n')
+	    ERRBUFCAT("\n");
+	if (R_ShowErrorMessages)
+	    REprintf("%s", errbuf);
+	mtl_worker_jump_to_top_simple();
     }
 
     if (R_InError) {

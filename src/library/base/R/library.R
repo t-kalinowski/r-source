@@ -58,6 +58,29 @@ function(package, help, pos = 2, lib.loc = NULL, character.only = FALSE,
          mask.ok, exclude, include.only,
          attach.required = missing(include.only))
 {
+    if (.Internal(mtlisworker())) {
+        mc <- match.call(expand.dots = TRUE)
+        pkg <- tryCatch({
+            if (character.only) {
+                as.character(package)[[1L]]
+            } else if (is.symbol(substitute(package))) {
+                as.character(substitute(package))
+            } else if (is.character(package) && length(package) >= 1L) {
+                as.character(package)[[1L]]
+            } else {
+                NULL
+            }
+        }, error = function(e) NULL)
+        if (!is.null(pkg) && nzchar(pkg)) {
+            mc$package <- pkg
+            mc$character.only <- TRUE
+        }
+        ans <- .Internal(mtonmain(mc, globalenv()))
+        if (!is.null(pkg) && nzchar(pkg))
+            .Internal(mtonmain(call("base:::.mtl_force_namespace", pkg), globalenv()))
+        return(ans)
+    }
+
     conf.ctrl <- getOption("conflicts.policy")
     if (is.character(conf.ctrl))
         conf.ctrl <-
@@ -1030,4 +1053,3 @@ function(x)
 
     gsub("%%", "%", x, fixed = TRUE)
 }
-

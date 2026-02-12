@@ -179,11 +179,37 @@ dynGet <- function(x, ifnotfound = stop(gettextf("%s not found",
     ifnotfound
 }
 
+.mtl_force_namespace <- function(package)
+{
+    package <- as.character(package)[[1L]]
+    if (!nzchar(package))
+        return(invisible(NULL))
+    ns <- .Internal(getRegisteredNamespace(package))
+    if (is.null(ns))
+        return(invisible(NULL))
+    nms <- ls(ns, all.names = TRUE)
+    for (nm in nms) {
+        if (bindingIsActive(nm, ns))
+            next
+        try(get(nm, envir = ns, inherits = FALSE), silent = TRUE)
+    }
+    invisible(ns)
+}
+
 loadNamespace <- function (package, lib.loc = NULL,
                            keep.source = getOption("keep.source.pkgs"),
                            partial = FALSE, versionCheck = NULL,
                            keep.parse.data = getOption("keep.parse.data.pkgs"))
 {
+    if (.Internal(mtlisworker())) {
+        mc <- match.call(expand.dots = TRUE)
+        pkg <- as.character(package)[[1L]]
+        mc$package <- pkg
+        ans <- .Internal(mtonmain(mc, globalenv()))
+        .Internal(mtonmain(call("base:::.mtl_force_namespace", pkg), globalenv()))
+        return(ans)
+    }
+
     package <- as.character(package)[[1L]]
 
     loading <- dynGet("__NameSpacesLoading__", NULL)
@@ -834,6 +860,17 @@ loadNamespace <- function (package, lib.loc = NULL,
 ## A version which returns TRUE/FALSE
 requireNamespace <- function (package, ..., quietly = FALSE)
 {
+    if (.Internal(mtlisworker())) {
+        mc <- match.call(expand.dots = TRUE)
+        pkg <- as.character(package)[[1L]]
+        mc$package <- pkg
+        ans <- .Internal(mtonmain(mc, globalenv()))
+        if (isTRUE(ans))
+            .Internal(mtonmain(call("base:::.mtl_force_namespace", pkg),
+                               globalenv()))
+        return(ans)
+    }
+
     package <- as.character(package)[[1L]] # like loadNamespace
     ns <- .Internal(getRegisteredNamespace(package))
     if (is.null(ns) && !quietly) {
