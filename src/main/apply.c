@@ -30,6 +30,7 @@
 # include <pthread.h>
 # include <stdatomic.h>
 # include <stdint.h>
+# include <limits.h>
 #endif
 
 static SEXP checkArgIsSymbol(SEXP x) {
@@ -63,6 +64,8 @@ static const char *mtl_rpc_reason_name_lookup(int reason)
 	    R_xlen_t n;
 	    SEXP *results;            /* C array of worker-owned SEXPs (adopted after join) */
 	    atomic_long next;         /* next index to claim */
+	    atomic_long *range_next;  /* per-worker next index for range scheduling */
+	    long *range_end;          /* per-worker exclusive end index */
 	    atomic_int error;         /* 0/1 */
 	    atomic_int cancel_requested; /* 0/1 cooperative cancellation */
 	    atomic_int active_eval_workers; /* workers currently evaluating/writing one item */
@@ -178,7 +181,6 @@ static pthread_t mtl_main_thread;
 static mtl_pool_t mtl_pool;
 static atomic_int mtl_pool_threads_created = 0;
 static SEXP mtl_dotOptionsSym = NULL;
-#define MTL_WORK_CHUNK 4L
 
 			static void mtl_interp_init_from_main(R_InterpreterState *st)
 			{
@@ -420,8 +422,60 @@ static void mtl_job_release(mtl_job_t *job)
     if (atomic_fetch_sub_explicit(&job->refcount, 1, memory_order_acq_rel) == 1) {
 	pthread_mutex_destroy(&job->err_mutex);
 	free(job->results);
+	free(job->range_next);
+	free(job->range_end);
 	free(job);
     }
+}
+
+static void mtl_job_init_ranges(mtl_job_t *job)
+{
+    if (job == NULL || job->bg_threads <= 0)
+	return;
+
+    job->range_next = (atomic_long *) calloc((size_t) job->bg_threads, sizeof(atomic_long));
+    job->range_end = (long *) calloc((size_t) job->bg_threads, sizeof(long));
+    if (job->range_next == NULL || job->range_end == NULL)
+	error(_("cannot allocate memory"));
+
+    R_xlen_t base = job->n / job->bg_threads;
+    R_xlen_t rem = job->n % job->bg_threads;
+    R_xlen_t start = 0;
+    for (int t = 0; t < job->bg_threads; t++) {
+	R_xlen_t len = base + ((R_xlen_t) t < rem ? 1 : 0);
+	R_xlen_t end = start + len;
+	atomic_init(&job->range_next[t], (long) start);
+	job->range_end[t] = (long) end;
+	start = end;
+    }
+}
+
+static R_INLINE int mtl_job_take_from_range(mtl_job_t *job, int rid, R_xlen_t *out)
+{
+    long idx = atomic_fetch_add_explicit(&job->range_next[rid], 1, memory_order_relaxed);
+    if (idx < job->range_end[rid]) {
+	*out = (R_xlen_t) idx;
+	return 1;
+    }
+    return 0;
+}
+
+static int mtl_job_claim_index(mtl_job_t *job, int wid, R_xlen_t *out)
+{
+    if (job == NULL || out == NULL || wid < 0 || wid >= job->bg_threads)
+	return 0;
+
+    if (mtl_job_take_from_range(job, wid, out))
+	return 1;
+
+    for (int off = 1; off < job->bg_threads; off++) {
+	int victim = wid + off;
+	if (victim >= job->bg_threads)
+	    victim -= job->bg_threads;
+	if (mtl_job_take_from_range(job, victim, out))
+	    return 1;
+    }
+    return 0;
 }
 
 		attribute_hidden SEXP R_mtl_invoke_on_main(SEXP (*fun)(void *), void *data)
@@ -583,65 +637,17 @@ static void mtl_job_release(mtl_job_t *job)
 		for (;;) {
 		    if (atomic_load_explicit(&job->cancel_requested, memory_order_relaxed))
 			break;
-		    long start = atomic_fetch_add_explicit(&job->next, MTL_WORK_CHUNK,
-							   memory_order_relaxed);
-		    if (start < 0 || (R_xlen_t) start >= job->n)
+		    R_xlen_t i = 0;
+		    if (!mtl_job_claim_index(job, w->id, &i))
 			break;
-		    long end = start + MTL_WORK_CHUNK;
-		    if ((R_xlen_t) end > job->n)
-			end = (long) job->n;
-
-		    for (long idx = start; idx < end; idx++) {
-			R_xlen_t i = (R_xlen_t) idx;
-			if (atomic_load_explicit(&job->cancel_requested, memory_order_relaxed))
-			    break;
+		    if (atomic_load_explicit(&job->cancel_requested, memory_order_relaxed))
+			break;
 
 		    /* Reset per-interpreter stacks/slots for this evaluation. */
 		    mtl_interp_reset_for_eval(&w->interp, job);
 
-		    /* Set the function's first argument for this iteration. */
-		    if (TYPEOF(job->XX) == VECSXP || TYPEOF(job->XX) == EXPRSXP) {
-			SETCAR(argcell, VECTOR_ELT(job->XX, i));
-		    } else {
-			switch (TYPEOF(job->XX)) {
-			case LGLSXP:
-			    SETCAR(argcell, ScalarLogical(LOGICAL_ELT(job->XX, i)));
-			    break;
-			case INTSXP:
-			    SETCAR(argcell, ScalarInteger(INTEGER_ELT(job->XX, i)));
-			    break;
-			case REALSXP:
-			    SETCAR(argcell, ScalarReal(REAL_ELT(job->XX, i)));
-			    break;
-			case RAWSXP:
-			    {
-				SEXP s = allocVector(RAWSXP, 1);
-				RAW(s)[0] = RAW(job->XX)[i];
-				SETCAR(argcell, s);
-			    }
-			    break;
-			case STRSXP:
-			    SETCAR(argcell, ScalarString(STRING_ELT(job->XX, i)));
-			    break;
-			case CPLXSXP:
-			    {
-				SEXP s = allocVector(CPLXSXP, 1);
-				COMPLEX(s)[0] = COMPLEX_ELT(job->XX, i);
-				SETCAR(argcell, s);
-			    }
-			    break;
-			default:
-			    {
-				char msg[128];
-				snprintf(msg, sizeof(msg),
-					 "mtlapply: unsupported type '%s'", R_typeToChar(job->XX));
-				mtl_job_set_error(job, msg);
-			    }
-			    break;
-			}
-			if (atomic_load_explicit(&job->cancel_requested, memory_order_relaxed))
-			    break;
-		    }
+		    /* job->XX is normalized to VECSXP by do_mtlapply(). */
+		    SETCAR(argcell, VECTOR_ELT(job->XX, i));
 		    if (atomic_load_explicit(&job->cancel_requested, memory_order_relaxed))
 			break;
 		    atomic_fetch_add_explicit(&job->active_eval_workers, 1, memory_order_relaxed);
@@ -698,9 +704,6 @@ static void mtl_job_release(mtl_job_t *job)
 		    job->results[i] = val;
 		    UNPROTECT(1);
 		    atomic_fetch_sub_explicit(&job->active_eval_workers, 1, memory_order_relaxed);
-		    }
-		    if (atomic_load_explicit(&job->cancel_requested, memory_order_relaxed))
-			break;
 		}
 
 			UNPROTECT(3); /* tail, argcell, fcall */
@@ -808,90 +811,34 @@ static void mtl_main_eval_loop(mtl_job_t *job, SEXP env, SEXP ans)
 	    SEXP fcall = PROTECT(LCONS(job->FUN, argcell));
 	    MARK_NOT_MUTABLE(fcall);
 
-		for (;;) {
-		    if (atomic_load_explicit(&job->cancel_requested, memory_order_relaxed))
-			break;
-		    long start = atomic_fetch_add_explicit(&job->next, MTL_WORK_CHUNK,
-							   memory_order_relaxed);
-		    if (start < 0 || (R_xlen_t) start >= job->n)
-			break;
-		    long end = start + MTL_WORK_CHUNK;
-		    if ((R_xlen_t) end > job->n)
-			end = (long) job->n;
+    for (R_xlen_t i = 0; i < job->n; i++) {
+	if (atomic_load_explicit(&job->cancel_requested, memory_order_relaxed))
+	    break;
 
-		    for (long idx = start; idx < end; idx++) {
-			R_xlen_t i = (R_xlen_t) idx;
-			if (atomic_load_explicit(&job->cancel_requested, memory_order_relaxed))
-			    break;
+	/* job->XX is normalized to VECSXP by do_mtlapply(). */
+	SETCAR(argcell, VECTOR_ELT(job->XX, i));
 
-		/* Set the function's first argument for this iteration. */
-		if (TYPEOF(job->XX) == VECSXP || TYPEOF(job->XX) == EXPRSXP) {
-		    SETCAR(argcell, VECTOR_ELT(job->XX, i));
-		} else {
-		    switch (TYPEOF(job->XX)) {
-		    case LGLSXP:
-			SETCAR(argcell, ScalarLogical(LOGICAL_ELT(job->XX, i)));
-			break;
-		    case INTSXP:
-			SETCAR(argcell, ScalarInteger(INTEGER_ELT(job->XX, i)));
-			break;
-		    case REALSXP:
-			SETCAR(argcell, ScalarReal(REAL_ELT(job->XX, i)));
-			break;
-		    case RAWSXP:
-			{
-			    SEXP s = allocVector(RAWSXP, 1);
-			    RAW(s)[0] = RAW(job->XX)[i];
-			    SETCAR(argcell, s);
-			}
-			break;
-		    case STRSXP:
-			SETCAR(argcell, ScalarString(STRING_ELT(job->XX, i)));
-			break;
-		    case CPLXSXP:
-			{
-			    SEXP s = allocVector(CPLXSXP, 1);
-			    COMPLEX(s)[0] = COMPLEX_ELT(job->XX, i);
-			    SETCAR(argcell, s);
-			}
-			break;
-		    default:
-			{
-			    char msg[128];
-			    snprintf(msg, sizeof(msg),
-				     "mtlapply: unsupported type '%s'", R_typeToChar(job->XX));
-			    mtl_job_set_error(job, msg);
-			}
-			break;
-		    }
-		    if (atomic_load_explicit(&job->cancel_requested, memory_order_relaxed))
-			break;
-		}
+	int err = 0;
+	mtl_parallel_begin();
+	SEXP val = R_tryEvalSilent(fcall, env, &err);
+	mtl_parallel_end();
+	if (err || val == NULL) {
+	    const char *msg = R_curErrorBuf();
+	    mtl_job_set_error(job, msg);
+	    break;
+	}
 
-		int err = 0;
-		mtl_parallel_begin();
-		SEXP val = R_tryEvalSilent(fcall, env, &err);
-		mtl_parallel_end();
-		if (err || val == NULL) {
-		    const char *msg = R_curErrorBuf();
-		    mtl_job_set_error(job, msg);
-		    break;
-		}
-
-		PROTECT(val);
-		if (MAYBE_REFERENCED(val)) {
-		    SEXP dup = lazy_duplicate(val);
-		    UNPROTECT(1);
-		    val = dup;
-		    PROTECT(val);
-		}
-		/* Root via the answer list (scanned by GC); no PreserveObject here. */
-		SET_VECTOR_ELT(ans, i, val);
-		UNPROTECT(1);
-		    }
-		    if (atomic_load_explicit(&job->cancel_requested, memory_order_relaxed))
-			break;
-	    }
+	PROTECT(val);
+	if (MAYBE_REFERENCED(val)) {
+	    SEXP dup = lazy_duplicate(val);
+	    UNPROTECT(1);
+	    val = dup;
+	    PROTECT(val);
+	}
+	/* Root via the answer list (scanned by GC); no PreserveObject here. */
+	SET_VECTOR_ELT(ans, i, val);
+	UNPROTECT(1);
+    }
 
 	    UNPROTECT(3); /* tail, argcell, fcall */
 	}
@@ -1192,6 +1139,8 @@ attribute_hidden SEXP do_mtlapply(SEXP call, SEXP op, SEXP args, SEXP rho)
 	    /* 'threads' is the number of worker slots for this call. */
 	    if (nthreads > n) nthreads = (int) n;
 	    int n_bg_threads = nthreads;
+	    if (n_bg_threads > 0 && n > (R_xlen_t) LONG_MAX)
+		error("mtlapply: long-vector length is not supported in threaded mode");
 
 	    /* gc.torture exercises collector paths that are not currently safe to
 	       run concurrently across worker interpreters. Keep semantics by running
@@ -1252,6 +1201,7 @@ attribute_hidden SEXP do_mtlapply(SEXP call, SEXP op, SEXP args, SEXP rho)
 			job->results = (SEXP *) calloc((size_t) n, sizeof(SEXP));
 			if (job->results == NULL)
 			    error(_("cannot allocate memory"));
+			mtl_job_init_ranges(job);
 		    }
 
 			    mtlapply_run_data_t run_data;
