@@ -206,7 +206,8 @@ loadNamespace <- function (package, lib.loc = NULL,
         pkg <- as.character(package)[[1L]]
         mc$package <- pkg
         ans <- .Internal(mtonmain(mc, globalenv()))
-        .Internal(mtonmain(call("base:::.mtl_force_namespace", pkg), globalenv()))
+        .Internal(mtonmain(substitute(base:::.mtl_force_namespace(PKG),
+                                      list(PKG = pkg)), globalenv()))
         return(ans)
     }
 
@@ -866,7 +867,8 @@ requireNamespace <- function (package, ..., quietly = FALSE)
         mc$package <- pkg
         ans <- .Internal(mtonmain(mc, globalenv()))
         if (isTRUE(ans))
-            .Internal(mtonmain(call("base:::.mtl_force_namespace", pkg),
+            .Internal(mtonmain(substitute(base:::.mtl_force_namespace(PKG),
+                                          list(PKG = pkg)),
                                globalenv()))
         return(ans)
     }

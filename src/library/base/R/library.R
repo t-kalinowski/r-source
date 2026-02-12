@@ -77,7 +77,8 @@ function(package, help, pos = 2, lib.loc = NULL, character.only = FALSE,
         }
         ans <- .Internal(mtonmain(mc, globalenv()))
         if (!is.null(pkg) && nzchar(pkg))
-            .Internal(mtonmain(call("base:::.mtl_force_namespace", pkg), globalenv()))
+            .Internal(mtonmain(substitute(base:::.mtl_force_namespace(PKG),
+                                          list(PKG = pkg)), globalenv()))
         return(ans)
     }
 

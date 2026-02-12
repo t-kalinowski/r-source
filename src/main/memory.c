@@ -2182,7 +2182,7 @@ static SEXP NewWeakRef(SEXP key, SEXP val, SEXP fin, Rboolean onexit)
     SEXP w;
 
     if (R_Interpreter != NULL && R_Interpreter->isMTLWorker)
-	error(_("weak references/finalizers are not supported on mtlapply() worker threads"));
+	error(_("weak references/finalizers are not supported in mtlapply() worker threads"));
 
     switch (TYPEOF(key)) {
     case NILSXP:
