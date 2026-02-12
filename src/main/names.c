@@ -662,6 +662,9 @@ FUNTAB R_FunTab[] =
 {"mtlpoolstats", do_mtlpoolstats, 0,	11,	1,	{PP_FUNCALL, PREC_FN,	0}},
 {"mtlrpcstats", do_mtlrpcstats, 0,	11,	1,	{PP_FUNCALL, PREC_FN,	0}},
 {"mtlpoolreset", do_mtlpoolreset, 0,	11,	0,	{PP_FUNCALL, PREC_FN,	0}},
+{"mtbackground", do_mtbackground, 0,	11,	2,	{PP_FUNCALL, PREC_FN,	0}},
+{"mtwait", do_mtwait,	0,	11,	2,	{PP_FUNCALL, PREC_FN,	0}},
+{"mtcancel", do_mtcancel, 0,	11,	1,	{PP_FUNCALL, PREC_FN,	0}},
 {"vapply",	do_vapply,	0,	10,	4,	{PP_FUNCALL, PREC_FN,	0}},
 {"mapply",	do_mapply,	0,	11,	3,	{PP_FUNCALL, PREC_FN,	0}},
 

@@ -31,6 +31,8 @@
 # include <stdatomic.h>
 # include <stdint.h>
 # include <limits.h>
+# include <errno.h>
+# include <time.h>
 #endif
 
 static SEXP checkArgIsSymbol(SEXP x) {
@@ -56,6 +58,28 @@ static const char *mtl_rpc_reason_name_lookup(int reason)
 }
 
 #ifdef HAVE_PTHREAD
+	typedef enum {
+	    MTL_FUTURE_PENDING = 0,
+	    MTL_FUTURE_RUNNING = 1,
+	    MTL_FUTURE_FULFILLED = 2,
+	    MTL_FUTURE_REJECTED = 3,
+	    MTL_FUTURE_CANCELLED = 4
+	} mtl_future_status_t;
+
+	typedef struct mtl_future_t_ {
+	    SEXP expr;
+	    SEXP env;
+	    SEXP value;
+	    mtl_future_status_t status;
+	    int cancel_requested;
+	    int detached;
+	    int enqueued;
+	    int main_showErrorMessages;
+	    char errmsg[1024];
+	    struct mtl_future_t_ *next_q;
+	    struct mtl_future_t_ *next_all;
+	} mtl_future_t;
+
 	typedef struct mtl_job_t_ {
 	    SEXP XX;
 	    SEXP FUN;
@@ -120,6 +144,11 @@ static const char *mtl_rpc_reason_name_lookup(int reason)
 	    mtl_main_req_t *rpc_head;
 	    mtl_main_req_t *rpc_tail;
 	    int rpc_aborted;
+
+	    mtl_future_t *future_q_head;
+	    mtl_future_t *future_q_tail;
+	    mtl_future_t *future_all;
+	    int future_running;
 	} mtl_pool_t;
 
 static int mtl_trace_cached = -1;
@@ -181,6 +210,7 @@ static pthread_t mtl_main_thread;
 static mtl_pool_t mtl_pool;
 static atomic_int mtl_pool_threads_created = 0;
 static SEXP mtl_dotOptionsSym = NULL;
+static SEXP mtl_futurePtrSym = NULL;
 
 			static void mtl_interp_init_from_main(R_InterpreterState *st)
 			{
@@ -303,6 +333,7 @@ static Rboolean mtl_is_main_thread(void)
 		    pthread_mutex_init(&mtl_pool.mu, NULL);
 		    pthread_cond_init(&mtl_pool.cv, NULL);
 		    mtl_dotOptionsSym = install(".Options");
+		    mtl_futurePtrSym = install("ptr");
 		    mtl_pool.inited = 1;
 		}
 
@@ -478,13 +509,158 @@ static int mtl_job_claim_index(mtl_job_t *job, int wid, R_xlen_t *out)
     return 0;
 }
 
-		attribute_hidden SEXP R_mtl_invoke_on_main(SEXP (*fun)(void *), void *data)
-		{
-		    return R_mtl_invoke_on_main_reason(fun, data, R_MTL_RPC_OTHER);
-		}
+static R_INLINE int mtl_future_is_terminal(mtl_future_t *f)
+{
+    return (f->status == MTL_FUTURE_FULFILLED ||
+	    f->status == MTL_FUTURE_REJECTED ||
+	    f->status == MTL_FUTURE_CANCELLED);
+}
 
-		attribute_hidden SEXP R_mtl_invoke_on_main_reason(SEXP (*fun)(void *), void *data,
-								  int reason)
+static void mtl_future_queue_push_locked(mtl_future_t *f)
+{
+    f->next_q = NULL;
+    if (mtl_pool.future_q_tail != NULL)
+	mtl_pool.future_q_tail->next_q = f;
+    else
+	mtl_pool.future_q_head = f;
+    mtl_pool.future_q_tail = f;
+    f->enqueued = 1;
+}
+
+static mtl_future_t *mtl_future_queue_pop_locked(void)
+{
+    mtl_future_t *f = mtl_pool.future_q_head;
+    if (f == NULL)
+	return NULL;
+    mtl_pool.future_q_head = f->next_q;
+    if (mtl_pool.future_q_head == NULL)
+	mtl_pool.future_q_tail = NULL;
+    f->next_q = NULL;
+    f->enqueued = 0;
+    return f;
+}
+
+static void mtl_future_queue_remove_locked(mtl_future_t *target)
+{
+    mtl_future_t *prev = NULL, *cur = mtl_pool.future_q_head;
+    while (cur != NULL) {
+	if (cur == target) {
+	    if (prev != NULL)
+		prev->next_q = cur->next_q;
+	    else
+		mtl_pool.future_q_head = cur->next_q;
+	    if (mtl_pool.future_q_tail == cur)
+		mtl_pool.future_q_tail = prev;
+	    cur->next_q = NULL;
+	    cur->enqueued = 0;
+	    return;
+	}
+	prev = cur;
+	cur = cur->next_q;
+    }
+}
+
+static void mtl_future_release_storage(mtl_future_t *f)
+{
+    if (f == NULL)
+	return;
+    if (f->value != R_NilValue)
+	R_ReleaseObject(f->value);
+    if (f->expr != R_NilValue)
+	R_ReleaseObject(f->expr);
+    if (f->env != R_NilValue)
+	R_ReleaseObject(f->env);
+    free(f);
+}
+
+static void mtl_future_sweep_locked(void)
+{
+    mtl_future_t *prev = NULL, *cur = mtl_pool.future_all;
+    while (cur != NULL) {
+	mtl_future_t *next = cur->next_all;
+	if (cur->detached && mtl_future_is_terminal(cur) && !cur->enqueued) {
+	    if (prev != NULL)
+		prev->next_all = next;
+	    else
+		mtl_pool.future_all = next;
+	    mtl_future_release_storage(cur);
+	} else {
+	    prev = cur;
+	}
+	cur = next;
+    }
+}
+
+static void mtl_set_threading_active_locked(void)
+{
+    if (mtl_pool.job_depth == 0 &&
+	mtl_pool.future_q_head == NULL &&
+	mtl_pool.future_running == 0)
+	R_mtl_set_threading_active(0);
+    else
+	R_mtl_set_threading_active(1);
+}
+
+static mtl_future_t *mtl_future_from_sexp(SEXP fut)
+{
+    if (TYPEOF(fut) != VECSXP)
+	error(_("'%s' must be an mt_future object"), "future");
+    if (mtl_futurePtrSym == NULL)
+	mtl_futurePtrSym = install("ptr");
+    SEXP ptr = getAttrib(fut, mtl_futurePtrSym);
+    if (TYPEOF(ptr) != EXTPTRSXP || R_ExternalPtrAddr(ptr) == NULL)
+	error(_("invalid mt_future handle"));
+    return (mtl_future_t *) R_ExternalPtrAddr(ptr);
+}
+
+static void mtl_future_finalizer(SEXP ext)
+{
+    mtl_future_t *f = (mtl_future_t *) R_ExternalPtrAddr(ext);
+    if (f == NULL)
+	return;
+    if (!mtl_pool.inited || mtl_pool.shutdown) {
+	R_ClearExternalPtr(ext);
+	return;
+    }
+    pthread_mutex_lock(&mtl_pool.mu);
+    f->detached = 1;
+    if (f->status == MTL_FUTURE_PENDING && f->enqueued) {
+	mtl_future_queue_remove_locked(f);
+	f->status = MTL_FUTURE_CANCELLED;
+	f->cancel_requested = 1;
+    }
+    mtl_set_threading_active_locked();
+    pthread_cond_broadcast(&mtl_pool.cv);
+    if (mtl_is_main_thread())
+	mtl_future_sweep_locked();
+    pthread_mutex_unlock(&mtl_pool.mu);
+    R_ClearExternalPtr(ext);
+}
+
+static int mtl_timeout_to_deadline(double timeout, struct timespec *out)
+{
+    if (!R_FINITE(timeout) || timeout < 0)
+	return 0;
+    struct timespec now;
+    clock_gettime(CLOCK_REALTIME, &now);
+    long sec = (long) timeout;
+    long nsec = (long) ((timeout - (double) sec) * 1e9);
+    out->tv_sec = now.tv_sec + sec;
+    out->tv_nsec = now.tv_nsec + nsec;
+    if (out->tv_nsec >= 1000000000L) {
+	out->tv_sec += 1;
+	out->tv_nsec -= 1000000000L;
+    }
+    return 1;
+}
+
+			attribute_hidden SEXP R_mtl_invoke_on_main(SEXP (*fun)(void *), void *data)
+			{
+			    return R_mtl_invoke_on_main_reason(fun, data, R_MTL_RPC_OTHER);
+			}
+
+			attribute_hidden SEXP R_mtl_invoke_on_main_reason(SEXP (*fun)(void *), void *data,
+									  int reason)
 		{
 		    if (fun == NULL)
 			error("R_mtl_invoke_on_main: NULL fun");
@@ -511,12 +687,16 @@ static int mtl_job_claim_index(mtl_job_t *job, int wid, R_xlen_t *out)
 	    pthread_cond_init(&r->cv, NULL);
 
 		    pthread_mutex_lock(&mtl_pool.mu);
-		    if (mtl_pool.job_top == NULL || mtl_pool.rpc_aborted) {
+		    if (mtl_pool.shutdown ||
+			((mtl_pool.job_top == NULL) &&
+			 (mtl_pool.future_q_head == NULL) &&
+			 (mtl_pool.future_running == 0)) ||
+			mtl_pool.rpc_aborted) {
 		pthread_mutex_unlock(&mtl_pool.mu);
 		pthread_mutex_destroy(&r->mu);
 		pthread_cond_destroy(&r->cv);
 		free(r);
-		error("R_mtl_invoke_on_main: no active mtlapply() job");
+		error("R_mtl_invoke_on_main: no active threaded job");
 	    }
 		    if (mtl_pool.rpc_tail)
 			mtl_pool.rpc_tail->next = r;
@@ -547,8 +727,50 @@ static int mtl_job_claim_index(mtl_job_t *job, int wid, R_xlen_t *out)
 			atomic_fetch_add_explicit(&mtl_rpc_errors[reason], 1, memory_order_relaxed);
 		    if (!ok)
 			error("%s", msg[0] ? msg : "error");
-		    return res;
-		}
+			    return res;
+			}
+
+	typedef struct {
+	    R_InterpreterState *interp;
+	    SEXP value;
+	    SEXP out;
+	} mtl_future_copy_t;
+
+	static SEXP mtl_future_copy_main(void *vp)
+	{
+	    mtl_future_copy_t *d = (mtl_future_copy_t *) vp;
+	    SEXP out = duplicate(d->value);
+	    R_PreserveObject(out);
+	    d->out = out;
+	    if (d->interp != NULL) {
+		R_mtl_adopt_worker_heap(d->interp);
+		d->interp->preciousList = R_NilValue;
+	    }
+	    return out;
+	}
+
+static void mtl_future_copy_main_exec(void *vp)
+{
+    mtl_future_copy_t *d = (mtl_future_copy_t *) vp;
+    d->out = R_mtl_invoke_on_main_reason(mtl_future_copy_main, d, R_MTL_RPC_OTHER);
+}
+
+static SEXP mtl_future_adopt_main(void *vp)
+{
+    mtl_future_copy_t *d = (mtl_future_copy_t *) vp;
+    if (d->interp != NULL) {
+	R_mtl_adopt_worker_heap(d->interp);
+	d->interp->preciousList = R_NilValue;
+    }
+    d->out = R_NilValue;
+    return R_NilValue;
+}
+
+static void mtl_future_adopt_main_exec(void *vp)
+{
+    mtl_future_copy_t *d = (mtl_future_copy_t *) vp;
+    R_mtl_invoke_on_main_reason(mtl_future_adopt_main, d, R_MTL_RPC_OTHER);
+}
 
 	static void *mtl_pool_worker_main(void *vp)
 	{
@@ -597,24 +819,41 @@ static int mtl_job_claim_index(mtl_job_t *job, int wid, R_xlen_t *out)
     w->interp.oldCStackLimit = (uintptr_t) 0;
 
 	    for (;;) {
-		pthread_mutex_lock(&p->mu);
-		while (!p->shutdown &&
-		       (p->job_top == NULL ||
-			w->id >= p->job_top->bg_threads ||
-			w->seen_gen == p->gen)) {
-	    pthread_cond_wait(&p->cv, &p->mu);
-	}
-	if (p->shutdown) {
-	    pthread_mutex_unlock(&p->mu);
-	    break;
-	}
+		mtl_job_t *job = NULL;
+		mtl_future_t *future = NULL;
+		int run_job = 0;
 
-		mtl_job_t *job = p->job_top;
-		unsigned long mygen = p->gen;
-		w->seen_gen = mygen;
-		atomic_fetch_add_explicit(&job->refcount, 1, memory_order_relaxed);
+		pthread_mutex_lock(&p->mu);
+		for (;;) {
+		    int job_ready = (p->job_top != NULL &&
+				     w->id < p->job_top->bg_threads &&
+				     w->seen_gen != p->gen);
+		    if (p->shutdown || job_ready || p->future_q_head != NULL) {
+			run_job = job_ready;
+			break;
+		    }
+		    pthread_cond_wait(&p->cv, &p->mu);
+		}
+		if (p->shutdown) {
+		    pthread_mutex_unlock(&p->mu);
+		    break;
+		}
+
+		if (run_job) {
+		    job = p->job_top;
+		    w->seen_gen = p->gen;
+		    atomic_fetch_add_explicit(&job->refcount, 1, memory_order_relaxed);
+		} else {
+		    future = mtl_future_queue_pop_locked();
+		    if (future != NULL && future->status == MTL_FUTURE_PENDING) {
+			future->status = MTL_FUTURE_RUNNING;
+			p->future_running++;
+		    } else
+			future = NULL;
+		}
 		pthread_mutex_unlock(&p->mu);
 
+		if (job != NULL) {
 			/* Snapshot global options into the worker heap for this job.
 			   The worker sees/sets options against this snapshot (copy-on-write),
 			   so packages using withr::with_options() work without mutating global
@@ -632,31 +871,109 @@ static int mtl_job_claim_index(mtl_job_t *job, int wid, R_xlen_t *out)
 			SEXP tail = PROTECT(duplicate(job->tail0));
 			SEXP argcell = PROTECT(CONS(R_NilValue, tail));
 			SEXP fcall = PROTECT(LCONS(job->FUN, argcell));
-		MARK_NOT_MUTABLE(fcall);
+		    MARK_NOT_MUTABLE(fcall);
 
-		for (;;) {
-		    if (atomic_load_explicit(&job->cancel_requested, memory_order_relaxed))
-			break;
-		    R_xlen_t i = 0;
-		    if (!mtl_job_claim_index(job, w->id, &i))
-			break;
-		    if (atomic_load_explicit(&job->cancel_requested, memory_order_relaxed))
-			break;
+		    for (;;) {
+			if (atomic_load_explicit(&job->cancel_requested, memory_order_relaxed))
+			    break;
+			R_xlen_t i = 0;
+			if (!mtl_job_claim_index(job, w->id, &i))
+			    break;
+			if (atomic_load_explicit(&job->cancel_requested, memory_order_relaxed))
+			    break;
 
-		    /* Reset per-interpreter stacks/slots for this evaluation. */
-		    mtl_interp_reset_for_eval(&w->interp, job);
+			/* Reset per-interpreter stacks/slots for this evaluation. */
+			mtl_interp_reset_for_eval(&w->interp, job);
 
-		    /* job->XX is normalized to VECSXP by do_mtlapply(). */
-		    SETCAR(argcell, VECTOR_ELT(job->XX, i));
-		    if (atomic_load_explicit(&job->cancel_requested, memory_order_relaxed))
-			break;
-		    atomic_fetch_add_explicit(&job->active_eval_workers, 1, memory_order_relaxed);
-		    int err = 0;
+			/* job->XX is normalized to VECSXP by do_mtlapply(). */
+			SETCAR(argcell, VECTOR_ELT(job->XX, i));
+			if (atomic_load_explicit(&job->cancel_requested, memory_order_relaxed))
+			    break;
+			atomic_fetch_add_explicit(&job->active_eval_workers, 1, memory_order_relaxed);
+			int err = 0;
 #ifdef R_USE_SIGNALS
-		    /* R_tryEvalSilent() errors unwind to this thread's toplevel
-		       context. Refresh the baseline snapshots before each eval so
-		       unwind restores the current protection/vmax/node-stack state
-		       (including job-scoped PROTECTs like fcall/argcell/tail). */
+			/* R_tryEvalSilent() errors unwind to this thread's toplevel
+			   context. Refresh the baseline snapshots before each eval so
+			   unwind restores the current protection/vmax/node-stack state
+			   (including job-scoped PROTECTs like fcall/argcell/tail). */
+			R_Toplevel.cstacktop = R_PPStackTop;
+			R_Toplevel.gcenabled = R_GCEnabled;
+			R_Toplevel.bcintactive = R_BCIntActive;
+			R_Toplevel.bcpc = R_BCpc;
+			R_Toplevel.bcbody = R_BCbody;
+			R_Toplevel.bcframe = R_BCFrame;
+			R_Toplevel.vmax = vmaxget();
+			R_Toplevel.intsusp = R_interrupts_suspended;
+			R_Toplevel.nodestack = R_BCNodeStackTop;
+			R_Toplevel.bcprottop = R_BCProtTop;
+			R_Toplevel.handlerstack = R_HandlerStack;
+			R_Toplevel.restartstack = R_RestartStack;
+			R_Toplevel.prstack = R_PendingPromises;
+			R_Toplevel.evaldepth = R_EvalDepth;
+			R_Toplevel.srcref = R_Srcref;
+#endif
+			mtl_parallel_begin();
+			if (mtl_trace_enabled()) {
+			    fprintf(stderr, "[mtl] worker=%p eval i=%lld begin\n",
+				    (void *)w, (long long)i);
+			    fflush(stderr);
+			}
+			SEXP val = R_tryEvalSilent(fcall, job->eval_env, &err);
+			if (mtl_trace_enabled()) {
+			    fprintf(stderr, "[mtl] worker=%p eval i=%lld end err=%d\n",
+				    (void *)w, (long long)i, err);
+			    fflush(stderr);
+			}
+			mtl_parallel_end();
+			if (err || val == NULL) {
+			    const char *msg = R_curErrorBuf();
+			    mtl_job_set_error(job, msg);
+			    atomic_fetch_sub_explicit(&job->active_eval_workers, 1, memory_order_relaxed);
+			    break;
+			}
+
+			PROTECT(val);
+			if (MAYBE_REFERENCED(val)) {
+			    SEXP dup = lazy_duplicate(val);
+			    UNPROTECT(1);
+			    val = dup;
+			    PROTECT(val);
+			}
+			/* Worker GC is disabled while jobs run, and the whole worker heap
+			   is adopted by main before results are consumed. Preserving each
+			   element individually adds measurable overhead for small closures
+			   and is unnecessary under this lifetime model. */
+			job->results[i] = val;
+			UNPROTECT(1);
+			atomic_fetch_sub_explicit(&job->active_eval_workers, 1, memory_order_relaxed);
+		    }
+
+			UNPROTECT(3); /* tail, argcell, fcall */
+
+			/* Drop worker-local options before GC/adoption: keep them job-local. */
+			w->interp.mtlOptions = R_NilValue;
+			w->interp.mtlOptionsBase = R_NilValue;
+
+			/* Worker GC is disabled; adoption/reset happens on main thread. */
+			pthread_mutex_lock(&p->mu);
+			atomic_fetch_add_explicit(&job->workers_done, 1, memory_order_relaxed);
+			pthread_cond_broadcast(&p->cv);
+			pthread_mutex_unlock(&p->mu);
+			mtl_job_release(job);
+			continue;
+		}
+
+		if (future != NULL) {
+		    mtl_job_t fake_job;
+		    memset(&fake_job, 0, sizeof(fake_job));
+		    fake_job.main_showErrorMessages = future->main_showErrorMessages;
+		    mtl_interp_reset_for_eval(&w->interp, &fake_job);
+
+		    int err = 0;
+		    const char *errmsg = NULL;
+		    SEXP out = R_NilValue;
+
+#ifdef R_USE_SIGNALS
 		    R_Toplevel.cstacktop = R_PPStackTop;
 		    R_Toplevel.gcenabled = R_GCEnabled;
 		    R_Toplevel.bcintactive = R_BCIntActive;
@@ -674,54 +991,51 @@ static int mtl_job_claim_index(mtl_job_t *job, int wid, R_xlen_t *out)
 		    R_Toplevel.srcref = R_Srcref;
 #endif
 		    mtl_parallel_begin();
-		    if (mtl_trace_enabled()) {
-			fprintf(stderr, "[mtl] worker=%p eval i=%lld begin\n",
-				(void *)w, (long long)i);
-		fflush(stderr);
-	    }
-		    SEXP val = R_tryEvalSilent(fcall, job->eval_env, &err);
-		    if (mtl_trace_enabled()) {
-			fprintf(stderr, "[mtl] worker=%p eval i=%lld end err=%d\n",
-				(void *)w, (long long)i, err);
-			fflush(stderr);
-		    }
-	    mtl_parallel_end();
-		    if (err || val == NULL) {
-			const char *msg = R_curErrorBuf();
-			mtl_job_set_error(job, msg);
-			atomic_fetch_sub_explicit(&job->active_eval_workers, 1, memory_order_relaxed);
-			break;
+		    SEXP val = R_tryEvalSilent(future->expr, future->env, &err);
+		    mtl_parallel_end();
+		    int cancelled = 0;
+		    pthread_mutex_lock(&p->mu);
+		    cancelled = future->cancel_requested;
+		    pthread_mutex_unlock(&p->mu);
+		    if (!err && val != NULL && !cancelled) {
+			mtl_future_copy_t cp;
+			cp.interp = &w->interp;
+			cp.value = val;
+			cp.out = R_NilValue;
+			Rboolean copy_ok = R_ToplevelExec(mtl_future_copy_main_exec, &cp);
+			if (copy_ok && cp.out != R_NilValue)
+			    out = cp.out;
+			else {
+			    err = 1;
+			    errmsg = R_curErrorBuf();
+			}
+		    } else {
+			mtl_future_copy_t cp;
+			cp.interp = &w->interp;
+			cp.value = R_NilValue;
+			cp.out = R_NilValue;
+			R_ToplevelExec(mtl_future_adopt_main_exec, &cp);
+			if (err)
+			    errmsg = R_curErrorBuf();
 		    }
 
-		    PROTECT(val);
-		    if (MAYBE_REFERENCED(val)) {
-			SEXP dup = lazy_duplicate(val);
-			UNPROTECT(1);
-			val = dup;
-			PROTECT(val);
+		    pthread_mutex_lock(&p->mu);
+		    if (future->cancel_requested) {
+			future->status = MTL_FUTURE_CANCELLED;
+		    } else if (err || out == R_NilValue) {
+			future->status = MTL_FUTURE_REJECTED;
+			snprintf(future->errmsg, sizeof(future->errmsg), "%s",
+				 (errmsg && errmsg[0]) ? errmsg : "background error");
+		    } else {
+			future->status = MTL_FUTURE_FULFILLED;
+			future->value = out;
 		    }
-		    /* Worker GC is disabled while jobs run, and the whole worker heap
-		       is adopted by main before results are consumed. Preserving each
-		       element individually adds measurable overhead for small closures
-		       and is unnecessary under this lifetime model. */
-		    job->results[i] = val;
-		    UNPROTECT(1);
-		    atomic_fetch_sub_explicit(&job->active_eval_workers, 1, memory_order_relaxed);
+		    if (p->future_running > 0)
+			p->future_running--;
+		    mtl_set_threading_active_locked();
+		    pthread_cond_broadcast(&p->cv);
+		    pthread_mutex_unlock(&p->mu);
 		}
-
-			UNPROTECT(3); /* tail, argcell, fcall */
-
-				/* Drop worker-local options before GC/adoption: keep them job-local. */
-				w->interp.mtlOptions = R_NilValue;
-				w->interp.mtlOptionsBase = R_NilValue;
-
-			/* Worker GC is disabled; adoption/reset happens on main thread. */
-
-			pthread_mutex_lock(&p->mu);
-			atomic_fetch_add_explicit(&job->workers_done, 1, memory_order_relaxed);
-			pthread_cond_broadcast(&p->cv);
-			pthread_mutex_unlock(&p->mu);
-		mtl_job_release(job);
 	    }
 
     R_InterpreterTLS = saved_interp;
@@ -785,11 +1099,13 @@ attribute_hidden void R_mtlpool_shutdown(void)
 
     pthread_mutex_lock(&mtl_pool.mu);
     mtl_pool.shutdown = 1;
+    mtl_rpc_abort_all_locked();
     pthread_cond_broadcast(&mtl_pool.cv);
     pthread_mutex_unlock(&mtl_pool.mu);
 
     for (int i = 0; i < mtl_pool.nthreads; i++)
 	pthread_join(mtl_pool.threads[i], NULL);
+
     for (int i = 0; i < mtl_pool.nthreads; i++)
 	free(mtl_pool.workers[i]);
     free(mtl_pool.workers);
@@ -936,8 +1252,6 @@ static SEXP mtl_serial_apply_no_pool(SEXP XX, SEXP FUN, SEXP dots, SEXP names, S
 	    d->mu_locked = 1;
 
 	    if (mtl_pool.job_depth == 0) {
-		/* Enable threaded allocator/GC fast paths only while workers may run. */
-		R_mtl_set_threading_active(1);
 		/* New top-level job: clear any pending/aborted RPC state. */
 		mtl_pool.rpc_aborted = 0;
 		mtl_pool.rpc_head = NULL;
@@ -947,6 +1261,7 @@ static SEXP mtl_serial_apply_no_pool(SEXP XX, SEXP FUN, SEXP dots, SEXP names, S
 	    d->job->parent_job = mtl_pool.job_top;
 	    mtl_pool.job_top = d->job;
 	    mtl_pool.job_depth++;
+	    mtl_set_threading_active_locked();
 	    mtl_pool.gen++;
 	    pthread_cond_broadcast(&mtl_pool.cv);
 
@@ -974,8 +1289,8 @@ static SEXP mtl_serial_apply_no_pool(SEXP XX, SEXP FUN, SEXP dots, SEXP names, S
 			pthread_cond_broadcast(&mtl_pool.cv);
 		    }
 
-		    if (mtl_pool.job_depth == 0)
-			R_mtl_set_threading_active(0);
+	    if (mtl_pool.job_depth == 0)
+		mtl_set_threading_active_locked();
 
 	    pthread_mutex_unlock(&mtl_pool.mu);
 	    d->mu_locked = 0;
@@ -1035,7 +1350,7 @@ static void mtlapply_run_cleanup(void *vp, Rboolean jump)
     }
 
     if (mtl_pool.job_depth == 0)
-	R_mtl_set_threading_active(0);
+	mtl_set_threading_active_locked();
 }
 #endif /* HAVE_PTHREAD */
 
@@ -1424,6 +1739,190 @@ attribute_hidden SEXP do_mtlpoolreset(SEXP call, SEXP op, SEXP args, SEXP rho)
 	R_mtlpool_shutdown();
 #endif
     return ScalarLogical(1);
+}
+
+/* .Internal(mtbackground(EXPR, ENV)) */
+attribute_hidden SEXP do_mtbackground(SEXP call, SEXP op, SEXP args, SEXP rho)
+{
+    checkArity(op, args);
+#ifndef HAVE_PTHREAD
+    error("background() requires pthreads support");
+#else
+    if (R_Interpreter != NULL && R_Interpreter->isMTLWorker)
+	error("background() may only be called from the main thread");
+
+    SEXP expr = CAR(args);
+    SEXP env = CADR(args);
+    if (TYPEOF(env) != ENVSXP)
+	error(_("'%s' must be an environment"), "env");
+
+    int nthreads = 2;
+    SEXP opt = GetOption1(install("mtlapply.threads"));
+    if (opt != R_NilValue && XLENGTH(opt) > 0)
+	nthreads = asInteger(opt);
+    if (nthreads == NA_INTEGER || nthreads < 1)
+	error("invalid value in options(\"mtlapply.threads\"): must be >= 1");
+
+    mtl_pool_init_if_needed();
+    mtl_pool_ensure_threads(nthreads);
+
+    mtl_future_t *f = (mtl_future_t *) calloc(1, sizeof(mtl_future_t));
+    if (f == NULL)
+	error(_("cannot allocate memory"));
+    f->expr = expr;
+    f->env = env;
+    f->value = R_NilValue;
+    f->status = MTL_FUTURE_PENDING;
+    f->cancel_requested = 0;
+    f->detached = 0;
+    f->enqueued = 0;
+    f->main_showErrorMessages = R_ShowErrorMessages;
+    f->errmsg[0] = '\0';
+    f->next_q = NULL;
+    f->next_all = NULL;
+    R_PreserveObject(f->expr);
+    R_PreserveObject(f->env);
+
+    pthread_mutex_lock(&mtl_pool.mu);
+    f->next_all = mtl_pool.future_all;
+    mtl_pool.future_all = f;
+    mtl_future_queue_push_locked(f);
+    mtl_pool.rpc_aborted = 0;
+    mtl_set_threading_active_locked();
+    pthread_cond_broadcast(&mtl_pool.cv);
+    pthread_mutex_unlock(&mtl_pool.mu);
+
+    SEXP ext = PROTECT(R_MakeExternalPtr(f, R_NilValue, R_NilValue));
+    R_RegisterCFinalizerEx(ext, mtl_future_finalizer, TRUE);
+    UNPROTECT(1);
+    return ext;
+#endif
+}
+
+/* .Internal(mtwait(FUTURES, TIMEOUT)) */
+attribute_hidden SEXP do_mtwait(SEXP call, SEXP op, SEXP args, SEXP rho)
+{
+    checkArity(op, args);
+#ifndef HAVE_PTHREAD
+    return R_NilValue;
+#else
+    SEXP futures = CAR(args);
+    double timeout = asReal(CADR(args));
+    if (ISNAN(timeout))
+	error(_("invalid '%s' value"), "timeout");
+    if (!isVectorList(futures))
+	error(_("'%s' must be a list of mt_future objects"), "futures");
+
+    R_xlen_t n = XLENGTH(futures);
+    if (n == 0)
+	return R_NilValue;
+
+    mtl_future_t **ptrs = (mtl_future_t **) R_alloc((size_t) n, sizeof(mtl_future_t *));
+    for (R_xlen_t i = 0; i < n; i++)
+	ptrs[i] = mtl_future_from_sexp(VECTOR_ELT(futures, i));
+
+    int have_deadline = 0;
+    struct timespec deadline;
+    if (timeout == 0)
+	have_deadline = 1, deadline.tv_sec = 0, deadline.tv_nsec = 0;
+    else if (R_FINITE(timeout))
+	have_deadline = mtl_timeout_to_deadline(timeout, &deadline);
+
+    int found_idx = -1;
+    mtl_future_status_t found_status = MTL_FUTURE_PENDING;
+    SEXP found_value = R_NilValue;
+    char found_err[1024];
+    found_err[0] = '\0';
+
+    pthread_mutex_lock(&mtl_pool.mu);
+    for (;;) {
+	if (mtl_is_main_thread())
+	    mtl_rpc_service_locked();
+	mtl_future_sweep_locked();
+	for (R_xlen_t i = 0; i < n; i++) {
+	    mtl_future_t *f = ptrs[i];
+	    if (f != NULL && mtl_future_is_terminal(f)) {
+		found_idx = (int) i + 1;
+		found_status = f->status;
+		found_value = f->value;
+		if (found_status == MTL_FUTURE_REJECTED)
+		    snprintf(found_err, sizeof(found_err), "%s", f->errmsg);
+		break;
+	    }
+	}
+	if (found_idx >= 0)
+	    break;
+	if (timeout == 0)
+	    break;
+	int rc = 0;
+	if (have_deadline)
+	    rc = pthread_cond_timedwait(&mtl_pool.cv, &mtl_pool.mu, &deadline);
+	else
+	    rc = pthread_cond_wait(&mtl_pool.cv, &mtl_pool.mu);
+	if (rc == ETIMEDOUT)
+	    break;
+    }
+    mtl_set_threading_active_locked();
+    pthread_mutex_unlock(&mtl_pool.mu);
+
+    if (found_idx < 0)
+	return R_NilValue;
+
+    SEXP out = PROTECT(allocVector(VECSXP, 5));
+    SEXP nms = PROTECT(allocVector(STRSXP, 5));
+    SET_VECTOR_ELT(out, 0, ScalarInteger(found_idx));
+    SET_VECTOR_ELT(out, 1, ScalarLogical(found_status == MTL_FUTURE_FULFILLED));
+    SET_VECTOR_ELT(out, 2, (found_status == MTL_FUTURE_FULFILLED) ? found_value : R_NilValue);
+    if (found_status == MTL_FUTURE_REJECTED)
+	SET_VECTOR_ELT(out, 3, mkString(found_err[0] ? found_err : "background error"));
+    else
+	SET_VECTOR_ELT(out, 3, R_NilValue);
+    SET_VECTOR_ELT(out, 4, ScalarLogical(found_status == MTL_FUTURE_CANCELLED));
+    SET_STRING_ELT(nms, 0, mkChar("index"));
+    SET_STRING_ELT(nms, 1, mkChar("ok"));
+    SET_STRING_ELT(nms, 2, mkChar("value"));
+    SET_STRING_ELT(nms, 3, mkChar("error"));
+    SET_STRING_ELT(nms, 4, mkChar("cancelled"));
+    setAttrib(out, R_NamesSymbol, nms);
+    UNPROTECT(2);
+    return out;
+#endif
+}
+
+/* .Internal(mtcancel(FUTURE)) */
+attribute_hidden SEXP do_mtcancel(SEXP call, SEXP op, SEXP args, SEXP rho)
+{
+    checkArity(op, args);
+#ifndef HAVE_PTHREAD
+    return ScalarLogical(0);
+#else
+    SEXP fut = CAR(args);
+    mtl_future_t *f = mtl_future_from_sexp(fut);
+    int did = 0;
+    pthread_mutex_lock(&mtl_pool.mu);
+    if (f->status == MTL_FUTURE_PENDING && f->enqueued) {
+	mtl_future_queue_remove_locked(f);
+	f->status = MTL_FUTURE_CANCELLED;
+	f->cancel_requested = 1;
+	did = 1;
+    } else if (f->status == MTL_FUTURE_RUNNING) {
+	f->cancel_requested = 1;
+	did = 1;
+	while (f->status == MTL_FUTURE_RUNNING) {
+	    if (mtl_is_main_thread())
+		mtl_rpc_service_locked();
+	    if (f->status != MTL_FUTURE_RUNNING)
+		break;
+	    pthread_cond_wait(&mtl_pool.cv, &mtl_pool.mu);
+	}
+    }
+    mtl_set_threading_active_locked();
+    pthread_cond_broadcast(&mtl_pool.cv);
+    if (mtl_is_main_thread())
+	mtl_future_sweep_locked();
+    pthread_mutex_unlock(&mtl_pool.mu);
+    return ScalarLogical(did);
+#endif
 }
 
 /* .Internal(vapply(X, FUN, FUN.VALUE, USE.NAMES)) */
