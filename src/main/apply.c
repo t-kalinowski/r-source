@@ -988,12 +988,12 @@ static void mtl_future_adopt_main_exec(void *vp)
 			    val = dup;
 			    PROTECT(val);
 			}
-			/* Worker GC is disabled while jobs run, and the whole worker heap
-			   is adopted by main before results are consumed. In practice some
-			   code paths can still trigger collection pressure in workers, so
-			   root each result explicitly until main-thread consumption. */
-			R_PreserveObject(val);
 			job->results[i] = val;
+			/* Keep worker results reachable via the worker interpreter's
+			   precious list until main-thread adoption/collection. This avoids
+			   per-result R_PreserveObject/R_ReleaseObject traffic. */
+			SEXP keep = CONS(val, w->interp.preciousList);
+			w->interp.preciousList = keep;
 			UNPROTECT(1);
 			atomic_fetch_sub_explicit(&job->active_eval_workers, 1, memory_order_relaxed);
 			}
@@ -1608,13 +1608,9 @@ attribute_hidden SEXP do_mtlapply(SEXP call, SEXP op, SEXP args, SEXP rho)
 		char msg[1024];
 		snprintf(msg, sizeof(msg), "%s",
 			 job->errmsg[0] ? job->errmsg : "mtlapply error");
-		if (job->results != NULL) {
-		    for (R_xlen_t i = 0; i < n; i++) {
-			if (job->results[i] != NULL) {
-			    R_ReleaseObject(job->results[i]);
-			    job->results[i] = NULL;
-			}
-		    }
+		if (n_bg_threads > 0) {
+		    for (int t = 0; t < n_bg_threads; t++)
+			mtl_pool.workers[t]->interp.preciousList = R_NilValue;
 		}
 		mtl_job_release(job);
 		UNPROTECT(nprotect);
@@ -1633,13 +1629,12 @@ attribute_hidden SEXP do_mtlapply(SEXP call, SEXP op, SEXP args, SEXP rho)
 				for (R_xlen_t i = 0; i < n; i++) {
 				    if (job->results[i] != NULL) {
 					SET_VECTOR_ELT(ans, i, job->results[i]);
-					R_ReleaseObject(job->results[i]);
 					job->results[i] = NULL;
 				    }
 				}
-				/* Worker results are preserved in each worker interpreter while
-				   the job is running. Once results are adopted and rooted by 'ans',
-				   clear worker preserve lists to avoid stale cross-job preserves. */
+				/* Worker results are rooted via worker precious lists while the
+				   job is running. Once results are rooted by 'ans', clear those
+				   lists to avoid stale cross-job roots. */
 				if (noadopt == NULL || *noadopt == '\0') {
 				    for (int t = 0; t < n_bg_threads; t++)
 					mtl_pool.workers[t]->interp.preciousList = R_NilValue;
