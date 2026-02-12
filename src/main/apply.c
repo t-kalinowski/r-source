@@ -700,7 +700,10 @@ static int mtl_job_claim_index(mtl_job_t *job, int wid, R_xlen_t *out)
 			val = dup;
 			PROTECT(val);
 		    }
-		    R_PreserveObject(val);
+		    /* Worker GC is disabled while jobs run, and the whole worker heap
+		       is adopted by main before results are consumed. Preserving each
+		       element individually adds measurable overhead for small closures
+		       and is unnecessary under this lifetime model. */
 		    job->results[i] = val;
 		    UNPROTECT(1);
 		    atomic_fetch_sub_explicit(&job->active_eval_workers, 1, memory_order_relaxed);
