@@ -4649,14 +4649,14 @@ SEXP mkCharLenCE(const char *name, int len, cetype_t enc)
 	/* The CHARSXP cache (R_StringHash) is global and traced by the main GC,
 	   so it must only contain main-heap nodes. Run interning on main. */
 	char *buf = NULL;
-	if (len > 0) {
-	    buf = (char *) malloc((size_t) len + 1);
-	    if (buf == NULL)
-		error(_("cannot allocate memory"));
-	    memcpy(buf, name, (size_t) len);
-	    buf[len] = '\0';
-	}
-	mtl_mkchar_data_t d = { .name = (len > 0) ? buf : "", .len = len, .enc = enc };
+	if (len < 0)
+	    len = (int) strlen(name);
+	buf = (char *) malloc((size_t) len + 1);
+	if (buf == NULL)
+	    error(_("cannot allocate memory"));
+	memcpy(buf, name, (size_t) len);
+	buf[len] = '\0';
+	mtl_mkchar_data_t d = { .name = buf, .len = len, .enc = enc };
 	SEXP out = R_mtl_invoke_on_main_reason(mtl_mkCharLenCE_on_main, &d,
 					       R_MTL_RPC_MKCHAR);
 	free(buf);
