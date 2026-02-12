@@ -33,6 +33,21 @@ x <- mtlapply_with_threads(4L, 1:100, f)
 stopifnot(length(x) == 100L)
 stopifnot(isTRUE(all.equal(x[[3]]$v, cos(1:3))))
 
+# threads=1 is a strict serial fast path: behavior should match lapply().
+f_serial <- function(i) list(i = i, v = i * 2L + 1L)
+ref_serial <- lapply(1:200, f_serial)
+got_serial <- mtlapply_with_threads(1L, 1:200, f_serial)
+stopifnot(identical(ref_serial, got_serial))
+
+# threads=1 errors should propagate normally and not poison later evaluation.
+err_serial <- try(mtlapply_with_threads(1L, 1:50, function(i) {
+  if (i == 13L) stop("boom")
+  i
+}), silent = TRUE)
+stopifnot(inherits(err_serial, "try-error"))
+ok_serial <- lapply(1:50, function(i) i + 2L)
+stopifnot(identical(unlist(ok_serial, use.names = FALSE), 3:52))
+
 # Package/native-code story: install a minimal package with .Call() and ensure
 # calls from mtlapply() workers work, while writes to globalenv() error.
 pkg_src <- file.path(Sys.getenv("SRCDIR"), "Pkgs", "mtlPkg")

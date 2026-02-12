@@ -1235,6 +1235,21 @@ static R_INLINE int mtl_gc_owns_node(SEXP n)
     return owner == NULL || owner == R_HEAP;
 }
 
+/* Runtime ownership query for subsystems (e.g. arithmetic reuse) that must
+   avoid mutating objects borrowed from another heap. */
+attribute_hidden int R_mtl_current_heap_owns(SEXP s)
+{
+    if (s == NULL)
+	return 0;
+    if (__builtin_expect(!R_MTL_THREADING_ACTIVE, 1))
+	return 1;
+
+    R_mtl_heap_state *owner = mtl_sexp_owner(s);
+    if (R_HEAP->isWorker)
+	return owner == R_HEAP;
+    return owner == NULL || owner == R_HEAP;
+}
+
 /* Ownership checks are only needed while mtlapply workers are active.
    In pure serial execution, all nodes belong to the single main heap, and
    consulting page headers / the large-owner map is wasted work. */

@@ -65,8 +65,9 @@ SEXP do_log_builtin(SEXP call, SEXP op, SEXP args, SEXP env);
 static R_INLINE SEXP R_allocOrReuseVector(SEXP s1, SEXP s2,
 					  SEXPTYPE type , R_xlen_t n)
 {
-    if (R_Interpreter != NULL && R_Interpreter->isMTLWorker)
-	return allocVector(type, n);
+    int is_worker = (R_Interpreter != NULL && R_Interpreter->isMTLWorker);
+    int can_reuse_s1 = (!is_worker) || R_mtl_current_heap_owns(s1);
+    int can_reuse_s2 = (!is_worker) || R_mtl_current_heap_owns(s2);
 
     R_xlen_t n1 = XLENGTH(s1);
     R_xlen_t n2 = XLENGTH(s2);
@@ -75,7 +76,7 @@ static R_INLINE SEXP R_allocOrReuseVector(SEXP s1, SEXP s2,
        attributes will then take precedence when copied. */
 
     if (n == n2) {
-        if (TYPEOF(s2) == type && NO_REFERENCES(s2)) {
+        if (TYPEOF(s2) == type && NO_REFERENCES(s2) && can_reuse_s2) {
 	    if (ATTRIB(s2) != R_NilValue)
 		/* need to remove 'names' attribute if present to
 		   match what copyMostAttrib does. copyMostAttrib()
@@ -90,9 +91,10 @@ static R_INLINE SEXP R_allocOrReuseVector(SEXP s1, SEXP s2,
                we may not get attributes of result right. */
             if (n == n1 && TYPEOF(s1) == type && NO_REFERENCES(s1)
 		&& ATTRIB(s2) == R_NilValue)
-                return s1;
+                if (can_reuse_s1)
+                    return s1;
     }
-    else if (n == n1 && TYPEOF(s1) == type && NO_REFERENCES(s1))
+    else if (n == n1 && TYPEOF(s1) == type && NO_REFERENCES(s1) && can_reuse_s1)
 	return s1;
 
     return allocVector(type, n);

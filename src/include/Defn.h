@@ -1678,6 +1678,7 @@ attribute_hidden void R_mtl_global_lock(void);
 attribute_hidden void R_mtl_global_unlock(void);
 attribute_hidden void R_mtl_global_unlock_all(void);
 attribute_hidden int R_mtl_global_is_locked(void);
+attribute_hidden int R_mtl_current_heap_owns(SEXP s);
 
 /* Temporarily route allocations to the main heap (for global intern tables). */
 attribute_hidden struct R_mtl_heap_state_ *R_mtl_switch_to_main_heap(R_InterpreterState *st);

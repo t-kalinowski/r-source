@@ -375,14 +375,9 @@ static R_INLINE double R_integer_divide(int x, int y)
 
 static R_INLINE SEXP ScalarValue1(SEXP x)
 {
-    /* In worker interpreters, treat scalar arithmetic as pure: never reuse
-       either operand storage for results. Reuse is safe in single-threaded
-       evaluation when NAMED/REFCNT metadata is precise, but with shared
-       read-only objects across workers it can mutate captured values in place
-       (e.g. globals seen by closures). */
-    if (R_Interpreter != NULL && R_Interpreter->isMTLWorker)
-	return allocVector(TYPEOF(x), 1);
-    if (NO_REFERENCES(x))
+    if (NO_REFERENCES(x) &&
+	((R_Interpreter == NULL || !R_Interpreter->isMTLWorker) ||
+	 R_mtl_current_heap_owns(x)))
 	return x;
     else
 	return allocVector(TYPEOF(x), 1);
@@ -390,11 +385,13 @@ static R_INLINE SEXP ScalarValue1(SEXP x)
 
 static R_INLINE SEXP ScalarValue2(SEXP x, SEXP y)
 {
-    if (R_Interpreter != NULL && R_Interpreter->isMTLWorker)
-	return allocVector(TYPEOF(x), 1);
-    if (NO_REFERENCES(x))
+    if (NO_REFERENCES(x) &&
+	((R_Interpreter == NULL || !R_Interpreter->isMTLWorker) ||
+	 R_mtl_current_heap_owns(x)))
 	return x;
-    else if (NO_REFERENCES(y))
+    else if (NO_REFERENCES(y) &&
+	     ((R_Interpreter == NULL || !R_Interpreter->isMTLWorker) ||
+	      R_mtl_current_heap_owns(y)))
 	return y;
     else
 	return allocVector(TYPEOF(x), 1);
@@ -783,10 +780,9 @@ static SEXP integer_unary(ARITHOP_TYPE code, SEXP s1, SEXP call)
     case PLUSOP:
 	return s1;
     case MINUSOP:
-	if (R_Interpreter != NULL && R_Interpreter->isMTLWorker)
-	    ans = duplicate(s1);
-	else
-	    ans = NO_REFERENCES(s1) ? s1 : duplicate(s1);
+	ans = (NO_REFERENCES(s1) &&
+	       ((R_Interpreter == NULL || !R_Interpreter->isMTLWorker) ||
+		R_mtl_current_heap_owns(s1))) ? s1 : duplicate(s1);
 	int *pa = INTEGER(ans);
 	const int *px = INTEGER_RO(s1);
 	n = XLENGTH(s1);
@@ -810,10 +806,9 @@ static SEXP real_unary(ARITHOP_TYPE code, SEXP s1, SEXP lcall)
     switch (code) {
     case PLUSOP: return s1;
     case MINUSOP:
-	if (R_Interpreter != NULL && R_Interpreter->isMTLWorker)
-	    ans = duplicate(s1);
-	else
-	    ans = NO_REFERENCES(s1) ? s1 : duplicate(s1);
+	ans = (NO_REFERENCES(s1) &&
+	       ((R_Interpreter == NULL || !R_Interpreter->isMTLWorker) ||
+		R_mtl_current_heap_owns(s1))) ? s1 : duplicate(s1);
 	double *pa = REAL(ans);
 	const double *px = REAL_RO(s1);
 	n = XLENGTH(s1);

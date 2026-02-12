@@ -23,6 +23,8 @@ mtlapply <- function(X, FUN, ...)
     threads <- as.integer(getOption("mtlapply.threads", 2L))[1L]
     if (is.na(threads) || threads < 1L)
         stop("invalid value in options(\"mtlapply.threads\"): must be >= 1")
+    if (threads == 1L)
+        return(lapply(X, FUN, ...))
     wrapped <- function(...) {
         tryCatch(
             FUN(...),
