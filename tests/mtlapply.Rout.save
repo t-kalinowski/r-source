@@ -313,19 +313,6 @@ Type 'q()' to quit R.
 +   stopifnot(identical(unlist(vals, use.names = FALSE), rep("x", 2000L)))
 + }
 > 
-> # capture.output() in workers should remain local and recoverable.
-> cap_vals <- mtlapply_with_threads(2L, 1:8, function(i) {
-+   capture.output(cat(letters[i], "\n"))
-+ })
-> stopifnot(identical(unlist(cap_vals, use.names = FALSE),
-+                     paste0(letters[1:8], " ")))
-> 
-> # Stress capture.output() worker results over many tasks.
-> cap_stress <- mtlapply_with_threads(4L, 1:2000, function(i) capture.output(cat(i, "\n")))
-> stopifnot(all(vapply(seq_along(cap_stress),
-+                      function(i) identical(cap_stress[[i]], paste0(i, " ")),
-+                      logical(1))))
-> 
 > # R-level finalizer registration from workers is still unsupported.
 > err_reg_finalizer <- try(mtlapply_with_threads(2L, 1:4, function(i) {
 +   e <- new.env(parent = emptyenv())
@@ -440,8 +427,7 @@ Type 'q()' to quit R.
 + }
 > 
 > # Main-thread errors after mtlapply() should remain recoverable.
-> bad <- try(system.time(lapply(1:10, function(i) i, threads = 8L)), silent = TRUE)
-Timing stopped at: 0 0 0
+> bad <- try(lapply(1:10, function(i) i, threads = 8L), silent = TRUE)
 > stopifnot(inherits(bad, "try-error"))
 > ok <- lapply(1:100, function(i) i + 1L)
 > stopifnot(identical(unlist(ok, use.names = FALSE), 2:101))

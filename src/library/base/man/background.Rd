@@ -4,6 +4,13 @@
 \alias{then}
 \alias{wait}
 \alias{cancel}
+\alias{.mt_capture_env}
+\alias{.mt_capture_fn}
+\alias{.mt_expr_capture_names}
+\alias{.mt_fn_capture_names}
+\alias{.mt_notify_drain}
+\alias{.mt_notify_fd}
+\alias{.mtl_force_namespace}
 \title{Queue Work on the Experimental Thread Pool}
 \description{
 Queue expression evaluation on the experimental multi-thread worker pool and
@@ -46,7 +53,11 @@ For \code{background()}, symbols referenced by \code{expr} are captured from
 \code{env} at submission time into a snapshot environment (active bindings are
 not supported). This avoids races with subsequent main-thread mutation of the
 original frame while workers are running, while avoiding full-frame copies.
+
+Objects with names prefixed by \code{.mt_} and \code{.mtl_} are internal helper
+utilities and not part of the public API.
 }
+\keyword{internal}
 \examples{
 old <- getOption("threads")
 options(threads = 2L)

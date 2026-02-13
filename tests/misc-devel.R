@@ -11,7 +11,11 @@ for(p in round(runif(100, 27000, 28000))) {
     break
   }
 }
-stopifnot(!is.null(port))
+if (is.null(port)) {
+  message("SKIPPED: serverSocket() unavailable in this environment")
+  proc.time()
+  q("no", status = 0L)
+}
 
 outgoing <- socketConnection("localhost", port)
 incoming <- socketAccept(sock, encoding="UTF-8")

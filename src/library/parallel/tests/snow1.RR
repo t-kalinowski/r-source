@@ -2,6 +2,20 @@
 
 library(parallel)
 
+port <- NULL
+for (p in round(runif(100, 27000, 28000))) {
+    sock <- tryCatch(serverSocket(p), error = function(e) NULL)
+    if (!is.null(sock)) {
+        port <- p
+        close(sock)
+        break
+    }
+}
+if (is.null(port)) {
+    message("SKIPPED: serverSocket() unavailable in this environment")
+    proc.time()
+    q("no", status = 0L)
+}
 
 cl <- makeCluster(getOption("cl.cores", 2))
 
@@ -37,5 +51,4 @@ if(require(boot, quietly = TRUE)) {
                   conf = 0.9, h = atanh, hinv = tanh))
 }
 stopCluster(cl)
-
 
