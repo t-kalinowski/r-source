@@ -1,6 +1,6 @@
 ## Regression tests for experimental background()/wait()/cancel().
 
-stopifnot(exists("background"), exists("wait"), exists("cancel"))
+stopifnot(exists("background"), exists("then"), exists("wait"), exists("cancel"))
 
 old_threads <- getOption("mtlapply.threads")
 on.exit(options(mtlapply.threads = old_threads), add = TRUE)
@@ -57,5 +57,58 @@ f_ok <- background(sum(seq_len(1000L)))
 got_ok <- wait(f_ok)
 stopifnot(isTRUE(attr(got_ok, "ok")))
 stopifnot(identical(got_ok$value, sum(seq_len(1000L))))
+
+## then() should chain future values.
+f_base <- background(10L)
+f_plus <- then(f_base, function(x) x + 5L)
+f_mul <- then(f_plus, function(x, k) x * k, 3L)
+got_mul <- wait(f_mul)
+stopifnot(isTRUE(attr(got_mul, "ok")))
+stopifnot(identical(got_mul$value, 45L))
+
+## then() should propagate parent errors/cancellation without poisoning workers.
+f_parent_err <- background(stop("boom in parent"))
+f_child_err <- then(f_parent_err, function(x) x + 1L)
+got_child_err <- wait(f_child_err)
+stopifnot(inherits(got_child_err$value, "error"))
+stopifnot(grepl("boom in parent", conditionMessage(got_child_err$value), fixed = TRUE))
+
+f_parent_cancel <- background({ burn_cpu(3e6L); 123L })
+f_child_cancel <- then(f_parent_cancel, function(x) x + 1L)
+stopifnot(isTRUE(cancel(f_parent_cancel)))
+got_child_cancel <- wait(f_child_cancel)
+stopifnot(isTRUE(attr(got_child_cancel, "cancelled")))
+stopifnot(inherits(got_child_cancel$value, "mt_cancelled"))
+
+## Continuation errors should be reported on the chained future.
+f_cont_err <- then(background(1L), function(x) stop("boom in continuation"))
+got_cont_err <- wait(f_cont_err)
+stopifnot(inherits(got_cont_err$value, "error"))
+stopifnot(grepl("boom in continuation", conditionMessage(got_cont_err$value), fixed = TRUE))
+
+## Cancelling a child continuation should not cancel the parent.
+f_parent_keep <- background({ burn_cpu(2e6L); 7L })
+f_child_drop <- then(f_parent_keep, function(x) x + 1L)
+stopifnot(isTRUE(cancel(f_child_drop)))
+got_child_drop <- wait(f_child_drop)
+stopifnot(isTRUE(attr(got_child_drop, "cancelled")))
+got_parent_keep <- wait(f_parent_keep)
+stopifnot(isTRUE(attr(got_parent_keep, "ok")))
+stopifnot(identical(got_parent_keep$value, 7L))
+
+## Long chains should remain stable.
+f_chain <- background(1L)
+for (i in 1:50) {
+    f_chain <- then(f_chain, function(x) x + 1L)
+}
+got_chain <- wait(f_chain)
+stopifnot(isTRUE(attr(got_chain, "ok")))
+stopifnot(identical(got_chain$value, 51L))
+
+## Additional successful run after chained error paths should still work.
+f_ok2 <- background(sum(seq_len(100L)))
+got_ok2 <- wait(f_ok2)
+stopifnot(isTRUE(attr(got_ok2, "ok")))
+stopifnot(identical(got_ok2$value, sum(seq_len(100L))))
 
 cat("mtfuture ok\n")

@@ -71,7 +71,13 @@ static const char *mtl_rpc_reason_name_lookup(int reason)
 	typedef struct mtl_future_t_ {
 	    SEXP expr;
 	    SEXP env;
+	    SEXP cont_fun;
+	    SEXP cont_args;
 	    SEXP value;
+	    struct mtl_future_t_ *parent;
+	    struct mtl_future_t_ *deps_head;
+	    struct mtl_future_t_ *next_dep;
+	    int dep_count;
 	    mtl_future_status_t status;
 	    int cancel_requested;
 	    int detached;
@@ -644,11 +650,42 @@ static int mtl_job_claim_index(mtl_job_t *job, int wid, R_xlen_t *out)
     return 0;
 }
 
+static void mtl_set_threading_active_locked(void);
+
 static R_INLINE int mtl_future_is_terminal(mtl_future_t *f)
 {
     return (f->status == MTL_FUTURE_FULFILLED ||
 	    f->status == MTL_FUTURE_REJECTED ||
 	    f->status == MTL_FUTURE_CANCELLED);
+}
+
+static void mtl_future_queue_push_locked(mtl_future_t *f);
+static void mtl_future_complete_locked(mtl_future_t *f, mtl_future_status_t status,
+				       SEXP value, const char *errmsg);
+
+static void mtl_future_activate_dependents_locked(mtl_future_t *parent)
+{
+    mtl_future_t *child = parent->deps_head;
+    parent->deps_head = NULL;
+    while (child != NULL) {
+	mtl_future_t *next = child->next_dep;
+	child->next_dep = NULL;
+	if (child->status != MTL_FUTURE_PENDING) {
+	    child = next;
+	    continue;
+	}
+	if (child->cancel_requested) {
+	    mtl_future_complete_locked(child, MTL_FUTURE_CANCELLED, R_NilValue, NULL);
+	} else if (parent->status == MTL_FUTURE_FULFILLED) {
+	    mtl_future_queue_push_locked(child);
+	} else if (parent->status == MTL_FUTURE_CANCELLED) {
+	    mtl_future_complete_locked(child, MTL_FUTURE_CANCELLED, R_NilValue, NULL);
+	} else {
+	    mtl_future_complete_locked(child, MTL_FUTURE_REJECTED, R_NilValue,
+				      parent->errmsg[0] ? parent->errmsg : "background error");
+	}
+	child = next;
+    }
 }
 
 static void mtl_future_queue_push_locked(mtl_future_t *f)
@@ -660,6 +697,29 @@ static void mtl_future_queue_push_locked(mtl_future_t *f)
 	mtl_pool.future_q_head = f;
     mtl_pool.future_q_tail = f;
     f->enqueued = 1;
+}
+
+static void mtl_future_complete_locked(mtl_future_t *f, mtl_future_status_t status,
+				       SEXP value, const char *errmsg)
+{
+    if (f == NULL || mtl_future_is_terminal(f))
+	return;
+
+    f->status = status;
+    if (status == MTL_FUTURE_FULFILLED) {
+	f->value = value;
+    } else if (status == MTL_FUTURE_REJECTED) {
+	snprintf(f->errmsg, sizeof(f->errmsg), "%s",
+		 (errmsg && errmsg[0]) ? errmsg : "background error");
+    }
+
+    if (f->parent != NULL && f->parent->dep_count > 0)
+	f->parent->dep_count--;
+
+    mtl_future_activate_dependents_locked(f);
+    mtl_notify_signal_locked();
+    mtl_set_threading_active_locked();
+    pthread_cond_broadcast(&mtl_pool.cv);
 }
 
 static mtl_future_t *mtl_future_queue_pop_locked(void)
@@ -701,6 +761,10 @@ static void mtl_future_release_storage(mtl_future_t *f)
 	return;
     if (f->value != R_NilValue)
 	R_ReleaseObject(f->value);
+    if (f->cont_fun != R_NilValue)
+	R_ReleaseObject(f->cont_fun);
+    if (f->cont_args != R_NilValue)
+	R_ReleaseObject(f->cont_args);
     if (f->expr != R_NilValue)
 	R_ReleaseObject(f->expr);
     if (f->env != R_NilValue)
@@ -725,7 +789,8 @@ static void mtl_future_sweep_locked(void)
     mtl_future_t *prev = NULL, *cur = mtl_pool.future_all;
     while (cur != NULL) {
 	mtl_future_t *next = cur->next_all;
-	if (cur->detached && mtl_future_is_terminal(cur) && !cur->enqueued) {
+	if (cur->detached && mtl_future_is_terminal(cur) &&
+	    !cur->enqueued && cur->dep_count == 0 && cur->deps_head == NULL) {
 	    if (prev != NULL)
 		prev->next_all = next;
 	    else
@@ -771,11 +836,13 @@ static void mtl_future_finalizer(SEXP ext)
     }
     pthread_mutex_lock(&mtl_pool.mu);
     f->detached = 1;
-    if (f->status == MTL_FUTURE_PENDING && f->enqueued) {
-	mtl_future_queue_remove_locked(f);
-	f->status = MTL_FUTURE_CANCELLED;
+    if (f->status == MTL_FUTURE_PENDING) {
+	if (f->enqueued)
+	    mtl_future_queue_remove_locked(f);
 	f->cancel_requested = 1;
-	mtl_notify_signal_locked();
+	mtl_future_complete_locked(f, MTL_FUTURE_CANCELLED, R_NilValue, NULL);
+    } else if (f->status == MTL_FUTURE_RUNNING) {
+	f->cancel_requested = 1;
     }
     mtl_set_threading_active_locked();
     pthread_cond_broadcast(&mtl_pool.cv);
@@ -1182,7 +1249,17 @@ static void mtl_future_adopt_main_exec(void *vp)
 			R_mtl_global_lock();
 			lock_eval = 1;
 		    }
-		    SEXP val = R_tryEvalSilent(future->expr, future->env, &err);
+		    SEXP val = R_NilValue;
+		    if (future->parent != NULL) {
+			SEXP tail = PROTECT(VectorToPairList(future->cont_args));
+			SEXP argcell = PROTECT(CONS(future->parent->value, tail));
+			SEXP fcall = PROTECT(LCONS(future->cont_fun, argcell));
+			MARK_NOT_MUTABLE(fcall);
+			val = R_tryEvalSilent(fcall, future->env, &err);
+			UNPROTECT(3);
+		    } else {
+			val = R_tryEvalSilent(future->expr, future->env, &err);
+		    }
 		    if (lock_eval)
 			R_mtl_global_unlock();
 		    mtl_parallel_end();
@@ -1214,20 +1291,15 @@ static void mtl_future_adopt_main_exec(void *vp)
 
 		    pthread_mutex_lock(&p->mu);
 		    if (future->cancel_requested) {
-			future->status = MTL_FUTURE_CANCELLED;
+			mtl_future_complete_locked(future, MTL_FUTURE_CANCELLED, R_NilValue, NULL);
 		    } else if (err || out == R_NilValue) {
-			future->status = MTL_FUTURE_REJECTED;
-			snprintf(future->errmsg, sizeof(future->errmsg), "%s",
-				 (errmsg && errmsg[0]) ? errmsg : "background error");
+			mtl_future_complete_locked(future, MTL_FUTURE_REJECTED, R_NilValue,
+						  (errmsg && errmsg[0]) ? errmsg : "background error");
 		    } else {
-			future->status = MTL_FUTURE_FULFILLED;
-			future->value = out;
+			mtl_future_complete_locked(future, MTL_FUTURE_FULFILLED, out, NULL);
 		    }
-		    mtl_notify_signal_locked();
 		    if (p->future_running > 0)
 			p->future_running--;
-		    mtl_set_threading_active_locked();
-		    pthread_cond_broadcast(&p->cv);
 		    pthread_mutex_unlock(&p->mu);
 		}
 	    }
@@ -2053,7 +2125,13 @@ attribute_hidden SEXP do_mtbackground(SEXP call, SEXP op, SEXP args, SEXP rho)
 	error(_("cannot allocate memory"));
     f->expr = expr;
     f->env = env;
+    f->cont_fun = R_NilValue;
+    f->cont_args = R_NilValue;
     f->value = R_NilValue;
+    f->parent = NULL;
+    f->deps_head = NULL;
+    f->next_dep = NULL;
+    f->dep_count = 0;
     f->status = MTL_FUTURE_PENDING;
     f->cancel_requested = 0;
     f->detached = 0;
@@ -2069,6 +2147,91 @@ attribute_hidden SEXP do_mtbackground(SEXP call, SEXP op, SEXP args, SEXP rho)
     f->next_all = mtl_pool.future_all;
     mtl_pool.future_all = f;
     mtl_future_queue_push_locked(f);
+    mtl_pool.rpc_aborted = 0;
+    mtl_set_threading_active_locked();
+    pthread_cond_broadcast(&mtl_pool.cv);
+    pthread_mutex_unlock(&mtl_pool.mu);
+
+    SEXP ext = PROTECT(R_MakeExternalPtr(f, R_NilValue, R_NilValue));
+    R_RegisterCFinalizerEx(ext, mtl_future_finalizer, TRUE);
+    UNPROTECT(1);
+    return ext;
+#endif
+}
+
+/* .Internal(mtthen(FUTURE, FUN, DOTS)) */
+attribute_hidden SEXP do_mtthen(SEXP call, SEXP op, SEXP args, SEXP rho)
+{
+    checkArity(op, args);
+#ifndef HAVE_PTHREAD
+    error("then() requires pthreads support");
+#else
+    if (R_Interpreter != NULL && R_Interpreter->isMTLWorker)
+	error("then() may only be called from the main thread");
+
+    SEXP parent_fut = CAR(args);
+    SEXP fun = CADR(args);
+    SEXP dots = CADDR(args);
+    if (!isFunction(fun))
+	error(_("'%s' must be a function"), "fn");
+    if (TYPEOF(dots) != VECSXP)
+	error(_("'%s' must be a list"), "DOTS");
+
+    mtl_future_t *parent = mtl_future_from_sexp(parent_fut);
+
+    int nthreads = 2;
+    SEXP opt = GetOption1(install("mtlapply.threads"));
+    if (opt != R_NilValue && XLENGTH(opt) > 0)
+	nthreads = asInteger(opt);
+    if (nthreads == NA_INTEGER || nthreads < 1)
+	error("invalid value in options(\"mtlapply.threads\"): must be >= 1");
+
+    mtl_pool_init_if_needed();
+    mtl_pool_ensure_threads(nthreads);
+
+    mtl_future_t *f = (mtl_future_t *) calloc(1, sizeof(mtl_future_t));
+    if (f == NULL)
+	error(_("cannot allocate memory"));
+
+    f->expr = R_NilValue;
+    f->env = R_BaseEnv;
+    f->cont_fun = fun;
+    f->cont_args = dots;
+    f->value = R_NilValue;
+    f->parent = parent;
+    f->deps_head = NULL;
+    f->next_dep = NULL;
+    f->dep_count = 0;
+    f->status = MTL_FUTURE_PENDING;
+    f->cancel_requested = 0;
+    f->detached = 0;
+    f->enqueued = 0;
+    f->main_showErrorMessages = R_ShowErrorMessages;
+    f->errmsg[0] = '\0';
+    f->next_q = NULL;
+    f->next_all = NULL;
+    R_PreserveObject(f->env);
+    R_PreserveObject(f->cont_fun);
+    R_PreserveObject(f->cont_args);
+
+    pthread_mutex_lock(&mtl_pool.mu);
+    f->next_all = mtl_pool.future_all;
+    mtl_pool.future_all = f;
+
+    parent->dep_count++;
+    if (mtl_future_is_terminal(parent)) {
+	if (parent->status == MTL_FUTURE_FULFILLED) {
+	    mtl_future_queue_push_locked(f);
+	} else if (parent->status == MTL_FUTURE_CANCELLED) {
+	    mtl_future_complete_locked(f, MTL_FUTURE_CANCELLED, R_NilValue, NULL);
+	} else {
+	    mtl_future_complete_locked(f, MTL_FUTURE_REJECTED, R_NilValue,
+				      parent->errmsg[0] ? parent->errmsg : "background error");
+	}
+    } else {
+	f->next_dep = parent->deps_head;
+	parent->deps_head = f;
+    }
     mtl_pool.rpc_aborted = 0;
     mtl_set_threading_active_locked();
     pthread_cond_broadcast(&mtl_pool.cv);
@@ -2235,11 +2398,11 @@ attribute_hidden SEXP do_mtcancel(SEXP call, SEXP op, SEXP args, SEXP rho)
     mtl_future_t *f = mtl_future_from_sexp(fut);
     int did = 0;
     pthread_mutex_lock(&mtl_pool.mu);
-    if (f->status == MTL_FUTURE_PENDING && f->enqueued) {
-	mtl_future_queue_remove_locked(f);
-	f->status = MTL_FUTURE_CANCELLED;
+    if (f->status == MTL_FUTURE_PENDING) {
+	if (f->enqueued)
+	    mtl_future_queue_remove_locked(f);
 	f->cancel_requested = 1;
-	mtl_notify_signal_locked();
+	mtl_future_complete_locked(f, MTL_FUTURE_CANCELLED, R_NilValue, NULL);
 	did = 1;
     } else if (f->status == MTL_FUTURE_RUNNING) {
 	f->cancel_requested = 1;
@@ -2253,7 +2416,6 @@ attribute_hidden SEXP do_mtcancel(SEXP call, SEXP op, SEXP args, SEXP rho)
 	}
     }
     mtl_set_threading_active_locked();
-    pthread_cond_broadcast(&mtl_pool.cv);
     if (mtl_is_main_thread())
 	mtl_future_sweep_locked();
     pthread_mutex_unlock(&mtl_pool.mu);

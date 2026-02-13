@@ -28,6 +28,19 @@ background <- function(expr, env = parent.frame())
     )
 }
 
+then <- function(future, fn, ...)
+{
+    if (!inherits(future, "mt_future"))
+        stop("'future' must be an mt_future object")
+    fn <- match.fun(fn)
+    ptr <- .Internal(mtthen(future, fn, list(...)))
+    structure(
+        list(expr = substitute(fn), env = environment(fn), value = quote(.mt_unresolved)),
+        class = "mt_future",
+        ptr = ptr
+    )
+}
+
 .mt_notify_fd <- function()
 {
     as.integer(.Internal(mtnotifyfd()))

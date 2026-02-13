@@ -666,6 +666,7 @@ FUNTAB R_FunTab[] =
 {"mtlisworker", do_mtlisworker, 0,	11,	0,	{PP_FUNCALL, PREC_FN,	0}},
 {"mtonmain", do_mtonmain, 0,	11,	2,	{PP_FUNCALL, PREC_FN,	0}},
 {"mtbackground", do_mtbackground, 0,	11,	2,	{PP_FUNCALL, PREC_FN,	0}},
+{"mtthen", do_mtthen, 0,	11,	3,	{PP_FUNCALL, PREC_FN,	0}},
 {"mtwait", do_mtwait,	0,	11,	2,	{PP_FUNCALL, PREC_FN,	0}},
 {"mtnotifyfd", do_mtnotifyfd, 0,	11,	0,	{PP_FUNCALL, PREC_FN,	0}},
 {"mtnotifydrain", do_mtnotifydrain, 0,	11,	0,	{PP_FUNCALL, PREC_FN,	0}},

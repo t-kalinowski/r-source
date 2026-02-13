@@ -252,6 +252,7 @@ SEXP do_mtlpoolreset(SEXP, SEXP, SEXP, SEXP);
 SEXP do_mtlisworker(SEXP, SEXP, SEXP, SEXP);
 SEXP do_mtonmain(SEXP, SEXP, SEXP, SEXP);
 SEXP do_mtbackground(SEXP, SEXP, SEXP, SEXP);
+SEXP do_mtthen(SEXP, SEXP, SEXP, SEXP);
 SEXP do_mtwait(SEXP, SEXP, SEXP, SEXP);
 SEXP do_mtnotifyfd(SEXP, SEXP, SEXP, SEXP);
 SEXP do_mtnotifydrain(SEXP, SEXP, SEXP, SEXP);
