@@ -1422,32 +1422,35 @@ static void mtl_worker_gc(R_size_t size_needed);
  *
  * Use the main heap state directly to avoid repeatedly going through
  * R_Interpreter (which is a macro with a runtime branch for MTL). */
-static R_INLINE R_mtl_heap_state *mtl_serial_heap(void)
+static R_INLINE __attribute__((always_inline)) R_mtl_heap_state *mtl_serial_heap(void)
 {
     return &R_MainHeapState;
 }
 
 /* Keep the main interpreter allocator on the serial hot path even while
    worker threads are active. Workers allocate from private heaps. */
-static R_INLINE int mtl_alloc_use_serial_fastpath(void)
+static R_INLINE __attribute__((always_inline)) int mtl_alloc_use_serial_fastpath(void)
 {
     return __builtin_expect(!R_MTL_THREADING_ACTIVE ||
 			    (R_Interpreter != NULL && !R_Interpreter->isMTLWorker), 1);
 }
 
-static R_INLINE int mtl_serial_no_free_nodes(R_mtl_heap_state *heap)
+static R_INLINE __attribute__((always_inline)) int
+mtl_serial_no_free_nodes(R_mtl_heap_state *heap)
 {
     return heap->NodesInUse >= heap->NSize;
 }
 
-static R_INLINE R_size_t mtl_serial_vheap_free(R_mtl_heap_state *heap)
+static R_INLINE __attribute__((always_inline)) R_size_t
+mtl_serial_vheap_free(R_mtl_heap_state *heap)
 {
     return heap->VSize - heap->LargeVallocSize - heap->SmallVallocSize;
 }
 
 static void GetNewPageInHeap(R_mtl_heap_state *heap, int node_class);
 
-static R_INLINE void mtl_serial_class_get_free_node(R_mtl_heap_state *heap, int c, SEXP *out)
+static R_INLINE __attribute__((always_inline)) void
+mtl_serial_class_get_free_node(R_mtl_heap_state *heap, int c, SEXP *out)
 {
     SEXP n = heap->GenHeap[c].Free;
     if (n == heap->GenHeap[c].New) {
@@ -1459,7 +1462,8 @@ static R_INLINE void mtl_serial_class_get_free_node(R_mtl_heap_state *heap, int 
     *out = n;
 }
 
-static R_INLINE void mtl_serial_class_quick_get_free_node(R_mtl_heap_state *heap, int c, SEXP *out)
+static R_INLINE __attribute__((always_inline)) void
+mtl_serial_class_quick_get_free_node(R_mtl_heap_state *heap, int c, SEXP *out)
 {
     SEXP n = heap->GenHeap[c].Free;
     if (n == heap->GenHeap[c].New)
@@ -1469,7 +1473,8 @@ static R_INLINE void mtl_serial_class_quick_get_free_node(R_mtl_heap_state *heap
     *out = n;
 }
 
-static R_INLINE int mtl_serial_class_need_new_page(R_mtl_heap_state *heap, int c)
+static R_INLINE __attribute__((always_inline)) int
+mtl_serial_class_need_new_page(R_mtl_heap_state *heap, int c)
 {
     return heap->GenHeap[c].Free == heap->GenHeap[c].New;
 }

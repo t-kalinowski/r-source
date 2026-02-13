@@ -375,9 +375,7 @@ static R_INLINE double R_integer_divide(int x, int y)
 
 static R_INLINE SEXP ScalarValue1(SEXP x)
 {
-    if (NO_REFERENCES(x) &&
-	((R_Interpreter == NULL || !R_Interpreter->isMTLWorker) ||
-	 R_mtl_current_heap_owns(x)))
+    if (NO_REFERENCES(x) && R_mtl_can_reuse_object(x))
 	return x;
     else
 	return allocVector(TYPEOF(x), 1);
@@ -385,13 +383,9 @@ static R_INLINE SEXP ScalarValue1(SEXP x)
 
 static R_INLINE SEXP ScalarValue2(SEXP x, SEXP y)
 {
-    if (NO_REFERENCES(x) &&
-	((R_Interpreter == NULL || !R_Interpreter->isMTLWorker) ||
-	 R_mtl_current_heap_owns(x)))
+    if (NO_REFERENCES(x) && R_mtl_can_reuse_object(x))
 	return x;
-    else if (NO_REFERENCES(y) &&
-	     ((R_Interpreter == NULL || !R_Interpreter->isMTLWorker) ||
-	      R_mtl_current_heap_owns(y)))
+    else if (NO_REFERENCES(y) && R_mtl_can_reuse_object(y))
 	return y;
     else
 	return allocVector(TYPEOF(x), 1);
@@ -780,9 +774,7 @@ static SEXP integer_unary(ARITHOP_TYPE code, SEXP s1, SEXP call)
     case PLUSOP:
 	return s1;
     case MINUSOP:
-	ans = (NO_REFERENCES(s1) &&
-	       ((R_Interpreter == NULL || !R_Interpreter->isMTLWorker) ||
-		R_mtl_current_heap_owns(s1))) ? s1 : duplicate(s1);
+	ans = (NO_REFERENCES(s1) && R_mtl_can_reuse_object(s1)) ? s1 : duplicate(s1);
 	int *pa = INTEGER(ans);
 	const int *px = INTEGER_RO(s1);
 	n = XLENGTH(s1);
@@ -806,9 +798,7 @@ static SEXP real_unary(ARITHOP_TYPE code, SEXP s1, SEXP lcall)
     switch (code) {
     case PLUSOP: return s1;
     case MINUSOP:
-	ans = (NO_REFERENCES(s1) &&
-	       ((R_Interpreter == NULL || !R_Interpreter->isMTLWorker) ||
-		R_mtl_current_heap_owns(s1))) ? s1 : duplicate(s1);
+	ans = (NO_REFERENCES(s1) && R_mtl_can_reuse_object(s1)) ? s1 : duplicate(s1);
 	double *pa = REAL(ans);
 	const double *px = REAL_RO(s1);
 	n = XLENGTH(s1);

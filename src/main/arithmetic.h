@@ -60,14 +60,22 @@ static R_INLINE double logbase(double x, double base)
 
 SEXP do_log_builtin(SEXP call, SEXP op, SEXP args, SEXP env);
 
+static R_INLINE __attribute__((always_inline)) int R_mtl_can_reuse_object(SEXP s)
+{
+    if (__builtin_expect(!R_MTL_THREADING_ACTIVE, 1))
+	return 1;
+    if (R_Interpreter == NULL || !R_Interpreter->isMTLWorker)
+	return 1;
+    return R_mtl_current_heap_owns(s);
+}
+
 /* for binary operations */
 /* adapted from Radford Neal's pqR */
 static R_INLINE SEXP R_allocOrReuseVector(SEXP s1, SEXP s2,
 					  SEXPTYPE type , R_xlen_t n)
 {
-    int is_worker = (R_Interpreter != NULL && R_Interpreter->isMTLWorker);
-    int can_reuse_s1 = (!is_worker) || R_mtl_current_heap_owns(s1);
-    int can_reuse_s2 = (!is_worker) || R_mtl_current_heap_owns(s2);
+    int can_reuse_s1 = R_mtl_can_reuse_object(s1);
+    int can_reuse_s2 = R_mtl_can_reuse_object(s2);
 
     R_xlen_t n1 = XLENGTH(s1);
     R_xlen_t n2 = XLENGTH(s2);
