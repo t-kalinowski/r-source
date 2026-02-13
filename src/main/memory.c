@@ -1351,6 +1351,14 @@ static R_INLINE R_mtl_heap_state *mtl_serial_heap(void)
     return &R_MainHeapState;
 }
 
+/* Keep the main interpreter allocator on the serial hot path even while
+   worker threads are active. Workers allocate from private heaps. */
+static R_INLINE int mtl_alloc_use_serial_fastpath(void)
+{
+    return __builtin_expect(!R_MTL_THREADING_ACTIVE ||
+			    (R_Interpreter != NULL && !R_Interpreter->isMTLWorker), 1);
+}
+
 static R_INLINE int mtl_serial_no_free_nodes(R_mtl_heap_state *heap)
 {
     return heap->NodesInUse >= heap->NSize;
@@ -1391,6 +1399,13 @@ static R_INLINE int mtl_serial_class_need_new_page(R_mtl_heap_state *heap, int c
 }
 
 #endif /* HAVE_PTHREAD */
+
+#ifndef HAVE_PTHREAD
+static R_INLINE int mtl_alloc_use_serial_fastpath(void)
+{
+    return 1;
+}
+#endif
 
 #ifdef HAVE_PTHREAD
 static R_INLINE SEXP mtl_genheap_free_load(int c)
@@ -3698,7 +3713,7 @@ void *R_realloc_gc(void *p, size_t n)
 
 SEXP allocSExp(SEXPTYPE t)
 {
-    if (__builtin_expect(!R_MTL_THREADING_ACTIVE, 1)) {
+    if (mtl_alloc_use_serial_fastpath()) {
 #ifdef HAVE_PTHREAD
 	/* Stock-like serial path (no heap sync instrumentation). */
 	if (t == NILSXP)
@@ -3754,7 +3769,7 @@ SEXP allocSExp(SEXPTYPE t)
 
 static SEXP allocSExpNonCons(SEXPTYPE t)
 {
-    if (__builtin_expect(!R_MTL_THREADING_ACTIVE, 1)) {
+    if (mtl_alloc_use_serial_fastpath()) {
 #ifdef HAVE_PTHREAD
 	R_mtl_heap_state *heap = mtl_serial_heap();
 	if (FORCE_GC || mtl_serial_no_free_nodes(heap)) {
@@ -3802,7 +3817,7 @@ static SEXP allocSExpNonCons(SEXPTYPE t)
    unless a GC will actually occur. */
 SEXP cons(SEXP car, SEXP cdr)
 {
-    if (__builtin_expect(!R_MTL_THREADING_ACTIVE, 1)) {
+    if (mtl_alloc_use_serial_fastpath()) {
 #ifdef HAVE_PTHREAD
 	R_mtl_heap_state *heap = mtl_serial_heap();
 	SEXP s;
@@ -3872,7 +3887,7 @@ SEXP cons(SEXP car, SEXP cdr)
 
 attribute_hidden SEXP CONS_NR(SEXP car, SEXP cdr)
 {
-    if (__builtin_expect(!R_MTL_THREADING_ACTIVE, 1)) {
+    if (mtl_alloc_use_serial_fastpath()) {
 #ifdef HAVE_PTHREAD
 	R_mtl_heap_state *heap = mtl_serial_heap();
 	SEXP s;
@@ -3962,7 +3977,7 @@ attribute_hidden SEXP CONS_NR(SEXP car, SEXP cdr)
 */
 SEXP NewEnvironment(SEXP namelist, SEXP valuelist, SEXP rho)
 {
-    if (__builtin_expect(!R_MTL_THREADING_ACTIVE, 1)) {
+    if (mtl_alloc_use_serial_fastpath()) {
 #ifdef HAVE_PTHREAD
 	R_mtl_heap_state *heap = mtl_serial_heap();
 	SEXP v, n, newrho;
@@ -4056,7 +4071,7 @@ SEXP NewEnvironment(SEXP namelist, SEXP valuelist, SEXP rho)
    unless a GC will actually occur. */
 attribute_hidden SEXP mkPROMISE(SEXP expr, SEXP rho)
 {
-    if (__builtin_expect(!R_MTL_THREADING_ACTIVE, 1)) {
+    if (mtl_alloc_use_serial_fastpath()) {
 #ifdef HAVE_PTHREAD
 	R_mtl_heap_state *heap = mtl_serial_heap();
 	SEXP s;
@@ -4182,7 +4197,7 @@ static void custom_node_free(void *ptr) {
 SEXP allocVector3(SEXPTYPE type, R_xlen_t length, R_allocator_t *allocator)
 {
 #ifdef HAVE_PTHREAD
-    if (__builtin_expect(!R_MTL_THREADING_ACTIVE, 1)) {
+    if (mtl_alloc_use_serial_fastpath()) {
 	/* Stock-like serial allocator path on the main heap. */
 	R_mtl_heap_state *heap = mtl_serial_heap();
 	SEXP s;     /* For the generational collector it would be safer to
