@@ -5,6 +5,7 @@ args <- commandArgs(trailingOnly = TRUE)
 threads <- if (length(args) >= 1L) as.integer(args[[1L]]) else 8L
 reps <- if (length(args) >= 2L) as.integer(args[[2L]]) else 3L
 min_eff <- if (length(args) >= 3L) as.numeric(args[[3L]]) else 0.50
+out_csv <- if (length(args) >= 4L) args[[4L]] else ""
 
 if (is.na(threads) || threads < 2L) {
   stop("threads must be >= 2", call. = FALSE)
@@ -14,6 +15,9 @@ if (is.na(reps) || reps < 1L) {
 }
 if (is.na(min_eff) || min_eff <= 0 || min_eff > 1) {
   stop("min_eff must be in (0, 1]", call. = FALSE)
+}
+if (!is.character(out_csv) || length(out_csv) != 1L) {
+  stop("out_csv must be a scalar character path", call. = FALSE)
 }
 
 thread_cap_vars <- c(
@@ -81,6 +85,12 @@ results <- do.call(
 )
 
 print(results, row.names = FALSE, digits = 4)
+
+if (nzchar(out_csv)) {
+  dir.create(dirname(out_csv), recursive = TRUE, showWarnings = FALSE)
+  write.csv(results, out_csv, row.names = FALSE)
+  cat(sprintf("\nwrote: %s\n", out_csv))
+}
 
 min_speedup <- threads * min_eff
 bad <- results$speedup < min_speedup

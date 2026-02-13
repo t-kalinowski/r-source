@@ -52,10 +52,11 @@ while (length(pending)) {
 }
 ```
 
-## Benchmark Snapshot (Checkpoint 2026-02-12)
+## Benchmark Snapshot (Committed Artifacts)
 
-The tables below are from concrete benchmark runs in this branch at the
-checkpoint tagged on 2026-02-12.
+The tables below are generated from committed artifacts in
+`bench/results/`. Regenerate them with `tools/mtl-bench-refresh.sh`,
+then inspect changes with `git diff`.
 
 ## 1) Serial Parity: `lapply` vs `R-devel`
 
@@ -63,9 +64,9 @@ Goal: no single-thread slowdown for normal serial code.
 
 | workload       | rdevel_lapply_s | mtl_lapply_s | ratio_mtl_vs_rdevel |
 |:---------------|----------------:|-------------:|--------------------:|
-| etl_group_mean |           1.095 |        0.977 |               0.892 |
-| cos_seq        |           0.504 |        0.426 |               0.845 |
-| alloc_pressure |           0.121 |        0.101 |               0.835 |
+| alloc_pressure |           0.109 |        0.101 |               0.927 |
+| cos_seq        |           0.495 |        0.408 |               0.824 |
+| etl_group_mean |           1.043 |        0.979 |               0.939 |
 
 Interpretation:
 
@@ -82,16 +83,16 @@ Efficiency is `speedup / threads`.
 |:---------------|--------:|-----------:|---------:|--------:|-----------:|
 | alloc_pressure |       1 |      0.095 |    0.101 |   1.063 |      1.063 |
 | alloc_pressure |       2 |      0.114 |    0.101 |   0.886 |      0.443 |
-| alloc_pressure |       4 |      0.066 |    0.101 |   1.530 |      0.383 |
-| alloc_pressure |       8 |      0.102 |    0.101 |   0.990 |      0.124 |
-| cos_seq        |       1 |      0.410 |    0.426 |   1.039 |      1.039 |
-| cos_seq        |       2 |      0.293 |    0.426 |   1.454 |      0.727 |
-| cos_seq        |       4 |      0.167 |    0.426 |   2.551 |      0.638 |
-| cos_seq        |       8 |      0.167 |    0.426 |   2.551 |      0.319 |
-| etl_group_mean |       1 |      0.933 |    0.977 |   1.047 |      1.047 |
-| etl_group_mean |       2 |      0.593 |    0.977 |   1.648 |      0.824 |
-| etl_group_mean |       4 |      0.304 |    0.977 |   3.214 |      0.803 |
-| etl_group_mean |       8 |      0.153 |    0.977 |   6.386 |      0.798 |
+| alloc_pressure |       4 |      0.065 |    0.101 |   1.554 |      0.388 |
+| alloc_pressure |       8 |      0.108 |    0.101 |   0.935 |      0.117 |
+| cos_seq        |       1 |      0.413 |    0.408 |   0.988 |      0.988 |
+| cos_seq        |       2 |      0.301 |    0.408 |   1.355 |      0.678 |
+| cos_seq        |       4 |      0.177 |    0.408 |   2.305 |      0.576 |
+| cos_seq        |       8 |      0.181 |    0.408 |   2.254 |      0.282 |
+| etl_group_mean |       1 |      0.968 |    0.979 |   1.011 |      1.011 |
+| etl_group_mean |       2 |      0.601 |    0.979 |   1.629 |      0.814 |
+| etl_group_mean |       4 |      0.302 |    0.979 |   3.242 |      0.810 |
+| etl_group_mean |       8 |      0.152 |    0.979 |   6.441 |      0.805 |
 
 ![](README_files/figure-gfm/mtlapply-speedup-plot-1.png)<!-- -->
 
@@ -108,8 +109,8 @@ This comes from `tools/mtl-threadpool-perf-smoke.R` with 8 threads.
 
 | case | rows | cols | n | threads | reps | lapply_median_s | mtlapply_median_s | speedup | efficiency |
 |:---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
-| matmul_1000_n20 | 1000 | 1000 | 20 | 8 | 3 | 5.249 | 0.805 | 6.520 | 0.815 |
-| matmul_100_n20000 | 100 | 100 | 20000 | 8 | 3 | 6.386 | 0.811 | 7.874 | 0.984 |
+| matmul_1000_n20 | 1000 | 1000 | 20 | 8 | 3 | 5.277 | 0.804 | 6.563 | 0.820 |
+| matmul_100_n20000 | 100 | 100 | 20000 | 8 | 3 | 6.388 | 0.813 | 7.857 | 0.982 |
 
 At this checkpoint:
 
@@ -123,10 +124,10 @@ This is a Shiny-style request burst simulation from
 
 | mode | threads | elapsed_s | throughput_req_s | p50_s | p95_s | p99_s | speedup_vs_serial | p95_gain_vs_serial |
 |:---|---:|---:|---:|---:|---:|---:|---:|---:|
-| background | 2 | 0.280 | 342.857 | 0.152 | 0.277 | 0.280 | 2.214 | 2.126 |
-| background | 4 | 0.280 | 342.857 | 0.152 | 0.277 | 0.280 | 2.214 | 2.126 |
-| background | 8 | 0.279 | 344.086 | 0.152 | 0.278 | 0.278 | 2.222 | 2.121 |
-| serial | 1 | 0.620 | 154.839 | 0.313 | 0.590 | 0.613 | 1.000 | 1.000 |
+| background | 2 | 0.273 | 351.648 | 0.148 | 0.270 | 0.272 | 2.267 | 2.175 |
+| background | 4 | 0.274 | 350.365 | 0.148 | 0.273 | 0.274 | 2.259 | 2.153 |
+| background | 8 | 0.273 | 351.648 | 0.148 | 0.271 | 0.272 | 2.267 | 2.169 |
+| serial | 1 | 0.619 | 155.089 | 0.313 | 0.588 | 0.612 | 1.000 | 1.000 |
 
 For the 8-thread row in this checkpoint:
 
@@ -147,17 +148,12 @@ From `tools/shiny-threadpool-bench`:
 - `SHINY_BENCH_WORK_SCALE = 300`
 - full recording replay (`recording.log`)
 
-| mode | sessions_total | sessions_completed | sessions_failed | median_total_s | median_busy_s | p95_busy_s | throughput_completed_sess_per_s |
-|:---|---:|---:|---:|---:|---:|---:|---:|
-| sync | 8 | 8 | 0 | 175.144 | 153.024 | 153.366 | 0.046 |
-| threadpool | 8 | 8 | 0 | 23.140 | 1.024 | 1.137 | 0.332 |
-
 | metric                          |    sync | threadpool |    gain |
 |:--------------------------------|--------:|-----------:|--------:|
 | median_total_s                  | 175.144 |     23.140 |   7.569 |
-| median_busy_s                   | 153.024 |      1.024 | 149.438 |
-| p95_busy_s                      | 153.366 |      1.137 | 134.887 |
-| throughput_completed_sess_per_s |   0.046 |      0.332 |   7.217 |
+| median_busy_s                   | 153.024 |      1.024 | 149.365 |
+| p95_busy_s                      | 153.366 |      1.137 | 134.893 |
+| throughput_completed_sess_per_s |   0.046 |      0.332 |   7.289 |
 
 For this run, both modes completed with zero failures
 (`sessions_failed = 0`), and the threadpool app improved both latency
@@ -166,19 +162,11 @@ and throughput materially.
 ## Reproducing These Benchmarks
 
 ``` sh
-# Serial parity + mtlapply scaling artifacts
-R --vanilla -q -f bench/readme_bench_run.R --args bench/results/system_latest.rds
-/usr/local/bin/R-devel --vanilla -q -f bench/readme_bench_run.R --args bench/results/rdevel_latest.rds
-build-mtl-shlib/bin/R --vanilla -q -f bench/readme_bench_run.R --args bench/results/mtl_latest.rds
+# One-shot refresh of committed benchmark artifacts + markdown outputs
+tools/mtl-bench-refresh.sh build-mtl-shlib R /usr/local/bin/R-devel
 
-# Matrix benchmark
-build-mtl-shlib/bin/R --vanilla -q -f tools/mtl-threadpool-perf-smoke.R --args 8 3 0.45
-
-# background()/wait() burst benchmark
-build-mtl-shlib/bin/R --vanilla -q -f tools/mtl-shiny-background-smoke.R --args \
-  bench/results/mtl_shiny_background_smoke_checkpoint.csv \
-  bench/figures/mtl_shiny_background_smoke_checkpoint.png \
-  96 3 2,4,8 1.5 120000
+# Then inspect impact
+git diff -- bench/LATEST.md README.md bench/results/
 ```
 
 ## Guardrails and Unsupported Patterns (Current)

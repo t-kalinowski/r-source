@@ -61,72 +61,70 @@ while (length(pending)) {
 }
 ```
 
-## Benchmark Snapshot (Checkpoint 2026-02-12)
+## Benchmark Snapshot (Committed Artifacts)
 
-The tables below are from concrete benchmark runs in this branch at the
-checkpoint tagged on 2026-02-12.
+The tables below are generated from committed artifacts in `bench/results/`.
+Regenerate them with `tools/mtl-bench-refresh.sh`, then inspect changes with
+`git diff`.
 
 ```{r benchmark-snapshot, echo=FALSE}
-parity <- data.frame(
-  workload = c("etl_group_mean", "cos_seq", "alloc_pressure"),
-  rdevel_lapply_s = c(1.095, 0.504, 0.121),
-  mtl_lapply_s = c(0.977, 0.426, 0.101),
-  ratio_mtl_vs_rdevel = c(0.892, 0.845, 0.835),
-  stringsAsFactors = FALSE
-)
+read_required <- function(path) {
+  if (!file.exists(path)) {
+    stop(
+      sprintf(
+        "missing benchmark artifact: %s\nrun tools/mtl-bench-refresh.sh first",
+        path
+      ),
+      call. = FALSE
+    )
+  }
+}
 
-scale_tab <- data.frame(
-  workload = c(
-    "alloc_pressure", "alloc_pressure", "alloc_pressure", "alloc_pressure",
-    "cos_seq", "cos_seq", "cos_seq", "cos_seq",
-    "etl_group_mean", "etl_group_mean", "etl_group_mean", "etl_group_mean"
-  ),
-  threads = c(1, 2, 4, 8, 1, 2, 4, 8, 1, 2, 4, 8),
-  mtlapply_s = c(0.095, 0.114, 0.066, 0.102, 0.410, 0.293, 0.167, 0.167, 0.933, 0.593, 0.304, 0.153),
-  lapply_s = c(0.101, 0.101, 0.101, 0.101, 0.426, 0.426, 0.426, 0.426, 0.977, 0.977, 0.977, 0.977),
-  speedup = c(1.063, 0.886, 1.530, 0.990, 1.039, 1.454, 2.551, 2.551, 1.047, 1.648, 3.214, 6.386),
-  efficiency = c(1.063, 0.443, 0.383, 0.124, 1.039, 0.727, 0.638, 0.319, 1.047, 0.824, 0.803, 0.798),
-  stringsAsFactors = FALSE
-)
+read_results <- function(path) {
+  read_required(path)
+  x <- readRDS(path)
+  stopifnot(is.list(x), is.data.frame(x$results))
+  x$results
+}
 
-perf_matmul <- data.frame(
-  case = c("matmul_1000_n20", "matmul_100_n20000"),
-  rows = c(1000, 100),
-  cols = c(1000, 100),
-  n = c(20, 20000),
-  threads = c(8, 8),
-  reps = c(3, 3),
-  lapply_median_s = c(5.249, 6.386),
-  mtlapply_median_s = c(0.805, 0.811),
-  speedup = c(6.520, 7.874),
-  efficiency = c(0.815, 0.984),
-  stringsAsFactors = FALSE
-)
+system_res <- read_results("bench/results/system_latest.rds")
+rdevel_res <- read_results("bench/results/rdevel_latest.rds")
+mtl_res <- read_results("bench/results/mtl_latest.rds")
 
-bg_burst <- data.frame(
-  mode = c("background", "background", "background", "serial"),
-  threads = c(2, 4, 8, 1),
-  elapsed_s = c(0.280, 0.280, 0.279, 0.620),
-  throughput_req_s = c(342.857, 342.857, 344.086, 154.839),
-  p50_s = c(0.152, 0.152, 0.152, 0.313),
-  p95_s = c(0.277, 0.277, 0.278, 0.590),
-  p99_s = c(0.280, 0.280, 0.278, 0.613),
-  speedup_vs_serial = c(2.214, 2.214, 2.222, 1.000),
-  p95_gain_vs_serial = c(2.126, 2.126, 2.121, 1.000),
-  stringsAsFactors = FALSE
-)
+lapply_join <- function(lhs, rhs, lhs_name, rhs_name) {
+  l <- subset(lhs, method == "lapply", c("workload", "median_seconds"))
+  r <- subset(rhs, method == "lapply", c("workload", "median_seconds"))
+  names(l)[2] <- lhs_name
+  names(r)[2] <- rhs_name
+  out <- merge(l, r, by = "workload", all = FALSE, sort = TRUE)
+  out
+}
 
-shiny_full <- data.frame(
-  mode = c("sync", "threadpool"),
-  sessions_total = c(8, 8),
-  sessions_completed = c(8, 8),
-  sessions_failed = c(0, 0),
-  median_total_s = c(175.144, 23.140),
-  median_busy_s = c(153.024, 1.024),
-  p95_busy_s = c(153.366, 1.137),
-  throughput_completed_sess_per_s = c(0.046, 0.332),
-  stringsAsFactors = FALSE
-)
+parity <- lapply_join(mtl_res, rdevel_res, "mtl_lapply_s", "rdevel_lapply_s")
+parity$ratio_mtl_vs_rdevel <- parity$mtl_lapply_s / parity$rdevel_lapply_s
+parity <- parity[, c("workload", "rdevel_lapply_s", "mtl_lapply_s", "ratio_mtl_vs_rdevel")]
+
+ml <- subset(mtl_res, method == "lapply", c("workload", "median_seconds"))
+names(ml)[2] <- "lapply_s"
+mm <- subset(mtl_res, method == "mtlapply", c("workload", "threads", "median_seconds"))
+names(mm)[3] <- "mtlapply_s"
+scale_tab <- merge(mm, ml, by = "workload", all.x = TRUE, sort = TRUE)
+scale_tab$speedup <- scale_tab$lapply_s / scale_tab$mtlapply_s
+scale_tab$efficiency <- scale_tab$speedup / scale_tab$threads
+scale_tab <- scale_tab[, c("workload", "threads", "mtlapply_s", "lapply_s", "speedup", "efficiency")]
+scale_tab <- scale_tab[order(scale_tab$workload, scale_tab$threads), ]
+
+read_required("bench/results/threadpool_perf_checkpoint.csv")
+perf_matmul <- read.csv("bench/results/threadpool_perf_checkpoint.csv", stringsAsFactors = FALSE)
+
+read_required("bench/results/mtl_shiny_background_smoke_checkpoint.csv")
+bg_burst <- read.csv("bench/results/mtl_shiny_background_smoke_checkpoint.csv", stringsAsFactors = FALSE)
+
+shiny_full <- if (file.exists("bench/results/shiny_scale300_w8_full.csv")) {
+  read.csv("bench/results/shiny_scale300_w8_full.csv", stringsAsFactors = FALSE)
+} else {
+  data.frame()
+}
 ```
 
 ## 1) Serial Parity: `lapply` vs `R-devel`
@@ -218,22 +216,27 @@ From `tools/shiny-threadpool-bench`:
 - full recording replay (`recording.log`)
 
 ```{r shiny-full, echo=FALSE}
-knitr::kable(shiny_full, digits = 3, row.names = FALSE)
+if (!nrow(shiny_full)) {
+  cat("`bench/results/shiny_scale300_w8_full.csv` not found.\n")
+  cat("Run the shiny loadtest workflow and commit the artifact to populate this section.\n")
+} else {
+  knitr::kable(shiny_full, digits = 3, row.names = FALSE)
 
-sync <- shiny_full[shiny_full$mode == "sync", ]
-mtp <- shiny_full[shiny_full$mode == "threadpool", ]
-summary_tab <- data.frame(
-  metric = c("median_total_s", "median_busy_s", "p95_busy_s", "throughput_completed_sess_per_s"),
-  sync = c(sync$median_total_s, sync$median_busy_s, sync$p95_busy_s, sync$throughput_completed_sess_per_s),
-  threadpool = c(mtp$median_total_s, mtp$median_busy_s, mtp$p95_busy_s, mtp$throughput_completed_sess_per_s),
-  gain = c(
-    sync$median_total_s / mtp$median_total_s,
-    sync$median_busy_s / mtp$median_busy_s,
-    sync$p95_busy_s / mtp$p95_busy_s,
-    mtp$throughput_completed_sess_per_s / sync$throughput_completed_sess_per_s
+  sync <- shiny_full[shiny_full$mode == "sync", ]
+  mtp <- shiny_full[shiny_full$mode == "threadpool", ]
+  summary_tab <- data.frame(
+    metric = c("median_total_s", "median_busy_s", "p95_busy_s", "throughput_completed_sess_per_s"),
+    sync = c(sync$median_total_s, sync$median_busy_s, sync$p95_busy_s, sync$throughput_completed_sess_per_s),
+    threadpool = c(mtp$median_total_s, mtp$median_busy_s, mtp$p95_busy_s, mtp$throughput_completed_sess_per_s),
+    gain = c(
+      sync$median_total_s / mtp$median_total_s,
+      sync$median_busy_s / mtp$median_busy_s,
+      sync$p95_busy_s / mtp$p95_busy_s,
+      mtp$throughput_completed_sess_per_s / sync$throughput_completed_sess_per_s
+    )
   )
-)
-knitr::kable(summary_tab, digits = 3, row.names = FALSE)
+  knitr::kable(summary_tab, digits = 3, row.names = FALSE)
+}
 ```
 
 For this run, both modes completed with zero failures (`sessions_failed = 0`),
@@ -242,19 +245,11 @@ and the threadpool app improved both latency and throughput materially.
 ## Reproducing These Benchmarks
 
 ```sh
-# Serial parity + mtlapply scaling artifacts
-R --vanilla -q -f bench/readme_bench_run.R --args bench/results/system_latest.rds
-/usr/local/bin/R-devel --vanilla -q -f bench/readme_bench_run.R --args bench/results/rdevel_latest.rds
-build-mtl-shlib/bin/R --vanilla -q -f bench/readme_bench_run.R --args bench/results/mtl_latest.rds
+# One-shot refresh of committed benchmark artifacts + markdown outputs
+tools/mtl-bench-refresh.sh build-mtl-shlib R /usr/local/bin/R-devel
 
-# Matrix benchmark
-build-mtl-shlib/bin/R --vanilla -q -f tools/mtl-threadpool-perf-smoke.R --args 8 3 0.45
-
-# background()/wait() burst benchmark
-build-mtl-shlib/bin/R --vanilla -q -f tools/mtl-shiny-background-smoke.R --args \
-  bench/results/mtl_shiny_background_smoke_checkpoint.csv \
-  bench/figures/mtl_shiny_background_smoke_checkpoint.png \
-  96 3 2,4,8 1.5 120000
+# Then inspect impact
+git diff -- bench/LATEST.md README.md bench/results/
 ```
 
 ## Guardrails and Unsupported Patterns (Current)
