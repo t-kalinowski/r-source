@@ -2176,13 +2176,38 @@ static SEXP R_weak_refs = NULL;
 #define SET_WEAKREF_NEXT(w, n) SET_VECTOR_ELT(w, 3, n)
 
 static SEXP MakeCFinalizer(R_CFinalizer_t cfun);
+static SEXP NewWeakRef(SEXP key, SEXP val, SEXP fin, Rboolean onexit);
+
+typedef struct {
+    SEXP key;
+    SEXP val;
+    SEXP fin;
+    Rboolean onexit;
+} mtl_weakref_main_data_t;
+
+static SEXP mtl_newweakref_on_main(void *data)
+{
+    mtl_weakref_main_data_t *d = (mtl_weakref_main_data_t *) data;
+    return NewWeakRef(d->key, d->val, d->fin, d->onexit);
+}
 
 static SEXP NewWeakRef(SEXP key, SEXP val, SEXP fin, Rboolean onexit)
 {
     SEXP w;
 
-    if (R_Interpreter != NULL && R_Interpreter->isMTLWorker)
-	error(_("weak references/finalizers are not supported in mtlapply() worker threads"));
+    if (R_Interpreter != NULL && R_Interpreter->isMTLWorker) {
+	mtl_weakref_main_data_t d;
+	PROTECT(key);
+	PROTECT(val);
+	PROTECT(fin);
+	d.key = key;
+	d.val = val;
+	d.fin = fin;
+	d.onexit = onexit;
+	w = R_mtl_invoke_on_main_reason(mtl_newweakref_on_main, &d, R_MTL_RPC_OTHER);
+	UNPROTECT(3);
+	return w;
+    }
 
     switch (TYPEOF(key)) {
     case NILSXP:
@@ -2218,6 +2243,9 @@ static SEXP NewWeakRef(SEXP key, SEXP val, SEXP fin, Rboolean onexit)
 
 SEXP R_MakeWeakRef(SEXP key, SEXP val, SEXP fin, Rboolean onexit)
 {
+    if (R_Interpreter != NULL && R_Interpreter->isMTLWorker && fin != R_NilValue)
+	error(_("R-level finalizers are not supported in mtlapply() worker threads"));
+
     switch (TYPEOF(fin)) {
     case NILSXP:
     case CLOSXP:

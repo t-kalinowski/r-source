@@ -20,9 +20,31 @@ capture.output <- function(..., file=NULL, append=FALSE,
                            type = c("output", "message"), split = FALSE)
 {
     type <- match.arg(type)
+    if (.Internal(mtlisworker()) && is.null(file) &&
+        identical(type, "message") && !isTRUE(split)) {
+        rval <- character()
+        handler <- function(cnd) {
+            rval <<- c(rval, conditionMessage(cnd))
+            invokeRestart("muffleMessage")
+        }
+        for(i in seq_len(...length())) {
+            out <- withCallingHandlers(withVisible(...elt(i)), message = handler)
+            if (out$visible)
+                print(out$value)
+        }
+        return(rval %||% invisible(NULL))
+    }
+
     rval <- NULL; closeit <- TRUE
-    if (is.null(file))
-        file <- textConnection("rval", "w", local = TRUE)
+    worker_capture_file <- NULL
+    if (is.null(file)) {
+        if (.Internal(mtlisworker())) {
+            worker_capture_file <- tempfile("mtl-capture-", fileext = ".txt")
+            file <- file(worker_capture_file, "w")
+        } else {
+            file <- textConnection("rval", "w", local = TRUE)
+        }
+    }
     else if (is.character(file))
         file <- file(file, if(append) "a" else "w")
     else if (inherits(file, "connection")) {
@@ -33,7 +55,12 @@ capture.output <- function(..., file=NULL, append=FALSE,
 
     sink(file, type=type, split=split)
     ## for error recovery: all output will be lost if file=NULL
-    on.exit({sink(type=type, split=split); if(closeit) close(file)})
+    on.exit({
+        sink(type=type, split=split)
+        if(closeit) close(file)
+        if (!is.null(worker_capture_file) && file.exists(worker_capture_file))
+            unlink(worker_capture_file)
+    })
 
     for(i in seq_len(...length())) {
 	out <- withVisible(...elt(i))
@@ -45,5 +72,10 @@ capture.output <- function(..., file=NULL, append=FALSE,
     on.exit()
     sink(type=type, split=split)
     if(closeit) close(file)
+    if (!is.null(worker_capture_file)) {
+        rval <- readLines(worker_capture_file, warn = FALSE)
+        if (file.exists(worker_capture_file))
+            unlink(worker_capture_file)
+    }
     rval %||% invisible(NULL)
 }

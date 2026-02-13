@@ -18,9 +18,24 @@ static SEXP mtlPkg_define_global(SEXP x)
     return R_NilValue;
 }
 
+static SEXP mtlPkg_register_callable(SEXP dummy)
+{
+    R_RegisterCCallable("mtlPkg", "mtlPkg_add_callable", (DL_FUNC) &mtlPkg_add);
+    return ScalarLogical(TRUE);
+}
+
+static SEXP mtlPkg_call_callable(SEXP x, SEXP y)
+{
+    DL_FUNC fun = R_GetCCallable("mtlPkg", "mtlPkg_add_callable");
+    SEXP (*typed_fun)(SEXP, SEXP) = (SEXP (*)(SEXP, SEXP)) fun;
+    return typed_fun(x, y);
+}
+
 static const R_CallMethodDef CallEntries[] = {
     {"mtlPkg_add", (DL_FUNC) &mtlPkg_add, 2},
     {"mtlPkg_define_global", (DL_FUNC) &mtlPkg_define_global, 1},
+    {"mtlPkg_register_callable", (DL_FUNC) &mtlPkg_register_callable, 1},
+    {"mtlPkg_call_callable", (DL_FUNC) &mtlPkg_call_callable, 2},
     {NULL, NULL, 0}
 };
 

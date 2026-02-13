@@ -1798,9 +1798,14 @@ static SEXP get_package_CEntry_table(const char *package)
     return penv;
 }
 
-/* FIXME: clear the callables when unloading DLLs. May require changing
-   the interface or approximating. */
-void R_RegisterCCallable(const char *package, const char *name, DL_FUNC fptr)
+typedef struct {
+    const char *package;
+    const char *name;
+    DL_FUNC fptr;
+    DL_FUNC out;
+} mtl_ccallable_req_t;
+
+static void R_RegisterCCallable_impl(const char *package, const char *name, DL_FUNC fptr)
 {
     SEXP penv = get_package_CEntry_table(package);
     PROTECT(penv);
@@ -1810,7 +1815,7 @@ void R_RegisterCCallable(const char *package, const char *name, DL_FUNC fptr)
     UNPROTECT(2);
 }
 
-DL_FUNC R_GetCCallable(const char *package, const char *name)
+static DL_FUNC R_GetCCallable_impl(const char *package, const char *name)
 {
     SEXP penv = get_package_CEntry_table(package);
     PROTECT(penv);
@@ -1821,4 +1826,50 @@ DL_FUNC R_GetCCallable(const char *package, const char *name)
     else if (TYPEOF(eptr) != EXTPTRSXP)
 	error(_("table entry must be an external pointer"));
     return R_ExternalPtrAddrFn(eptr);
+}
+
+static SEXP mtl_register_ccallable_on_main(void *vp)
+{
+    mtl_ccallable_req_t *d = (mtl_ccallable_req_t *) vp;
+    R_RegisterCCallable_impl(d->package, d->name, d->fptr);
+    return R_NilValue;
+}
+
+static SEXP mtl_get_ccallable_on_main(void *vp)
+{
+    mtl_ccallable_req_t *d = (mtl_ccallable_req_t *) vp;
+    d->out = R_GetCCallable_impl(d->package, d->name);
+    return R_NilValue;
+}
+
+/* FIXME: clear the callables when unloading DLLs. May require changing
+   the interface or approximating. */
+void R_RegisterCCallable(const char *package, const char *name, DL_FUNC fptr)
+{
+    if (R_Interpreter != NULL && R_Interpreter->isMTLWorker) {
+	mtl_ccallable_req_t d = {
+	    .package = package,
+	    .name = name,
+	    .fptr = fptr,
+	    .out = NULL
+	};
+	R_mtl_invoke_on_main_reason(mtl_register_ccallable_on_main, &d, R_MTL_RPC_OTHER);
+	return;
+    }
+    R_RegisterCCallable_impl(package, name, fptr);
+}
+
+DL_FUNC R_GetCCallable(const char *package, const char *name)
+{
+    if (R_Interpreter != NULL && R_Interpreter->isMTLWorker) {
+	mtl_ccallable_req_t d = {
+	    .package = package,
+	    .name = name,
+	    .fptr = NULL,
+	    .out = NULL
+	};
+	R_mtl_invoke_on_main_reason(mtl_get_ccallable_on_main, &d, R_MTL_RPC_OTHER);
+	return d.out;
+    }
+    return R_GetCCallable_impl(package, name);
 }

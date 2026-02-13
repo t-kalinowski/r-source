@@ -55,6 +55,12 @@ mtlapply(X, FUN, \dots)
   global internal lock (for example, \code{tempfile()}), and can
   serialize across workers.
 
+  Worker operations that create weak references with C finalizers (for
+  example, some connection paths) are coordinated through the main
+  thread. Registering R-level finalizer functions from workers (for
+  example via \code{reg.finalizer(..., function(...) ...)} ) is not
+  supported and errors.
+
   For now, just-in-time compilation of closures is disabled in worker
   threads.
 }

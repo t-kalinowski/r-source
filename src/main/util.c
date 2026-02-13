@@ -846,6 +846,8 @@ attribute_hidden SEXP do_setwd(SEXP call, SEXP op, SEXP args, SEXP rho)
     SEXP s = R_NilValue, wd = R_NilValue;	/* -Wall */
 
     checkArity(op, args);
+    if (R_Interpreter != NULL && R_Interpreter->isMTLWorker)
+	error(_("setwd() is not supported in mtlapply() worker threads"));
     if (!isPairList(args) || !isValidString(s = CAR(args)))
 	error(_("character argument expected"));
     if (STRING_ELT(s, 0) == NA_STRING)
@@ -3302,5 +3304,4 @@ attribute_hidden int Rasprintf_malloc(char **str, const char *fmt, ...)
 	*str = buf;
     return ret;
 }
-
 

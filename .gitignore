@@ -15,3 +15,13 @@ tasks/pkgs/*.log
 # built during tests/Pkgs runs
 tests/Pkgs/**/src/*.o
 tests/Pkgs/**/src/*.so
+
+# local benchmark/demo artifacts
+.tmp-mtl-perf/
+bench/figures/
+demo-mtl.html
+
+# local vendored/scratch trees
+pkgs/
+third_party/
+tools/shiny-threadpool-bench/

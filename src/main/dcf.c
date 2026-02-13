@@ -68,6 +68,7 @@ static char *Rconn_getline2(Rconnection con, char *buf, int bufsize)
 
 attribute_hidden SEXP do_readDCF(SEXP call, SEXP op, SEXP args, SEXP env)
 {
+    int mtl_locked = 0;
     int nwhat, nret, nc, nr, m, k, lastm, need, i, n_eblanklines = 0;
     bool blank_skip, field_skip = false;
     int whatlen, dynwhat, buflen = 8096; // was 100, but that re-alloced often
@@ -85,6 +86,10 @@ attribute_hidden SEXP do_readDCF(SEXP call, SEXP op, SEXP args, SEXP env)
     int offset = 0; /* -Wall */
 
     checkArity(op, args);
+    if (R_MTL_THREADING_ACTIVE) {
+	R_mtl_global_lock();
+	mtl_locked = 1;
+    }
 
     file = CAR(args);
     con = getConnection(asInteger(file));
@@ -325,6 +330,7 @@ attribute_hidden SEXP do_readDCF(SEXP call, SEXP op, SEXP args, SEXP env)
     setAttrib(retval2, R_DimSymbol, dims);
     setAttrib(retval2, R_DimNamesSymbol, dimnames);
     UNPROTECT(6); /* what, fold_excludes, retval, retval2, dimnames, dims */
+    if (mtl_locked) R_mtl_global_unlock();
     return(retval2);
 }
 

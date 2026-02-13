@@ -35,6 +35,9 @@ cd "${repo_root}"
 "${repo_root}/${build_dir}/bin/R" --vanilla -q -f "${repo_root}/tools/mtl-worker-native-smoke.R" \
   --args "${sys_lib}" "${threads}" "64"
 
+"${repo_root}/${build_dir}/bin/R" --vanilla -q -f "${repo_root}/tools/mtl-quickr-smoke.R" \
+  --args "${sys_lib}" "${threads}" "4" "1.50"
+
 "${repo_root}/tools/mtl-load-standard-library-smoke.sh" "${build_dir}" "${std_lib}"
 
 echo
