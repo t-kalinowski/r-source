@@ -837,12 +837,15 @@ static void mtl_future_finalizer(SEXP ext)
     pthread_mutex_lock(&mtl_pool.mu);
     f->detached = 1;
     if (f->status == MTL_FUTURE_PENDING) {
-	if (f->enqueued)
-	    mtl_future_queue_remove_locked(f);
-	f->cancel_requested = 1;
-	mtl_future_complete_locked(f, MTL_FUTURE_CANCELLED, R_NilValue, NULL);
+	if (f->dep_count == 0) {
+	    if (f->enqueued)
+		mtl_future_queue_remove_locked(f);
+	    f->cancel_requested = 1;
+	    mtl_future_complete_locked(f, MTL_FUTURE_CANCELLED, R_NilValue, NULL);
+	}
     } else if (f->status == MTL_FUTURE_RUNNING) {
-	f->cancel_requested = 1;
+	if (f->dep_count == 0)
+	    f->cancel_requested = 1;
     }
     mtl_set_threading_active_locked();
     pthread_cond_broadcast(&mtl_pool.cv);

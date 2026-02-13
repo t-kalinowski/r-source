@@ -104,6 +104,21 @@ got_parent_keep <- wait(f_parent_keep)
 stopifnot(isTRUE(attr(got_parent_keep, "ok")))
 stopifnot(identical(got_parent_keep$value, 7L))
 
+## Dropping parent handles and running GC should not cancel active chains.
+f_gc <- local({
+    f0 <- background(1L)
+    f1 <- then(f0, function(x) x + 1L)
+    rm(f0)
+    gc()
+    f2 <- then(f1, function(x) x + 1L)
+    rm(f1)
+    gc()
+    f2
+})
+got_gc <- wait(f_gc)
+stopifnot(isTRUE(attr(got_gc, "ok")))
+stopifnot(identical(got_gc$value, 3L))
+
 ## Long chains should remain stable.
 f_chain <- background(1L)
 for (i in 1:50) {
