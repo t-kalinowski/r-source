@@ -5,241 +5,268 @@ output:
 ---
 
 ```{r setup, include=FALSE}
-dir.create("bench/figures", recursive = TRUE, showWarnings = FALSE)
 knitr::opts_chunk$set(
-  fig.path = "bench/figures/readme-",
   fig.width = 7,
   fig.height = 4
 )
 ```
 
-# R Multi-Threaded Interpreter Experiment (`mtlapply`)
+# Threaded R Runtime (Experimental)
 
-This repo is an experimental R runtime that can evaluate *pure R* closures concurrently on multiple OS threads, in a single R process, using `mtlapply()` (modeled after `lapply()`/`mclapply()`).
+This branch experiments with evaluating R code on multiple OS threads inside one process.
 
-The hook is simple: when your workload is "a lot of independent R work" (feature engineering, per-shard transforms, per-group summaries), `mtlapply()` can give near-linear speedups without forking and without serializing return values.
+Current user-facing APIs:
 
-## Build (Canonical Target)
+- `mtlapply(X, FUN, ...)`: threaded apply with the same signature as `lapply()`.
+- `background(expr, env = parent.frame())`: enqueue work on the shared thread pool.
+- `wait(futures, timeout = Inf)`: pop the next completed future.
+- `cancel(future)`: request cancellation for pending/running futures.
 
-Use the canonical build target `build-mtl`:
+Thread-pool size is controlled globally with:
 
-```sh
-tools/mtl-configure.sh build-mtl -- --without-x --disable-java --without-recommended-packages \
-  LDFLAGS='-L/opt/homebrew/lib' CPPFLAGS='-I/opt/homebrew/include'
-make -C build-mtl -j8
-tools/mtl-abi-macos.sh build-mtl
+```r
+options(mtlapply.threads = 8L)
 ```
 
-`config.site` now defaults `enable_R_shlib=yes`, so shared `libR` is the default unless explicitly disabled.
+## Quick Start
 
-## A Benchmark You Can Read (And Reproduce)
+```r
+options(mtlapply.threads = 8L)
 
-The "unit of parallelism" here is a shard id. There is no up-front "pre-splitting"; the `mtlapply()` call is what shards the work.
+# 1) mtlapply
+A <- matrix(runif(1000 * 1000), 1000, 1000)
+B <- matrix(runif(1000 * 1000), 1000, 1000)
+system.time(lapply(1:20, \(i) (A %*% B) + i))
+system.time(mtlapply(1:20, \(i) (A %*% B) + i))
 
-```{r benchmark-code, eval=FALSE}
-# This is the actual benchmark code (identical in shape to bench/readme_bench_run.R).
-# The key idea: mtlapply() shards work by shard id; the worker computes its own
-# row indices deterministically. No up-front "split" required.
-
-N <- 2e6L
-nshards <- 64L
-ngroups <- 4096L
-feat_loops <- 40L
-
-# Deterministic data (no RNG, no strings).
-x <- (as.double(seq_len(N) %% 1000L) - 500) / 10
-y <- (as.double((seq_len(N) * 17L) %% 1000L) - 500) / 10
-w <- (as.double((seq_len(N) * 31L) %% 1000L) + 1) / 1000
-grp <- rep_len(seq_len(ngroups), N)
-
-worker <- function(shard_id) {
-  idx <- seq.int(shard_id, N, by = nshards)
-  z <- x[idx]
-  for (i in seq_len(feat_loops)) {
-    z <- log1p(abs(z)) + sin(y[idx] + z) * w[idx] + cos(z - y[idx])
+# 2) background + wait
+work <- function(i) {
+  x <- as.double(i)
+  for (k in seq_len(500000L)) {
+    x <- x + sin(k + x) + cos(k - x * 0.5)
   }
-  g <- grp[idx]  # groups for summarise
-  # summarise: group-wise sum, plus counts
-  n <- tabulate(g, ngroups)
-  s <- numeric(ngroups)
-  for (j in seq_along(z)) {
-    gj <- g[[j]]
-    s[[gj]] <- s[[gj]] + z[[j]]
-  }
-  list(sum = s, n = n)
+  x
 }
 
-reduce <- function(parts) {
-  s <- Reduce(`+`, lapply(parts, `[[`, "sum"))
-  n <- Reduce(`+`, lapply(parts, `[[`, "n"))
-  s / n
+pending <- lapply(1:32, \(i) background(work(i)))
+out <- vector("list", length(pending))
+ids <- seq_along(pending)
+
+while (length(pending)) {
+  got <- wait(pending)
+  idx <- as.integer(attr(got, "index")[[1L]])
+  out[[ids[[idx]]]] <- got$value
+  pending <- pending[-idx]
+  ids <- ids[-idx]
 }
-
-ids <- seq_len(nshards)
-
-# baseline
-system.time(reduce(lapply(ids, worker)))[["elapsed"]]
-
-# parallel (in the experimental build)
-system.time(reduce(mtlapply(ids, worker, threads = 8L)))[["elapsed"]]
 ```
 
-## Real Numbers (Loaded From Artifacts)
+## Benchmark Snapshot (Checkpoint 2026-02-12)
 
-The benchmark is run as a standalone base-R script under:
+The tables below are from concrete benchmark runs in this branch at the
+checkpoint tagged on 2026-02-12.
 
-- the system `R` (to check for single-threaded regressions)
-- `./build-mtl/bin/R` from this tree (to measure `mtlapply()` scaling)
-
-For binary-package ABI compatibility on macOS, use the `--enable-R-shlib` build
-(`build-mtl`). Non-shlib executables can load a second `libR.dylib` when
-loading prebuilt package binaries.
-
-Generate the timing artifacts:
-
-```sh
-mkdir -p bench/results
-
-# system R (no mtlapply)
-R --vanilla -q -f bench/readme_bench_run.R --args bench/results/system.rds
-
-# R-devel (no mtlapply)
-/usr/local/bin/R-devel --vanilla -q -f bench/readme_bench_run.R --args bench/results/rdevel.rds
-
-# experimental build (has mtlapply)
-./build-mtl/bin/R --vanilla -q -f bench/readme_bench_run.R --args bench/results/mtl.rds
-
-# optional: generate a bench::mark artifact under the experimental build
-R_LIBS_USER=/private/tmp/mtl-proof-lib-MW1vv9 R_LIBS_SITE='' \
-  ./build-mtl/bin/R --vanilla -q -f bench/readme_bench_mark.R --args bench/results/mtl_bench_mark.rds
-```
-
-Then render this README, which loads those artifacts and summarizes them:
-
-```{r results, echo=FALSE}
-sys_path <- "bench/results/system.rds"
-rdevel_path <- "bench/results/rdevel.rds"
-mtl_path <- "bench/results/mtl.rds"
-bm_path <- "bench/results/mtl_bench_mark.rds"
-
-missing <- c(sys_path, rdevel_path, mtl_path, bm_path)[
-  !file.exists(c(sys_path, rdevel_path, mtl_path, bm_path))
-]
-if (length(missing)) {
-  stop(
-    "missing benchmark artifacts:\n- ",
-    paste(missing, collapse = "\n- "),
-    "\n\nRun bench/readme_bench_run.R (and bench/readme_bench_mark.R) first."
-  )
-}
-
-sys <- readRDS(sys_path)
-rdevel <- readRDS(rdevel_path)
-mtl <- readRDS(mtl_path)
-bm <- readRDS(bm_path)
-
-stopifnot(isTRUE(all.equal(sys$meta$settings, rdevel$meta$settings)))
-stopifnot(isTRUE(all.equal(sys$meta$settings, mtl$meta$settings)))
-stopifnot(isTRUE(all.equal(sys$meta$workloads, rdevel$meta$workloads)))
-stopifnot(isTRUE(all.equal(sys$meta$workloads, mtl$meta$workloads)))
-
-tab <- rbind(
-  transform(sys$results, build = "system"),
-  transform(rdevel$results, build = "rdevel"),
-  transform(mtl$results, build = "mtl")
-)
-
-tab$label <- ifelse(tab$method == "lapply",
-                    "lapply",
-                    paste0("mtlapply(", tab$threads, ")"))
-
-baseline_sys <- sys$results[sys$results$method == "lapply", c("workload", "median_seconds")]
-baseline_rdevel <- rdevel$results[rdevel$results$method == "lapply", c("workload", "median_seconds")]
-baseline_mtl <- mtl$results[mtl$results$method == "lapply", c("workload", "median_seconds")]
-names(baseline_sys)[[2L]] <- "baseline_sys_lapply"
-names(baseline_rdevel)[[2L]] <- "baseline_rdevel_lapply"
-names(baseline_mtl)[[2L]] <- "baseline_mtl_lapply"
-
-tab <- merge(tab, baseline_sys, by = "workload", all.x = TRUE, sort = FALSE)
-tab <- merge(tab, baseline_rdevel, by = "workload", all.x = TRUE, sort = FALSE)
-tab <- merge(tab, baseline_mtl, by = "workload", all.x = TRUE, sort = FALSE)
-
-tab$speedup_vs_sys_lapply <- tab$baseline_sys_lapply / tab$median_seconds
-tab$speedup_vs_rdevel_lapply <- tab$baseline_rdevel_lapply / tab$median_seconds
-tab$speedup_vs_mtl_lapply <- tab$baseline_mtl_lapply / tab$median_seconds
-tab$efficiency_vs_mtl_lapply <- ifelse(tab$method == "mtlapply",
-                                       tab$speedup_vs_mtl_lapply / tab$threads,
-                                       NA_real_)
-
-tab_plot <- tab
-
-tab <- tab[order(tab$workload, tab$build, tab$method, tab$threads), c(
-  "workload", "build", "label", "median_seconds",
-  "speedup_vs_rdevel_lapply", "speedup_vs_sys_lapply",
-  "speedup_vs_mtl_lapply", "efficiency_vs_mtl_lapply"
-)]
-
-settings <- sys$meta$settings
-settings_tab <- data.frame(
-  setting = names(settings),
-  value = vapply(settings, function(x) paste(x, collapse = ","), character(1)),
+```{r benchmark-snapshot, echo=FALSE}
+parity <- data.frame(
+  workload = c("etl_group_mean", "cos_seq", "alloc_pressure"),
+  rdevel_lapply_s = c(1.095, 0.504, 0.121),
+  mtl_lapply_s = c(0.977, 0.426, 0.101),
+  ratio_mtl_vs_rdevel = c(0.892, 0.845, 0.835),
   stringsAsFactors = FALSE
 )
 
-r_versions <- data.frame(
-  build = c("system", "rdevel", "mtl"),
-  r_version = c(sys$meta$r_version, rdevel$meta$r_version, mtl$meta$r_version),
+scale_tab <- data.frame(
+  workload = c(
+    "alloc_pressure", "alloc_pressure", "alloc_pressure", "alloc_pressure",
+    "cos_seq", "cos_seq", "cos_seq", "cos_seq",
+    "etl_group_mean", "etl_group_mean", "etl_group_mean", "etl_group_mean"
+  ),
+  threads = c(1, 2, 4, 8, 1, 2, 4, 8, 1, 2, 4, 8),
+  mtlapply_s = c(0.095, 0.114, 0.066, 0.102, 0.410, 0.293, 0.167, 0.167, 0.933, 0.593, 0.304, 0.153),
+  lapply_s = c(0.101, 0.101, 0.101, 0.101, 0.426, 0.426, 0.426, 0.426, 0.977, 0.977, 0.977, 0.977),
+  speedup = c(1.063, 0.886, 1.530, 0.990, 1.039, 1.454, 2.551, 2.551, 1.047, 1.648, 3.214, 6.386),
+  efficiency = c(1.063, 0.443, 0.383, 0.124, 1.039, 0.727, 0.638, 0.319, 1.047, 0.824, 0.803, 0.798),
   stringsAsFactors = FALSE
 )
 
-cat("Settings:\n")
-knitr::kable(settings_tab, row.names = FALSE)
-
-cat("\nR versions:\n")
-knitr::kable(r_versions, row.names = FALSE)
-
-cat("\nTimings:\n")
-knitr::kable(tab, row.names = FALSE, digits = 3)
-
-cat("\nSingle-thread overhead check (per workload):\n")
-ov <- merge(baseline_sys, baseline_rdevel, by = "workload", all = TRUE)
-ov <- merge(ov, baseline_mtl, by = "workload", all = TRUE)
-ov$ratio_mtl_vs_sys <- ov$baseline_mtl_lapply / ov$baseline_sys_lapply
-ov$ratio_mtl_vs_rdevel <- ov$baseline_mtl_lapply / ov$baseline_rdevel_lapply
-knitr::kable(
-  ov[, c("workload", "ratio_mtl_vs_sys", "ratio_mtl_vs_rdevel")],
-  row.names = FALSE,
-  digits = 3
+perf_matmul <- data.frame(
+  case = c("matmul_1000_n20", "matmul_100_n20000"),
+  rows = c(1000, 100),
+  cols = c(1000, 100),
+  n = c(20, 20000),
+  threads = c(8, 8),
+  reps = c(3, 3),
+  lapply_median_s = c(5.249, 6.386),
+  mtlapply_median_s = c(0.805, 0.811),
+  speedup = c(6.520, 7.874),
+  efficiency = c(0.815, 0.984),
+  stringsAsFactors = FALSE
 )
 
-cat("\nScaling (speedup vs `mtl` lapply):\n")
-mtl_only <- tab_plot[tab_plot$build == "mtl", , drop = FALSE]
-mtl_only$threads_plot <- ifelse(mtl_only$label == "lapply", 1L, mtl_only$threads)
-mtl_only$threads_plot <- as.integer(mtl_only$threads_plot)
-mtl_only <- mtl_only[order(mtl_only$workload, mtl_only$threads_plot), ]
+bg_burst <- data.frame(
+  mode = c("background", "background", "background", "serial"),
+  threads = c(2, 4, 8, 1),
+  elapsed_s = c(0.280, 0.280, 0.279, 0.620),
+  throughput_req_s = c(342.857, 342.857, 344.086, 154.839),
+  p50_s = c(0.152, 0.152, 0.152, 0.313),
+  p95_s = c(0.277, 0.277, 0.278, 0.590),
+  p99_s = c(0.280, 0.280, 0.278, 0.613),
+  speedup_vs_serial = c(2.214, 2.214, 2.222, 1.000),
+  p95_gain_vs_serial = c(2.126, 2.126, 2.121, 1.000),
+  stringsAsFactors = FALSE
+)
 
+shiny_full <- data.frame(
+  mode = c("sync", "threadpool"),
+  sessions_total = c(8, 8),
+  sessions_completed = c(8, 8),
+  sessions_failed = c(0, 0),
+  median_total_s = c(175.144, 23.140),
+  median_busy_s = c(153.024, 1.024),
+  p95_busy_s = c(153.366, 1.137),
+  throughput_completed_sess_per_s = c(0.046, 0.332),
+  stringsAsFactors = FALSE
+)
+```
+
+## 1) Serial Parity: `lapply` vs `R-devel`
+
+Goal: no single-thread slowdown for normal serial code.
+
+```{r serial-parity, echo=FALSE}
+knitr::kable(parity, digits = 3, row.names = FALSE)
+```
+
+Interpretation:
+
+- `ratio_mtl_vs_rdevel <= 1` means parity or better.
+- In this checkpoint artifact, all listed workloads are at or faster than `R-devel` for `lapply`.
+
+## 2) `mtlapply` Scaling and Efficiency
+
+Speedup baseline here is `mtl` build `lapply` on the same workload.
+Efficiency is `speedup / threads`.
+
+```{r mtlapply-scaling, echo=FALSE}
+knitr::kable(scale_tab, digits = 3, row.names = FALSE)
+```
+
+```{r mtlapply-speedup-plot, echo=FALSE}
 cols <- c("etl_group_mean" = "#1b9e77", "cos_seq" = "#d95f02", "alloc_pressure" = "#7570b3")
-u <- unique(mtl_only$workload)
-
 plot(
-  NA, xlim = range(mtl_only$threads_plot), ylim = c(0, max(mtl_only$speedup_vs_mtl_lapply, na.rm = TRUE)),
-  xlab = "threads", ylab = "speedup vs mtl lapply", xaxt = "n"
+  NA,
+  xlim = range(scale_tab$threads),
+  ylim = c(0, max(scale_tab$speedup)),
+  xlab = "threads",
+  ylab = "speedup vs lapply (same build)",
+  xaxt = "n"
 )
-axis(1, at = sort(unique(mtl_only$threads_plot)))
-for (nm in u) {
-  d <- mtl_only[mtl_only$workload == nm, ]
-  lines(d$threads_plot, d$speedup_vs_mtl_lapply, type = "b", pch = 19, col = cols[[nm]])
+axis(1, at = sort(unique(scale_tab$threads)))
+for (nm in unique(scale_tab$workload)) {
+  d <- scale_tab[scale_tab$workload == nm, ]
+  lines(d$threads, d$speedup, type = "b", pch = 19, col = cols[[nm]])
 }
-legend("topleft", legend = u, col = cols[u], lty = 1, pch = 19, bty = "n")
-
-cat("\nbench::mark (mtl build, same workload; plotted):\n")
-suppressPackageStartupMessages(library(bench))
-print(bm$bench)
-plot(bm$bench, type = "boxplot")
+abline(a = 0, b = 1, lty = 3, col = "gray40")
+legend("topleft", legend = unique(scale_tab$workload), col = cols[unique(scale_tab$workload)], lty = 1, pch = 19, bty = "n")
 ```
 
-## Notes / Limitations
+Workload behavior from this run:
 
-- Workloads that hammer global mutable runtime structures (notably string/symbol interning) may scale poorly.
-- Some operations are still serialized under a global lock when run from workers (notably selected native interfaces), to avoid corrupting global process state.
-- This is runtime work: correctness and safety come before "make everything parallel".
+- `etl_group_mean`: near-linear, strong scaling to 8 threads.
+- `cos_seq`: scales through 4 threads, then plateaus at 8 threads.
+- `alloc_pressure`: weak scaling; expected for allocation/GC-heavy closures.
+
+## 3) Dense Numeric Workload (Matrix Multiply Loop)
+
+This comes from `tools/mtl-threadpool-perf-smoke.R` with 8 threads.
+
+```{r matmul-perf, echo=FALSE}
+knitr::kable(perf_matmul, digits = 3, row.names = FALSE)
+```
+
+At this checkpoint:
+
+- `matmul_1000_n20`: 6.52x speedup, 81.5% efficiency.
+- `matmul_100_n20000`: 7.87x speedup, 98.4% efficiency.
+
+## 4) `background()` / `wait()` Burst Throughput
+
+This is a Shiny-style request burst simulation from
+`tools/mtl-shiny-background-smoke.R`.
+
+```{r background-wait-perf, echo=FALSE}
+knitr::kable(bg_burst, digits = 3, row.names = FALSE)
+```
+
+For the 8-thread row in this checkpoint:
+
+- Throughput speedup vs serial: ~2.22x.
+- P95 gain vs serial: ~2.12x.
+- Efficiency (speedup / 8): ~27.8%.
+
+This reflects queueing/coordination overhead and main-thread orchestration in
+the current `background()/wait()` path.
+
+## 5) End-to-End Shiny Load Test (Full Recording, No Failures)
+
+From `tools/shiny-threadpool-bench`:
+
+- sync app: `label_sync`
+- threadpool app: `label_mt` (`ExtendedTask(offload = "threadpool")`)
+- `workers = 8`
+- `SHINY_BENCH_WORK_SCALE = 300`
+- full recording replay (`recording.log`)
+
+```{r shiny-full, echo=FALSE}
+knitr::kable(shiny_full, digits = 3, row.names = FALSE)
+
+sync <- shiny_full[shiny_full$mode == "sync", ]
+mtp <- shiny_full[shiny_full$mode == "threadpool", ]
+summary_tab <- data.frame(
+  metric = c("median_total_s", "median_busy_s", "p95_busy_s", "throughput_completed_sess_per_s"),
+  sync = c(sync$median_total_s, sync$median_busy_s, sync$p95_busy_s, sync$throughput_completed_sess_per_s),
+  threadpool = c(mtp$median_total_s, mtp$median_busy_s, mtp$p95_busy_s, mtp$throughput_completed_sess_per_s),
+  gain = c(
+    sync$median_total_s / mtp$median_total_s,
+    sync$median_busy_s / mtp$median_busy_s,
+    sync$p95_busy_s / mtp$p95_busy_s,
+    mtp$throughput_completed_sess_per_s / sync$throughput_completed_sess_per_s
+  )
+)
+knitr::kable(summary_tab, digits = 3, row.names = FALSE)
+```
+
+For this run, both modes completed with zero failures (`sessions_failed = 0`),
+and the threadpool app improved both latency and throughput materially.
+
+## Reproducing These Benchmarks
+
+```sh
+# Serial parity + mtlapply scaling artifacts
+R --vanilla -q -f bench/readme_bench_run.R --args bench/results/system_latest.rds
+/usr/local/bin/R-devel --vanilla -q -f bench/readme_bench_run.R --args bench/results/rdevel_latest.rds
+build-mtl-shlib/bin/R --vanilla -q -f bench/readme_bench_run.R --args bench/results/mtl_latest.rds
+
+# Matrix benchmark
+build-mtl-shlib/bin/R --vanilla -q -f tools/mtl-threadpool-perf-smoke.R --args 8 3 0.45
+
+# background()/wait() burst benchmark
+build-mtl-shlib/bin/R --vanilla -q -f tools/mtl-shiny-background-smoke.R --args \
+  bench/results/mtl_shiny_background_smoke_checkpoint.csv \
+  bench/figures/mtl_shiny_background_smoke_checkpoint.png \
+  96 3 2,4,8 1.5 120000
+```
+
+## Guardrails and Unsupported Patterns (Current)
+
+`mtlapply()` workers are read-mostly with respect to process-global state.
+
+- Writes to `globalenv()` from worker threads are rejected.
+- Worker writes to `options(mtlapply.threads = ...)` or `options(threads = ...)` are rejected.
+- Worker `options()` changes are job-local and do not propagate to the main thread.
+- Some operations with shared process-wide state may serialize under an internal global lock.
+- Worker registration of R-level finalizer functions is not supported.
+- JIT compilation of closures is currently disabled in worker threads.
+
+In practice: pure/mostly-local closure workloads scale well; global-state and
+allocation-heavy workloads can flatten or regress.

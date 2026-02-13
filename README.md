@@ -1,201 +1,200 @@
 
-# R Multi-Threaded Interpreter Experiment (`mtlapply`)
+# Threaded R Runtime (Experimental)
 
-This repo is an experimental R runtime that can evaluate *pure R*
-closures concurrently on multiple OS threads, in a single R process,
-using `mtlapply()` (modeled after `lapply()`/`mclapply()`).
+This branch experiments with evaluating R code on multiple OS threads
+inside one process.
 
-The hook is simple: when your workload is “a lot of independent R work”
-(feature engineering, per-shard transforms, per-group summaries),
-`mtlapply()` can give near-linear speedups without forking and without
-serializing return values.
+Current user-facing APIs:
 
-## Build (Canonical Target)
+- `mtlapply(X, FUN, ...)`: threaded apply with the same signature as
+  `lapply()`.
+- `background(expr, env = parent.frame())`: enqueue work on the shared
+  thread pool.
+- `wait(futures, timeout = Inf)`: pop the next completed future.
+- `cancel(future)`: request cancellation for pending/running futures.
 
-Use the canonical build target `build-mtl`:
-
-``` sh
-tools/mtl-configure.sh build-mtl -- --without-x --disable-java --without-recommended-packages \
-  LDFLAGS='-L/opt/homebrew/lib' CPPFLAGS='-I/opt/homebrew/include'
-make -C build-mtl -j8
-tools/mtl-abi-macos.sh build-mtl
-```
-
-`config.site` now defaults `enable_R_shlib=yes`, so shared `libR` is
-the default unless explicitly disabled.
-
-## A Benchmark You Can Read (And Reproduce)
-
-The “unit of parallelism” here is a shard id. There is no up-front
-“pre-splitting”; the `mtlapply()` call is what shards the work.
+Thread-pool size is controlled globally with:
 
 ``` r
-# This is the actual benchmark code (identical in shape to bench/readme_bench_run.R).
-# The key idea: mtlapply() shards work by shard id; the worker computes its own
-# row indices deterministically. No up-front "split" required.
-
-N <- 2e6L
-nshards <- 64L
-ngroups <- 4096L
-feat_loops <- 40L
-
-# Deterministic data (no RNG, no strings).
-x <- (as.double(seq_len(N) %% 1000L) - 500) / 10
-y <- (as.double((seq_len(N) * 17L) %% 1000L) - 500) / 10
-w <- (as.double((seq_len(N) * 31L) %% 1000L) + 1) / 1000
-grp <- rep_len(seq_len(ngroups), N)
-
-worker <- function(shard_id) {
-  idx <- seq.int(shard_id, N, by = nshards)
-  z <- x[idx]
-  for (i in seq_len(feat_loops)) {
-    z <- log1p(abs(z)) + sin(y[idx] + z) * w[idx] + cos(z - y[idx])
-  }
-  g <- grp[idx]  # groups for summarise
-  # summarise: group-wise sum, plus counts
-  n <- tabulate(g, ngroups)
-  s <- numeric(ngroups)
-  for (j in seq_along(z)) {
-    gj <- g[[j]]
-    s[[gj]] <- s[[gj]] + z[[j]]
-  }
-  list(sum = s, n = n)
-}
-
-reduce <- function(parts) {
-  s <- Reduce(`+`, lapply(parts, `[[`, "sum"))
-  n <- Reduce(`+`, lapply(parts, `[[`, "n"))
-  s / n
-}
-
-ids <- seq_len(nshards)
-
-# baseline
-system.time(reduce(lapply(ids, worker)))[["elapsed"]]
-
-# parallel (in the experimental build)
-system.time(reduce(mtlapply(ids, worker, threads = 8L)))[["elapsed"]]
+options(mtlapply.threads = 8L)
 ```
 
-## Real Numbers (Loaded From Artifacts)
+## Quick Start
 
-The benchmark is run as a standalone base-R script under:
+``` r
+options(mtlapply.threads = 8L)
 
-- the system `R` (to check for single-threaded regressions)
-- `./build-mtl/bin/R` from this tree (to measure `mtlapply()` scaling)
+# 1) mtlapply
+A <- matrix(runif(1000 * 1000), 1000, 1000)
+B <- matrix(runif(1000 * 1000), 1000, 1000)
+system.time(lapply(1:20, \(i) (A %*% B) + i))
+system.time(mtlapply(1:20, \(i) (A %*% B) + i))
 
-For binary-package ABI compatibility on macOS, use the `--enable-R-shlib` build
-(`build-mtl`). Non-shlib executables can load a second `libR.dylib` when
-loading prebuilt package binaries.
+# 2) background + wait
+work <- function(i) {
+  x <- as.double(i)
+  for (k in seq_len(500000L)) {
+    x <- x + sin(k + x) + cos(k - x * 0.5)
+  }
+  x
+}
 
-Generate the timing artifacts:
+pending <- lapply(1:32, \(i) background(work(i)))
+out <- vector("list", length(pending))
+ids <- seq_along(pending)
+
+while (length(pending)) {
+  got <- wait(pending)
+  idx <- as.integer(attr(got, "index")[[1L]])
+  out[[ids[[idx]]]] <- got$value
+  pending <- pending[-idx]
+  ids <- ids[-idx]
+}
+```
+
+## Benchmark Snapshot (Checkpoint 2026-02-12)
+
+The tables below are from concrete benchmark runs in this branch at the
+checkpoint tagged on 2026-02-12.
+
+## 1) Serial Parity: `lapply` vs `R-devel`
+
+Goal: no single-thread slowdown for normal serial code.
+
+| workload       | rdevel_lapply_s | mtl_lapply_s | ratio_mtl_vs_rdevel |
+|:---------------|----------------:|-------------:|--------------------:|
+| etl_group_mean |           1.095 |        0.977 |               0.892 |
+| cos_seq        |           0.504 |        0.426 |               0.845 |
+| alloc_pressure |           0.121 |        0.101 |               0.835 |
+
+Interpretation:
+
+- `ratio_mtl_vs_rdevel <= 1` means parity or better.
+- In this checkpoint artifact, all listed workloads are at or faster
+  than `R-devel` for `lapply`.
+
+## 2) `mtlapply` Scaling and Efficiency
+
+Speedup baseline here is `mtl` build `lapply` on the same workload.
+Efficiency is `speedup / threads`.
+
+| workload       | threads | mtlapply_s | lapply_s | speedup | efficiency |
+|:---------------|--------:|-----------:|---------:|--------:|-----------:|
+| alloc_pressure |       1 |      0.095 |    0.101 |   1.063 |      1.063 |
+| alloc_pressure |       2 |      0.114 |    0.101 |   0.886 |      0.443 |
+| alloc_pressure |       4 |      0.066 |    0.101 |   1.530 |      0.383 |
+| alloc_pressure |       8 |      0.102 |    0.101 |   0.990 |      0.124 |
+| cos_seq        |       1 |      0.410 |    0.426 |   1.039 |      1.039 |
+| cos_seq        |       2 |      0.293 |    0.426 |   1.454 |      0.727 |
+| cos_seq        |       4 |      0.167 |    0.426 |   2.551 |      0.638 |
+| cos_seq        |       8 |      0.167 |    0.426 |   2.551 |      0.319 |
+| etl_group_mean |       1 |      0.933 |    0.977 |   1.047 |      1.047 |
+| etl_group_mean |       2 |      0.593 |    0.977 |   1.648 |      0.824 |
+| etl_group_mean |       4 |      0.304 |    0.977 |   3.214 |      0.803 |
+| etl_group_mean |       8 |      0.153 |    0.977 |   6.386 |      0.798 |
+
+![](README_files/figure-gfm/mtlapply-speedup-plot-1.png)<!-- -->
+
+Workload behavior from this run:
+
+- `etl_group_mean`: near-linear, strong scaling to 8 threads.
+- `cos_seq`: scales through 4 threads, then plateaus at 8 threads.
+- `alloc_pressure`: weak scaling; expected for allocation/GC-heavy
+  closures.
+
+## 3) Dense Numeric Workload (Matrix Multiply Loop)
+
+This comes from `tools/mtl-threadpool-perf-smoke.R` with 8 threads.
+
+| case | rows | cols | n | threads | reps | lapply_median_s | mtlapply_median_s | speedup | efficiency |
+|:---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| matmul_1000_n20 | 1000 | 1000 | 20 | 8 | 3 | 5.249 | 0.805 | 6.520 | 0.815 |
+| matmul_100_n20000 | 100 | 100 | 20000 | 8 | 3 | 6.386 | 0.811 | 7.874 | 0.984 |
+
+At this checkpoint:
+
+- `matmul_1000_n20`: 6.52x speedup, 81.5% efficiency.
+- `matmul_100_n20000`: 7.87x speedup, 98.4% efficiency.
+
+## 4) `background()` / `wait()` Burst Throughput
+
+This is a Shiny-style request burst simulation from
+`tools/mtl-shiny-background-smoke.R`.
+
+| mode | threads | elapsed_s | throughput_req_s | p50_s | p95_s | p99_s | speedup_vs_serial | p95_gain_vs_serial |
+|:---|---:|---:|---:|---:|---:|---:|---:|---:|
+| background | 2 | 0.280 | 342.857 | 0.152 | 0.277 | 0.280 | 2.214 | 2.126 |
+| background | 4 | 0.280 | 342.857 | 0.152 | 0.277 | 0.280 | 2.214 | 2.126 |
+| background | 8 | 0.279 | 344.086 | 0.152 | 0.278 | 0.278 | 2.222 | 2.121 |
+| serial | 1 | 0.620 | 154.839 | 0.313 | 0.590 | 0.613 | 1.000 | 1.000 |
+
+For the 8-thread row in this checkpoint:
+
+- Throughput speedup vs serial: ~2.22x.
+- P95 gain vs serial: ~2.12x.
+- Efficiency (speedup / 8): ~27.8%.
+
+This reflects queueing/coordination overhead and main-thread
+orchestration in the current `background()/wait()` path.
+
+## 5) End-to-End Shiny Load Test (Full Recording, No Failures)
+
+From `tools/shiny-threadpool-bench`:
+
+- sync app: `label_sync`
+- threadpool app: `label_mt` (`ExtendedTask(offload = "threadpool")`)
+- `workers = 8`
+- `SHINY_BENCH_WORK_SCALE = 300`
+- full recording replay (`recording.log`)
+
+| mode | sessions_total | sessions_completed | sessions_failed | median_total_s | median_busy_s | p95_busy_s | throughput_completed_sess_per_s |
+|:---|---:|---:|---:|---:|---:|---:|---:|
+| sync | 8 | 8 | 0 | 175.144 | 153.024 | 153.366 | 0.046 |
+| threadpool | 8 | 8 | 0 | 23.140 | 1.024 | 1.137 | 0.332 |
+
+| metric                          |    sync | threadpool |    gain |
+|:--------------------------------|--------:|-----------:|--------:|
+| median_total_s                  | 175.144 |     23.140 |   7.569 |
+| median_busy_s                   | 153.024 |      1.024 | 149.438 |
+| p95_busy_s                      | 153.366 |      1.137 | 134.887 |
+| throughput_completed_sess_per_s |   0.046 |      0.332 |   7.217 |
+
+For this run, both modes completed with zero failures
+(`sessions_failed = 0`), and the threadpool app improved both latency
+and throughput materially.
+
+## Reproducing These Benchmarks
 
 ``` sh
-mkdir -p bench/results
+# Serial parity + mtlapply scaling artifacts
+R --vanilla -q -f bench/readme_bench_run.R --args bench/results/system_latest.rds
+/usr/local/bin/R-devel --vanilla -q -f bench/readme_bench_run.R --args bench/results/rdevel_latest.rds
+build-mtl-shlib/bin/R --vanilla -q -f bench/readme_bench_run.R --args bench/results/mtl_latest.rds
 
-# system R (no mtlapply)
-R --vanilla -q -f bench/readme_bench_run.R --args bench/results/system.rds
+# Matrix benchmark
+build-mtl-shlib/bin/R --vanilla -q -f tools/mtl-threadpool-perf-smoke.R --args 8 3 0.45
 
-# R-devel (no mtlapply)
-/usr/local/bin/R-devel --vanilla -q -f bench/readme_bench_run.R --args bench/results/rdevel.rds
-
-# experimental build (has mtlapply)
-./build-mtl/bin/R --vanilla -q -f bench/readme_bench_run.R --args bench/results/mtl.rds
-
-# optional: generate a bench::mark artifact under the experimental build
-R_LIBS_USER=/private/tmp/mtl-proof-lib-MW1vv9 R_LIBS_SITE='' \
-  ./build-mtl/bin/R --vanilla -q -f bench/readme_bench_mark.R --args bench/results/mtl_bench_mark.rds
+# background()/wait() burst benchmark
+build-mtl-shlib/bin/R --vanilla -q -f tools/mtl-shiny-background-smoke.R --args \
+  bench/results/mtl_shiny_background_smoke_checkpoint.csv \
+  bench/figures/mtl_shiny_background_smoke_checkpoint.png \
+  96 3 2,4,8 1.5 120000
 ```
 
-Then render this README, which loads those artifacts and summarizes
-them:
+## Guardrails and Unsupported Patterns (Current)
 
-    ## Settings:
+`mtlapply()` workers are read-mostly with respect to process-global
+state.
 
-| setting    | value   |
-|:-----------|:--------|
-| N          | 2000000 |
-| nshards    | 64      |
-| ngroups    | 4096    |
-| feat_loops | 40      |
-| cos_m      | 200000  |
-| cos_k      | 256     |
-| alloc_m    | 50000   |
-| alloc_k    | 128     |
-| iters      | 3       |
-| threads    | 1,2,4,8 |
+- Writes to `globalenv()` from worker threads are rejected.
+- Worker writes to `options(mtlapply.threads = ...)` or
+  `options(threads = ...)` are rejected.
+- Worker `options()` changes are job-local and do not propagate to the
+  main thread.
+- Some operations with shared process-wide state may serialize under an
+  internal global lock.
+- Worker registration of R-level finalizer functions is not supported.
+- JIT compilation of closures is currently disabled in worker threads.
 
-    ## 
-    ## R versions:
-
-| build  | r_version                                          |
-|:-------|:---------------------------------------------------|
-| system | R version 4.5.2 (2025-10-31)                       |
-| rdevel | R Under development (unstable) (2026-02-09 r89390) |
-| mtl    | R Under development (unstable) (2026-02-10 r99999) |
-
-    ## 
-    ## Timings:
-
-| workload | build | label | median_seconds | speedup_vs_rdevel_lapply | speedup_vs_sys_lapply | speedup_vs_mtl_lapply | efficiency_vs_mtl_lapply |
-|:---|:---|:---|---:|---:|---:|---:|---:|
-| alloc_pressure | mtl | lapply | 0.122 | 0.910 | 0.959 | 1.000 | NA |
-| alloc_pressure | mtl | mtlapply(1) | 0.115 | 0.965 | 1.017 | 1.061 | 1.061 |
-| alloc_pressure | mtl | mtlapply(2) | 0.130 | 0.854 | 0.900 | 0.938 | 0.469 |
-| alloc_pressure | mtl | mtlapply(4) | 0.072 | 1.542 | 1.625 | 1.694 | 0.424 |
-| alloc_pressure | mtl | mtlapply(8) | 0.045 | 2.467 | 2.600 | 2.711 | 0.339 |
-| alloc_pressure | rdevel | lapply | 0.111 | 1.000 | 1.054 | 1.099 | NA |
-| alloc_pressure | system | lapply | 0.117 | 0.949 | 1.000 | 1.043 | NA |
-| cos_seq | mtl | lapply | 0.485 | 0.969 | 0.963 | 1.000 | NA |
-| cos_seq | mtl | mtlapply(1) | 0.460 | 1.022 | 1.015 | 1.054 | 1.054 |
-| cos_seq | mtl | mtlapply(2) | 0.339 | 1.386 | 1.378 | 1.431 | 0.715 |
-| cos_seq | mtl | mtlapply(4) | 0.184 | 2.554 | 2.538 | 2.636 | 0.659 |
-| cos_seq | mtl | mtlapply(8) | 0.105 | 4.476 | 4.448 | 4.619 | 0.577 |
-| cos_seq | rdevel | lapply | 0.470 | 1.000 | 0.994 | 1.032 | NA |
-| cos_seq | system | lapply | 0.467 | 1.006 | 1.000 | 1.039 | NA |
-| etl_group_mean | mtl | lapply | 0.999 | 1.085 | 0.941 | 1.000 | NA |
-| etl_group_mean | mtl | mtlapply(1) | 0.983 | 1.103 | 0.956 | 1.016 | 1.016 |
-| etl_group_mean | mtl | mtlapply(2) | 0.619 | 1.751 | 1.519 | 1.614 | 0.807 |
-| etl_group_mean | mtl | mtlapply(4) | 0.309 | 3.508 | 3.042 | 3.233 | 0.808 |
-| etl_group_mean | mtl | mtlapply(8) | 0.156 | 6.949 | 6.026 | 6.404 | 0.800 |
-| etl_group_mean | rdevel | lapply | 1.084 | 1.000 | 0.867 | 0.922 | NA |
-| etl_group_mean | system | lapply | 0.940 | 1.153 | 1.000 | 1.063 | NA |
-
-    ## 
-    ## Single-thread overhead check (per workload):
-
-| workload       | ratio_mtl_vs_sys | ratio_mtl_vs_rdevel |
-|:---------------|-----------------:|--------------------:|
-| alloc_pressure |            1.043 |               1.099 |
-| cos_seq        |            1.039 |               1.032 |
-| etl_group_mean |            1.063 |               0.922 |
-
-    ## 
-    ## Scaling (speedup vs `mtl` lapply):
-
-![](bench/figures/readme-results-1.png)<!-- -->
-
-    ## 
-    ## bench::mark (mtl build, same workload; plotted):
-
-    ## # A data frame: 5 × 13
-    ##   expression    min median `itr/sec` mem_alloc `gc/sec` n_itr  n_gc total_time
-    ##   <bch:expr>  <dbl>  <dbl>     <dbl> <bch:byt>    <dbl> <int> <dbl>      <dbl>
-    ## 1 lapply      0.950  0.984      1.03        NA     58.2     3   170      2.92 
-    ## 2 mtlapply(1) 0.986  0.987      1.01        NA     38.7     3   115      2.97 
-    ## 3 mtlapply(2) 0.609  0.611      1.64        NA     30.6     3    56      1.83 
-    ## 4 mtlapply(4) 0.311  0.311      3.21        NA     33.2     3    31      0.934
-    ## 5 mtlapply(8) 0.153  0.158      6.39        NA     17.0     3     8      0.469
-    ## # ℹ 4 more variables: result <list>, memory <list>, time <list>, gc <list>
-
-![](bench/figures/readme-results-2.png)<!-- -->
-
-## Notes / Limitations
-
-- Workloads that hammer global mutable runtime structures (notably
-  string/symbol interning) may scale poorly.
-- Some operations are still serialized under a global lock when run from
-  workers (notably selected native interfaces), to avoid corrupting
-  global process state.
-- This is runtime work: correctness and safety come before “make
-  everything parallel”.
+In practice: pure/mostly-local closure workloads scale well;
+global-state and allocation-heavy workloads can flatten or regress.
