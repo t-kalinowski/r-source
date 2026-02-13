@@ -160,6 +160,10 @@ attribute_hidden int R_gc_running(void) { return R_in_gc; }
 #ifdef HAVE_PTHREAD
 # include <stdatomic.h>
 
+#ifndef R_MTL_RUNTIME_STATS
+# define R_MTL_RUNTIME_STATS 0
+#endif
+
 static void mtl_large_owner_init(void);
 
 /* Global: enabled only while mtlapply() workers are evaluating.
@@ -187,6 +191,8 @@ static atomic_ulong mtl_runtime_free_node_calls = 0;
 static atomic_ulong mtl_runtime_free_node_serial = 0;
 static atomic_ulong mtl_runtime_free_node_cas = 0;
 static atomic_ulong mtl_runtime_free_node_cas_retry = 0;
+
+#if R_MTL_RUNTIME_STATS
 static int mtl_runtime_stats_cached = -1;
 
 static R_INLINE int mtl_runtime_stats_enabled(void)
@@ -195,6 +201,10 @@ static R_INLINE int mtl_runtime_stats_enabled(void)
 	mtl_runtime_stats_cached = getenv("R_MTL_RUNTIME_STATS") ? 1 : 0;
     return mtl_runtime_stats_cached;
 }
+# define MTL_RUNTIME_STATS_ENABLED (__builtin_expect(mtl_runtime_stats_enabled(), 0))
+#else
+# define MTL_RUNTIME_STATS_ENABLED (0)
+#endif
 
 static R_INLINE unsigned long mtl_runtime_counter_read(atomic_ulong *x, int reset)
 {
@@ -205,7 +215,7 @@ static R_INLINE unsigned long mtl_runtime_counter_read(atomic_ulong *x, int rese
 
 attribute_hidden void R_mtl_set_threading_active(int active)
 {
-    if (__builtin_expect(mtl_runtime_stats_enabled(), 0)) {
+    if (MTL_RUNTIME_STATS_ENABLED) {
 	atomic_fetch_add_explicit(&mtl_runtime_set_active_calls, 1, memory_order_relaxed);
 	if (active)
 	    atomic_fetch_add_explicit(&mtl_runtime_set_active_on, 1, memory_order_relaxed);
@@ -266,7 +276,7 @@ static R_INLINE void heap_alloc_resume(void)
 
 static R_INLINE void heap_alloc_enter(void)
 {
-    int stats = __builtin_expect(mtl_runtime_stats_enabled(), 0);
+    int stats = MTL_RUNTIME_STATS_ENABLED;
     if (stats)
 	atomic_fetch_add_explicit(&mtl_runtime_heap_enter_calls, 1, memory_order_relaxed);
     if (__builtin_expect(!R_MTL_THREADING_ACTIVE, 1)) {
@@ -324,7 +334,7 @@ static R_INLINE void heap_alloc_enter(void)
 
 static R_INLINE void heap_alloc_exit(void)
 {
-    int stats = __builtin_expect(mtl_runtime_stats_enabled(), 0);
+    int stats = MTL_RUNTIME_STATS_ENABLED;
     if (stats)
 	atomic_fetch_add_explicit(&mtl_runtime_heap_exit_calls, 1, memory_order_relaxed);
     if (__builtin_expect(!R_MTL_THREADING_ACTIVE, 1)) {
@@ -1421,16 +1431,8 @@ static R_INLINE R_mtl_heap_state *mtl_serial_heap(void)
    worker threads are active. Workers allocate from private heaps. */
 static R_INLINE int mtl_alloc_use_serial_fastpath(void)
 {
-    int serial = __builtin_expect(!R_MTL_THREADING_ACTIVE ||
-				  (R_Interpreter != NULL && !R_Interpreter->isMTLWorker), 1);
-    if (__builtin_expect(mtl_runtime_stats_enabled(), 0)) {
-	atomic_fetch_add_explicit(&mtl_runtime_alloc_fastpath_calls, 1, memory_order_relaxed);
-	if (serial)
-	    atomic_fetch_add_explicit(&mtl_runtime_alloc_fastpath_serial, 1, memory_order_relaxed);
-	else
-	    atomic_fetch_add_explicit(&mtl_runtime_alloc_fastpath_parallel, 1, memory_order_relaxed);
-    }
-    return serial;
+    return __builtin_expect(!R_MTL_THREADING_ACTIVE ||
+			    (R_Interpreter != NULL && !R_Interpreter->isMTLWorker), 1);
 }
 
 static R_INLINE int mtl_serial_no_free_nodes(R_mtl_heap_state *heap)
@@ -1560,11 +1562,11 @@ static R_INLINE R_size_t VHEAP_FREE_MTL(void)
 
 static R_INLINE SEXP try_get_free_node(int node_class)
 {
-    if (__builtin_expect(mtl_runtime_stats_enabled(), 0))
+    if (MTL_RUNTIME_STATS_ENABLED)
 	atomic_fetch_add_explicit(&mtl_runtime_free_node_calls, 1, memory_order_relaxed);
 #ifdef HAVE_PTHREAD
     if (!R_MTL_THREADING_ACTIVE || R_HEAP->isWorker) {
-	if (__builtin_expect(mtl_runtime_stats_enabled(), 0))
+	if (MTL_RUNTIME_STATS_ENABLED)
 	    atomic_fetch_add_explicit(&mtl_runtime_free_node_serial, 1, memory_order_relaxed);
 	/* Single-threaded heap fast path: avoid CAS loops and atomic RMW ops. */
 	SEXP s = R_GenHeap[node_class].Free;
@@ -1576,7 +1578,7 @@ static R_INLINE SEXP try_get_free_node(int node_class)
     }
 
     for (;;) {
-	if (__builtin_expect(mtl_runtime_stats_enabled(), 0))
+	if (MTL_RUNTIME_STATS_ENABLED)
 	    atomic_fetch_add_explicit(&mtl_runtime_free_node_cas, 1, memory_order_relaxed);
 	SEXP expected = GENHEAP_FREE_LOAD(node_class);
 	if (expected == R_GenHeap[node_class].New)
@@ -1590,11 +1592,11 @@ static R_INLINE SEXP try_get_free_node(int node_class)
 	    NODES_IN_USE_ADD(1);
 	    return expected;
 	}
-	if (__builtin_expect(mtl_runtime_stats_enabled(), 0))
+	if (MTL_RUNTIME_STATS_ENABLED)
 	    atomic_fetch_add_explicit(&mtl_runtime_free_node_cas_retry, 1, memory_order_relaxed);
     }
 #else
-    if (__builtin_expect(mtl_runtime_stats_enabled(), 0))
+    if (MTL_RUNTIME_STATS_ENABLED)
 	atomic_fetch_add_explicit(&mtl_runtime_free_node_serial, 1, memory_order_relaxed);
     SEXP s = GENHEAP_FREE_LOAD(node_class);
     if (s == R_GenHeap[node_class].New)

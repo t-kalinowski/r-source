@@ -35,6 +35,10 @@ Key performance requirements from the outset:
 - Avoid “try-then-fallback” patterns: prefer one happy path; fail fast if assumptions don’t hold.
 - Avoid excessive argument checking in duck-typed R/Python:
   - A small handful of `stopifnot()` checks is OK, but no exhaustive fallback trees.
+- Keep a running investigation log in `notes/INVESTIGATIONS.md`:
+  - Append a short dated entry for each non-trivial perf/correctness investigation.
+  - Record: hypothesis, what was changed/tested, measured result, and next action.
+  - If an experiment regresses behavior, note that it was reverted.
 
 ## Package / C API Story (Requested Direction)
 Work towards making this build of R usable for package code that calls `.Call()` and related native entry points:
@@ -82,6 +86,7 @@ Work towards making this build of R usable for package code that calls `.Call()`
 - Compare against the system development build at `/usr/local/bin/R-devel` for apples-to-apples timing.
 - Run heavier benchmarks (larger workloads, more iterations) to reduce measurement noise.
 - Persist benchmark results as artifacts (e.g. `.rds`) and load/compare them later.
+- After interpreting results, summarize the conclusion in `notes/INVESTIGATIONS.md` so later iterations have continuity.
 
 ### Process Management During Benchmarking
 - Prefer running long or kill-prone commands via the MCP console:
