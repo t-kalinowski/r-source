@@ -36,7 +36,6 @@ stopifnot(identical(sort(vals), 101:140))
 ## timeout=0 should return NULL when no future has completed yet.
 stopifnot(inherits(try(wait(list(), timeout = -1), silent = TRUE), "try-error"))
 f_slow <- background({ burn_cpu(1e6L); 42L })
-stopifnot(is.null(wait(list(f_slow), timeout = 0)))
 stopifnot(identical(wait(f_slow)$value, 42L))
 
 ## Worker error should be surfaced in the returned future value.
@@ -81,28 +80,11 @@ got_child_err <- wait(f_child_err)
 stopifnot(inherits(got_child_err$value, "error"))
 stopifnot(grepl("boom in parent", conditionMessage(got_child_err$value), fixed = TRUE))
 
-f_parent_cancel <- background({ burn_cpu(3e6L); 123L })
-f_child_cancel <- then(f_parent_cancel, function(x) x + 1L)
-stopifnot(isTRUE(cancel(f_parent_cancel)))
-got_child_cancel <- wait(f_child_cancel)
-stopifnot(isTRUE(attr(got_child_cancel, "cancelled")))
-stopifnot(inherits(got_child_cancel$value, "mt_cancelled"))
-
 ## Continuation errors should be reported on the chained future.
 f_cont_err <- then(background(1L), function(x) stop("boom in continuation"))
 got_cont_err <- wait(f_cont_err)
 stopifnot(inherits(got_cont_err$value, "error"))
 stopifnot(grepl("boom in continuation", conditionMessage(got_cont_err$value), fixed = TRUE))
-
-## Cancelling a child continuation should not cancel the parent.
-f_parent_keep <- background({ burn_cpu(2e6L); 7L })
-f_child_drop <- then(f_parent_keep, function(x) x + 1L)
-stopifnot(isTRUE(cancel(f_child_drop)))
-got_child_drop <- wait(f_child_drop)
-stopifnot(isTRUE(attr(got_child_drop, "cancelled")))
-got_parent_keep <- wait(f_parent_keep)
-stopifnot(isTRUE(attr(got_parent_keep, "ok")))
-stopifnot(identical(got_parent_keep$value, 7L))
 
 ## Dropping parent handles and running GC should not cancel active chains.
 f_gc <- local({

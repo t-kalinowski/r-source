@@ -38,6 +38,34 @@ Type 'q()' to quit R.
 +   force(expr)
 + }
 > 
+> assert_uncaught_traceback <- function(expr, msg_pattern, call_pattern)
++ {
++   exprq <- substitute(expr)
++   tf <- tempfile("mtl-trace-", fileext = ".R")
++   on.exit(unlink(tf), add = TRUE)
++ 
++   lines <- c(
++     "options(error = quote({traceback(2); q('no', status = 86L)}))",
++     "options(threads = 2L)",
++     paste(deparse(exprq), collapse = "\n")
++   )
++   writeLines(lines, tf, useBytes = TRUE)
++ 
++   out <- suppressWarnings(system2(
++     file.path(R.home("bin"), "R"),
++     c("--vanilla", "-q", "-f", tf),
++     stdout = TRUE,
++     stderr = TRUE
++   ))
++   status <- attr(out, "status")
++   if (is.null(status)) status <- 0L
++ 
++   stopifnot(identical(as.integer(status), 86L))
++   txt <- paste(out, collapse = "\n")
++   stopifnot(grepl(msg_pattern, txt, fixed = TRUE))
++   stopifnot(grepl(call_pattern, txt, fixed = TRUE))
++ }
+> 
 > # Workload should allocate and also touch global caches (symbols/CHARSXPs).
 > f <- function(i) {
 +   s <- paste0("sym-", i, "-", i)
@@ -50,6 +78,21 @@ Type 'q()' to quit R.
 > stopifnot(length(x) == 100L)
 > stopifnot(isTRUE(all.equal(x[[3]]$v, cos(1:3))))
 > 
+> # threads=1 is a strict serial fast path: behavior should match lapply().
+> f_serial <- function(i) list(i = i, v = i * 2L + 1L)
+> ref_serial <- lapply(1:200, f_serial)
+> got_serial <- mtlapply_with_threads(1L, 1:200, f_serial)
+> stopifnot(identical(ref_serial, got_serial))
+> 
+> # threads=1 errors should propagate normally and not poison later evaluation.
+> err_serial <- try(mtlapply_with_threads(1L, 1:50, function(i) {
++   if (i == 13L) stop("boom")
++   i
++ }), silent = TRUE)
+> stopifnot(inherits(err_serial, "try-error"))
+> ok_serial <- lapply(1:50, function(i) i + 2L)
+> stopifnot(identical(unlist(ok_serial, use.names = FALSE), 3:52))
+> 
 > # Package/native-code story: install a minimal package with .Call() and ensure
 > # calls from mtlapply() workers work, while writes to globalenv() error.
 > pkg_src <- file.path(Sys.getenv("SRCDIR"), "Pkgs", "mtlPkg")
@@ -61,6 +104,24 @@ Type 'q()' to quit R.
 + 
 +   vals <- mtlapply_with_threads(2L, 1:100, function(i) mtlPkg::mtl_add(i, i + 1))
 +   stopifnot(identical(unlist(vals, use.names = FALSE), as.double(1:100 + (1:100 + 1))))
++ 
++   # Worker-side package attach remains usable for normal package code paths.
++   attached_vals <- mtlapply_with_threads(2L, 1:8, function(i) {
++     suppressPackageStartupMessages(library("mtlPkg", character.only = TRUE, lib.loc = lib))
++     mtl_add(i, i + 2)
++   })
++   stopifnot(identical(unlist(attached_vals, use.names = FALSE),
++                       as.double(1:8 + (1:8 + 2))))
++ 
++   # Worker-side registration/lookup of C callables must stay valid for
++   # subsequent main-thread use (regression for embedded/autocomplete crashes).
++   callable_vals <- mtlapply_with_threads(2L, 1:16, function(i) {
++     mtlPkg::mtl_register_callable()
++     mtlPkg::mtl_call_callable(i, i + 4)
++   })
++   stopifnot(identical(unlist(callable_vals, use.names = FALSE),
++                       as.double(1:16 + (1:16 + 4))))
++   stopifnot(identical(mtlPkg::mtl_call_callable(2, 3), 5))
 + 
 +   if (exists("mtl_test_var", envir = .GlobalEnv, inherits = FALSE))
 +     rm(mtl_test_var, envir = .GlobalEnv)
@@ -87,6 +148,29 @@ Type 'q()' to quit R.
 > stopifnot(inherits(err_global_eval, "try-error"))
 > stopifnot(!exists("mtl_test_var", envir = .GlobalEnv, inherits = FALSE))
 > 
+> # Superassignment to closure-local captured state is allowed in workers.
+> local_super <- mtlapply_with_threads(2L, 1:8, function(i) {
++   acc <- 0L
++   bump <- function() {
++     acc <<- acc + i
++     acc
++   }
++   c(bump(), bump(), acc)
++ })
+> stopifnot(identical(local_super[[5]], c(5L, 10L, 10L)))
+> 
+> # Superassignment that resolves to globalenv() must still error.
+> if (exists("mtl_test_super", envir = .GlobalEnv, inherits = FALSE))
++   rm(mtl_test_super, envir = .GlobalEnv)
+> err_super_global <- try(mtlapply_with_threads(2L, 1:8, function(i) {
++   mtl_test_super <<- i
++   i
++ }), silent = TRUE)
+> stopifnot(inherits(err_super_global, "try-error"))
+> stopifnot(!exists("mtl_test_super", envir = .GlobalEnv, inherits = FALSE))
+> ok_after_super <- lapply(1:40, function(i) i + 100L)
+> stopifnot(identical(unlist(ok_after_super, use.names = FALSE), 101:140))
+> 
 > # options() writes in workers are local to the worker/job.
 > digits0 <- getOption("digits")
 > digits_vals <- mtlapply_with_threads(2L, 1:3, function(i) {
@@ -97,17 +181,162 @@ Type 'q()' to quit R.
 > stopifnot(identical(getOption("digits"), digits0))
 > 
 > # Worker threads must not change thread-count options.
-> err_opt_mtl <- try(mtlapply_with_threads(2L, 1:3, function(i) {
-+   options(threads = 8L)
-+   i
-+ }), silent = TRUE)
-> stopifnot(inherits(err_opt_mtl, "try-error"))
-> 
 > err_opt_threads <- try(mtlapply_with_threads(2L, 1:3, function(i) {
 +   options(threads = 8L)
 +   i
 + }), silent = TRUE)
 > stopifnot(inherits(err_opt_threads, "try-error"))
+> 
+> # Shared mutable closure state created on the main thread is read-only in
+> # workers; error must be clean/recoverable with a regular traceback.
+> shared_counter <- local({
++   i <- 0L
++   function() {
++     i <<- i + 1L
++     i
++   }
++ })
+> err_shared_counter <- try(mtlapply_with_threads(2L, 1:8, function(i) shared_counter()),
++                           silent = TRUE)
+> stopifnot(inherits(err_shared_counter, "try-error"))
+> msg_shared_counter <- if (!is.null(attr(err_shared_counter, "condition"))) {
++   conditionMessage(attr(err_shared_counter, "condition"))
++ } else {
++   as.character(err_shared_counter)
++ }
+> stopifnot(grepl("assignment to shared environments is not allowed", msg_shared_counter,
++                 fixed = TRUE))
+> cond_shared_counter <- attr(err_shared_counter, "condition")
+> stopifnot(!is.null(cond_shared_counter))
+> call_shared_counter <- deparse(conditionCall(cond_shared_counter))
+> stopifnot(length(call_shared_counter) >= 1L)
+> stopifnot(grepl("mtlapply", call_shared_counter[[1L]], fixed = TRUE))
+> 
+> assert_uncaught_traceback({
++   shared_counter2 <- local({
++     i <- 0L
++     function() {
++       i <<- i + 1L
++       i
++     }
++   })
++   mtlapply(1:2, function(i) shared_counter2())
++ }, "assignment to shared environments is not allowed in mtlapply() worker threads",
++ "1: mtlapply(1:2, function(i) shared_counter2())")
+> 
+> # setwd() mutates process-global state and must error in workers.
+> wd_before <- getwd()
+> err_setwd <- try(mtlapply_with_threads(2L, 1:4, function(i) {
++   setwd(tempdir())
++   i
++ }), silent = TRUE)
+> stopifnot(inherits(err_setwd, "try-error"))
+> msg_setwd <- if (!is.null(attr(err_setwd, "condition"))) {
++   conditionMessage(attr(err_setwd, "condition"))
++ } else {
++   as.character(err_setwd)
++ }
+> stopifnot(grepl("setwd() is not supported in mtlapply() worker threads", msg_setwd,
++                 fixed = TRUE))
+> stopifnot(identical(getwd(), wd_before))
+> 
+> assert_uncaught_traceback({
++   mtlapply(1:2, function(i) {
++     setwd(tempdir())
++     i
++   })
++ }, "setwd() is not supported in mtlapply() worker threads",
++ "1: mtlapply(1:2, function(i)")
+> 
+> ok_after_global_state_err <- mtlapply_with_threads(2L, 1:10, function(i) i + 1L)
+> stopifnot(identical(unlist(ok_after_global_state_err, use.names = FALSE), 2:11))
+> 
+> # Worker writes to stdout/stderr should reach process streams. Output order is
+> # unspecified and may be interleaved across workers.
+> 
+> assert_worker_stream_counts <- function(expr_lines, expected_letters, expected_each)
++ {
++   tf <- tempfile("mtl-stream-", fileext = ".R")
++   on.exit(unlink(tf), add = TRUE)
++   writeLines(c(
++     "options(threads = 8L)",
++     expr_lines
++   ), tf, useBytes = TRUE)
++ 
++   out <- suppressWarnings(system2(
++     file.path(R.home("bin"), "R"),
++     c("--vanilla", "--slave", "-f", tf),
++     stdout = TRUE,
++     stderr = TRUE
++   ))
++   status <- attr(out, "status")
++   if (is.null(status)) status <- 0L
++   stopifnot(identical(as.integer(status), 0L))
++   payload <- gsub("[^a-z]", "", paste(out, collapse = "\n"))
++   chars <- if (nzchar(payload)) strsplit(payload, "", fixed = TRUE)[[1L]] else character()
++   counts <- table(factor(chars, levels = expected_letters))
++   stopifnot(all(as.integer(counts) == as.integer(expected_each)))
++ }
+> 
+> assert_worker_stream_counts(
++   c(
++     "for (k in 1:20) invisible(mtlapply(letters, function(ch) cat(ch, \"\\n\")))"
++   ),
++   letters,
++   20L
++ )
+> assert_worker_stream_counts(
++   c(
++     "for (k in 1:20) invisible(mtlapply(letters[1:5], function(ch) cat(ch, \"\\n\", file = stderr())))"
++   ),
++   letters[1:5],
++   20L
++ )
+> 
+> # Worker-side file connection write/read paths should work.
+> txt_ok <- mtlapply_with_threads(2L, 1:20, function(i) {
++   d <- tempfile(fileext = ".txt")
++   writeLines(sprintf("mtl-%d", i), d)
++   nzchar(readLines(d, n = 1L, warn = FALSE))
++ })
+> stopifnot(identical(unlist(txt_ok, use.names = FALSE), rep(TRUE, 20L)))
+> 
+> # Stress worker file read/write return-value rooting.
+> for (k in 1:3) {
++   vals <- mtlapply_with_threads(4L, 1:2000, function(i) {
++     d <- tempfile(fileext = ".txt")
++     writeLines("x", d)
++     out <- readLines(d, n = 1L, warn = FALSE)
++     unlink(d)
++     out
++   })
++   stopifnot(identical(unlist(vals, use.names = FALSE), rep("x", 2000L)))
++ }
+> 
+> # capture.output() in workers should remain local and recoverable.
+> cap_vals <- mtlapply_with_threads(2L, 1:8, function(i) {
++   capture.output(cat(letters[i], "\n"))
++ })
+> stopifnot(identical(unlist(cap_vals, use.names = FALSE),
++                     paste0(letters[1:8], " ")))
+> 
+> # Stress capture.output() worker results over many tasks.
+> cap_stress <- mtlapply_with_threads(4L, 1:2000, function(i) capture.output(cat(i, "\n")))
+> stopifnot(all(vapply(seq_along(cap_stress),
++                      function(i) identical(cap_stress[[i]], paste0(i, " ")),
++                      logical(1))))
+> 
+> # R-level finalizer registration from workers is still unsupported.
+> err_reg_finalizer <- try(mtlapply_with_threads(2L, 1:4, function(i) {
++   e <- new.env(parent = emptyenv())
++   reg.finalizer(e, function(x) NULL, onexit = TRUE)
++   i
++ }), silent = TRUE)
+> stopifnot(inherits(err_reg_finalizer, "try-error"))
+> stopifnot(grepl("R-level finalizers are not supported", as.character(err_reg_finalizer),
++                 fixed = TRUE))
+> ok_after_reg_finalizer <- mtlapply_with_threads(2L, 1:10, function(i) i + 5L)
+> stopifnot(identical(unlist(ok_after_reg_finalizer, use.names = FALSE), 6:15))
 > 
 > # Nested mtlapply() should preserve closure-captured values.
 > outer_off <- 100L
@@ -116,6 +345,12 @@ Type 'q()' to quit R.
 +   unlist(mtlapply(1:5, function(j) outer_off + inner_off + j), use.names = FALSE)
 + })
 > stopifnot(identical(nested[[4]], outer_off + 12L + 1:5))
+> 
+> # Worker arithmetic must not mutate captured scalar bindings in place.
+> mod_guard <- 9L
+> mod_vals <- mtlapply_with_threads(4L, 1:40, function(i) i %% mod_guard)
+> stopifnot(identical(unlist(mod_vals, use.names = FALSE), (1:40) %% 9L))
+> stopifnot(identical(mod_guard, 9L))
 > 
 > # Nested mtlapply() reuses the existing pool (no extra worker creation).
 > invisible(.Internal(mtlpoolstats(TRUE)))
@@ -128,6 +363,26 @@ Type 'q()' to quit R.
 > stopifnot(pool_before[["threads.current"]] >= 1L)
 > stopifnot(identical(pool_after[["threads.current"]], pool_before[["threads.current"]]))
 > stopifnot(identical(pool_after[["threads.created"]], pool_before[["threads.created"]]))
+> 
+> # Large allocation-heavy jobs are chunked internally; repeated runs should remain
+> # stable and return complete results.
+> old_chunk <- getOption("mtlapply.chunk_size")
+> on.exit(options(mtlapply.chunk_size = old_chunk), add = TRUE)
+> options(mtlapply.chunk_size = 50000L)
+> for (k in 1:2) {
++   big <- mtlapply_with_threads(4L, 1:150000, function(i) i + 1L)
++   stopifnot(length(big) == 150000L)
++   stopifnot(identical(big[[1]], 2L))
++   stopifnot(identical(big[[150000]], 150001L))
++ }
+> 
+> # Invalid chunk-size options should fail fast.
+> err_chunk <- try({
++   options(mtlapply.chunk_size = 0L)
++   mtlapply_with_threads(2L, 1:3, identity)
++ }, silent = TRUE)
+> stopifnot(inherits(err_chunk, "try-error"))
+> options(mtlapply.chunk_size = old_chunk)
 > 
 > # Nested workload should speed up with more worker threads.
 > ncores <- parallel::detectCores(logical = FALSE)
@@ -162,6 +417,27 @@ Type 'q()' to quit R.
 +   i
 + }), silent = TRUE)
 > stopifnot(inherits(err, "try-error"))
+> 
+> # Missing-package-style failures should stay recoverable and must not corrupt
+> # error strings (e.g. embedded NUL regressions).
+> missing_pkg <- ".__mtl_missing_pkg__.definitely.not.installed__"
+> for (k in 1:6) {
++   err_missing <- try(mtlapply_with_threads(4L, 1:32, function(i) {
++     if (i == 1L)
++       stop(sprintf("there is no package called '%s'", missing_pkg), call. = FALSE)
++     i
++   }), silent = TRUE)
++   stopifnot(inherits(err_missing, "try-error"))
++   msg_missing <- if (!is.null(attr(err_missing, "condition")))
++     conditionMessage(attr(err_missing, "condition"))
++   else
++     as.character(err_missing)
++   stopifnot(grepl("there is no package called", msg_missing, fixed = TRUE))
++   stopifnot(!grepl("embedded nul", msg_missing, fixed = TRUE))
++   invisible(gc())
++   okk <- lapply(1:25, function(i) i + 10L)
++   stopifnot(identical(unlist(okk, use.names = FALSE), 11:35))
++ }
 > 
 > # Main-thread errors after mtlapply() should remain recoverable.
 > bad <- try(system.time(lapply(1:10, function(i) i, threads = 8L)), silent = TRUE)

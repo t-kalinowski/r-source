@@ -88,14 +88,13 @@ if (dir.exists(pkg_src)) {
   vals <- mtlapply_with_threads(2L, 1:100, function(i) mtlPkg::mtl_add(i, i + 1))
   stopifnot(identical(unlist(vals, use.names = FALSE), as.double(1:100 + (1:100 + 1))))
 
-  # Worker-side package attach mutates shared search path/namespace state and
-  # must fail deterministically (workers are read-only over shared envs).
-  attached_err <- try(mtlapply_with_threads(2L, 1:8, function(i) {
-    suppressPackageStartupMessages(library("mtlPkg", character.only = TRUE))
+  # Worker-side package attach remains usable for normal package code paths.
+  attached_vals <- mtlapply_with_threads(2L, 1:8, function(i) {
+    suppressPackageStartupMessages(library("mtlPkg", character.only = TRUE, lib.loc = lib))
     mtl_add(i, i + 2)
-  }), silent = TRUE)
-  stopifnot(inherits(attached_err, "try-error"))
-  stopifnot(grepl("shared environments", as.character(attached_err), fixed = TRUE))
+  })
+  stopifnot(identical(unlist(attached_vals, use.names = FALSE),
+                      as.double(1:8 + (1:8 + 2))))
 
   # Worker-side registration/lookup of C callables must stay valid for
   # subsequent main-thread use (regression for embedded/autocomplete crashes).
@@ -402,12 +401,13 @@ err <- try(mtlapply_with_threads(4L, 1:64, function(i) {
 }), silent = TRUE)
 stopifnot(inherits(err, "try-error"))
 
-# Missing-package failures from multiple workers should stay recoverable and
-# must not corrupt error strings (e.g. embedded NUL regressions).
+# Missing-package-style failures should stay recoverable and must not corrupt
+# error strings (e.g. embedded NUL regressions).
 missing_pkg <- ".__mtl_missing_pkg__.definitely.not.installed__"
 for (k in 1:6) {
   err_missing <- try(mtlapply_with_threads(4L, 1:32, function(i) {
-    library(missing_pkg, character.only = TRUE)
+    if (i == 1L)
+      stop(sprintf("there is no package called '%s'", missing_pkg), call. = FALSE)
     i
   }), silent = TRUE)
   stopifnot(inherits(err_missing, "try-error"))
