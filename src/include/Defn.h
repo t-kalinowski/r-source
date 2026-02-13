@@ -1708,6 +1708,17 @@ attribute_hidden SEXP R_mtl_invoke_on_main(SEXP (*fun)(void *), void *data);
 attribute_hidden SEXP R_mtl_invoke_on_main_reason(SEXP (*fun)(void *), void *data,
 						  int reason);
 
+/* Shared-environment lookup gate:
+ * worker threads mark read sections; main-thread global/search-path mutations
+ * wait for active worker lookups to quiesce. */
+attribute_hidden void R_mtl_shared_env_reader_enter(void);
+attribute_hidden void R_mtl_shared_env_reader_exit(void);
+attribute_hidden void R_mtl_shared_env_writer_begin(void);
+attribute_hidden void R_mtl_shared_env_writer_end(void);
+attribute_hidden void R_mtl_shared_env_writer_unlock_all(void);
+#define R_MTL_ENVSTAT_COUNT 8
+attribute_hidden void R_mtl_envirstats_get(unsigned long *vals, int reset);
+
 /* Thread-local storage (TLS) support for internal multi-threading work. */
 #ifndef R_THREAD_LOCAL
 # ifdef __cplusplus

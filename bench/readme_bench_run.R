@@ -11,14 +11,14 @@
 ##   ./build-mtl/bin/R --vanilla -q -f bench/readme_bench_run.R --args bench/results/mtl.rds
 ##
 ## Controls (env vars):
-## - README_N: rows, default 2000000
+## - README_N: rows, default 3000000
 ## - README_SHARDS: tasks, default 64
 ## - README_GROUPS: groups, default 4096
-## - README_FEAT_LOOPS: feature loops, default 40
-## - README_COS_M: workload B outer loop, default 200000
-## - README_COS_K: workload B inner loop, default 256
-## - README_ALLOC_M: workload C outer loop, default 50000
-## - README_ALLOC_K: workload C inner loop, default 128
+## - README_FEAT_LOOPS: feature loops, default 80
+## - README_COS_M: workload B outer loop, default 800000
+## - README_COS_K: workload B inner loop, default 512
+## - README_ALLOC_M: workload C outer loop, default 450000
+## - README_ALLOC_K: workload C inner loop, default 512
 ## - README_ITERS: timing iterations, default 3
 ## - README_THREADS: comma-separated thread counts (mtlapply only), default "1,2,4,8"
 
@@ -54,14 +54,14 @@ if (length(args) != 1L) {
 }
 out_path <- args[[1L]]
 
-N <- parse_int(Sys.getenv("README_N"), 2000000L)
+N <- parse_int(Sys.getenv("README_N"), 3000000L)
 nshards <- parse_int(Sys.getenv("README_SHARDS"), 64L)
 ngroups <- parse_int(Sys.getenv("README_GROUPS"), 4096L)
-feat_loops <- parse_int(Sys.getenv("README_FEAT_LOOPS"), 40L)
-cos_m <- parse_int(Sys.getenv("README_COS_M"), 200000L)
-cos_k <- parse_int(Sys.getenv("README_COS_K"), 256L)
-alloc_m <- parse_int(Sys.getenv("README_ALLOC_M"), 50000L)
-alloc_k <- parse_int(Sys.getenv("README_ALLOC_K"), 128L)
+feat_loops <- parse_int(Sys.getenv("README_FEAT_LOOPS"), 80L)
+cos_m <- parse_int(Sys.getenv("README_COS_M"), 800000L)
+cos_k <- parse_int(Sys.getenv("README_COS_K"), 512L)
+alloc_m <- parse_int(Sys.getenv("README_ALLOC_M"), 450000L)
+alloc_k <- parse_int(Sys.getenv("README_ALLOC_K"), 512L)
 iters <- parse_int(Sys.getenv("README_ITERS"), 3L)
 threads <- parse_int_vec(Sys.getenv("README_THREADS"), c(1L, 2L, 4L, 8L))
 

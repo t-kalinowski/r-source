@@ -169,9 +169,47 @@ static void mtl_large_owner_init(void);
  * to avoid semantic-interposition overhead on the hot serial path. */
 attribute_visible int R_mtl_threading_active = 0;
 attribute_hidden int R_mtl_threading_active_hidden = 0;
+static atomic_ulong mtl_runtime_set_active_calls = 0;
+static atomic_ulong mtl_runtime_set_active_on = 0;
+static atomic_ulong mtl_runtime_alloc_fastpath_calls = 0;
+static atomic_ulong mtl_runtime_alloc_fastpath_serial = 0;
+static atomic_ulong mtl_runtime_alloc_fastpath_parallel = 0;
+static atomic_ulong mtl_runtime_heap_enter_calls = 0;
+static atomic_ulong mtl_runtime_heap_enter_skip_inactive = 0;
+static atomic_ulong mtl_runtime_heap_enter_skip_worker = 0;
+static atomic_ulong mtl_runtime_heap_enter_wait_exclusive = 0;
+static atomic_ulong mtl_runtime_heap_enter_inflight_inc = 0;
+static atomic_ulong mtl_runtime_heap_exit_calls = 0;
+static atomic_ulong mtl_runtime_heap_exit_skip_inactive = 0;
+static atomic_ulong mtl_runtime_heap_exit_skip_worker = 0;
+static atomic_ulong mtl_runtime_heap_exit_inflight_dec = 0;
+static atomic_ulong mtl_runtime_free_node_calls = 0;
+static atomic_ulong mtl_runtime_free_node_serial = 0;
+static atomic_ulong mtl_runtime_free_node_cas = 0;
+static atomic_ulong mtl_runtime_free_node_cas_retry = 0;
+static int mtl_runtime_stats_cached = -1;
+
+static R_INLINE int mtl_runtime_stats_enabled(void)
+{
+    if (mtl_runtime_stats_cached < 0)
+	mtl_runtime_stats_cached = getenv("R_MTL_RUNTIME_STATS") ? 1 : 0;
+    return mtl_runtime_stats_cached;
+}
+
+static R_INLINE unsigned long mtl_runtime_counter_read(atomic_ulong *x, int reset)
+{
+    if (reset)
+	return atomic_exchange_explicit(x, 0, memory_order_relaxed);
+    return atomic_load_explicit(x, memory_order_relaxed);
+}
 
 attribute_hidden void R_mtl_set_threading_active(int active)
 {
+    if (__builtin_expect(mtl_runtime_stats_enabled(), 0)) {
+	atomic_fetch_add_explicit(&mtl_runtime_set_active_calls, 1, memory_order_relaxed);
+	if (active)
+	    atomic_fetch_add_explicit(&mtl_runtime_set_active_on, 1, memory_order_relaxed);
+    }
     if (active) {
 	/* Ensure owner maps are initialized before worker threads can allocate
 	   large nodes or be adopted into the main heap. */
@@ -228,11 +266,20 @@ static R_INLINE void heap_alloc_resume(void)
 
 static R_INLINE void heap_alloc_enter(void)
 {
-    if (__builtin_expect(!R_MTL_THREADING_ACTIVE, 1))
+    int stats = __builtin_expect(mtl_runtime_stats_enabled(), 0);
+    if (stats)
+	atomic_fetch_add_explicit(&mtl_runtime_heap_enter_calls, 1, memory_order_relaxed);
+    if (__builtin_expect(!R_MTL_THREADING_ACTIVE, 1)) {
+	if (stats)
+	    atomic_fetch_add_explicit(&mtl_runtime_heap_enter_skip_inactive, 1, memory_order_relaxed);
 	return;
+    }
     /* See heap_alloc_suspend(). */
-    if (R_Interpreter != NULL && R_Interpreter->isMTLWorker)
+    if (R_Interpreter != NULL && R_Interpreter->isMTLWorker) {
+	if (stats)
+	    atomic_fetch_add_explicit(&mtl_runtime_heap_enter_skip_worker, 1, memory_order_relaxed);
 	return;
+    }
     if (R_heap_excl_depth > 0) {
 	R_heap_alloc_depth++;
 	return;
@@ -243,6 +290,9 @@ static R_INLINE void heap_alloc_enter(void)
     for (;;) {
 	/* Wait if another thread is in an exclusive heap region. */
 	if (atomic_load_explicit(&R_heap_exclusive, memory_order_acquire)) {
+	    if (stats)
+		atomic_fetch_add_explicit(&mtl_runtime_heap_enter_wait_exclusive, 1,
+					  memory_order_relaxed);
 	    pthread_mutex_lock(&R_heap_excl_mutex);
 	    while (atomic_load_explicit(&R_heap_exclusive, memory_order_relaxed))
 		pthread_cond_wait(&R_heap_excl_cond, &R_heap_excl_mutex);
@@ -250,8 +300,13 @@ static R_INLINE void heap_alloc_enter(void)
 	    continue;
 	}
 	atomic_fetch_add_explicit(&R_heap_inflight, 1, memory_order_acq_rel);
+	if (stats)
+	    atomic_fetch_add_explicit(&mtl_runtime_heap_enter_inflight_inc, 1, memory_order_relaxed);
 	/* Re-check: if exclusivity raced with us, back out and retry. */
 	if (atomic_load_explicit(&R_heap_exclusive, memory_order_acquire)) {
+	    if (stats)
+		atomic_fetch_add_explicit(&mtl_runtime_heap_enter_wait_exclusive, 1,
+					  memory_order_relaxed);
 	    unsigned long prev = atomic_fetch_sub_explicit(&R_heap_inflight, 1, memory_order_relaxed);
 	    pthread_mutex_lock(&R_heap_excl_mutex);
 	    if (prev == 1)
@@ -269,11 +324,20 @@ static R_INLINE void heap_alloc_enter(void)
 
 static R_INLINE void heap_alloc_exit(void)
 {
-    if (__builtin_expect(!R_MTL_THREADING_ACTIVE, 1))
+    int stats = __builtin_expect(mtl_runtime_stats_enabled(), 0);
+    if (stats)
+	atomic_fetch_add_explicit(&mtl_runtime_heap_exit_calls, 1, memory_order_relaxed);
+    if (__builtin_expect(!R_MTL_THREADING_ACTIVE, 1)) {
+	if (stats)
+	    atomic_fetch_add_explicit(&mtl_runtime_heap_exit_skip_inactive, 1, memory_order_relaxed);
 	return;
+    }
     /* See heap_alloc_suspend(). */
-    if (R_Interpreter != NULL && R_Interpreter->isMTLWorker)
+    if (R_Interpreter != NULL && R_Interpreter->isMTLWorker) {
+	if (stats)
+	    atomic_fetch_add_explicit(&mtl_runtime_heap_exit_skip_worker, 1, memory_order_relaxed);
 	return;
+    }
     if (R_heap_excl_depth > 0) {
 	R_heap_alloc_depth--;
 	return;
@@ -286,6 +350,8 @@ static R_INLINE void heap_alloc_exit(void)
     if (!R_heap_inflight_suspended)
     {
 	unsigned long prev = atomic_fetch_sub_explicit(&R_heap_inflight, 1, memory_order_relaxed);
+	if (stats)
+	    atomic_fetch_add_explicit(&mtl_runtime_heap_exit_inflight_dec, 1, memory_order_relaxed);
 	/* If we were the last inflight allocator, wake any exclusive waiter. */
 	if (prev == 1) {
 	    pthread_mutex_lock(&R_heap_excl_mutex);
@@ -1355,8 +1421,16 @@ static R_INLINE R_mtl_heap_state *mtl_serial_heap(void)
    worker threads are active. Workers allocate from private heaps. */
 static R_INLINE int mtl_alloc_use_serial_fastpath(void)
 {
-    return __builtin_expect(!R_MTL_THREADING_ACTIVE ||
-			    (R_Interpreter != NULL && !R_Interpreter->isMTLWorker), 1);
+    int serial = __builtin_expect(!R_MTL_THREADING_ACTIVE ||
+				  (R_Interpreter != NULL && !R_Interpreter->isMTLWorker), 1);
+    if (__builtin_expect(mtl_runtime_stats_enabled(), 0)) {
+	atomic_fetch_add_explicit(&mtl_runtime_alloc_fastpath_calls, 1, memory_order_relaxed);
+	if (serial)
+	    atomic_fetch_add_explicit(&mtl_runtime_alloc_fastpath_serial, 1, memory_order_relaxed);
+	else
+	    atomic_fetch_add_explicit(&mtl_runtime_alloc_fastpath_parallel, 1, memory_order_relaxed);
+    }
+    return serial;
 }
 
 static R_INLINE int mtl_serial_no_free_nodes(R_mtl_heap_state *heap)
@@ -1486,8 +1560,12 @@ static R_INLINE R_size_t VHEAP_FREE_MTL(void)
 
 static R_INLINE SEXP try_get_free_node(int node_class)
 {
+    if (__builtin_expect(mtl_runtime_stats_enabled(), 0))
+	atomic_fetch_add_explicit(&mtl_runtime_free_node_calls, 1, memory_order_relaxed);
 #ifdef HAVE_PTHREAD
     if (!R_MTL_THREADING_ACTIVE || R_HEAP->isWorker) {
+	if (__builtin_expect(mtl_runtime_stats_enabled(), 0))
+	    atomic_fetch_add_explicit(&mtl_runtime_free_node_serial, 1, memory_order_relaxed);
 	/* Single-threaded heap fast path: avoid CAS loops and atomic RMW ops. */
 	SEXP s = R_GenHeap[node_class].Free;
 	if (s == R_GenHeap[node_class].New)
@@ -1498,6 +1576,8 @@ static R_INLINE SEXP try_get_free_node(int node_class)
     }
 
     for (;;) {
+	if (__builtin_expect(mtl_runtime_stats_enabled(), 0))
+	    atomic_fetch_add_explicit(&mtl_runtime_free_node_cas, 1, memory_order_relaxed);
 	SEXP expected = GENHEAP_FREE_LOAD(node_class);
 	if (expected == R_GenHeap[node_class].New)
 	    return NULL;
@@ -1510,8 +1590,12 @@ static R_INLINE SEXP try_get_free_node(int node_class)
 	    NODES_IN_USE_ADD(1);
 	    return expected;
 	}
+	if (__builtin_expect(mtl_runtime_stats_enabled(), 0))
+	    atomic_fetch_add_explicit(&mtl_runtime_free_node_cas_retry, 1, memory_order_relaxed);
     }
 #else
+    if (__builtin_expect(mtl_runtime_stats_enabled(), 0))
+	atomic_fetch_add_explicit(&mtl_runtime_free_node_serial, 1, memory_order_relaxed);
     SEXP s = GENHEAP_FREE_LOAD(node_class);
     if (s == R_GenHeap[node_class].New)
 	return NULL;
@@ -5274,6 +5358,79 @@ attribute_hidden SEXP do_memoryprofile(SEXP call, SEXP op, SEXP args, SEXP env)
     } END_SUSPEND_INTERRUPTS;
     UNPROTECT(2);
     return ans;
+}
+
+/* .Internal(mtlruntimestats(reset))
+ *
+ * Returns named counters for allocator/runtime coordination hot paths.
+ * Counters are incremented only when R_MTL_RUNTIME_STATS is set. */
+attribute_hidden SEXP do_mtlruntimestats(SEXP call, SEXP op, SEXP args, SEXP rho)
+{
+    checkArity(op, args);
+    int reset = asLogical(CAR(args));
+    if (reset == NA_LOGICAL)
+	error(_("invalid '%s' value"), "reset");
+
+    SEXP out, nms;
+    PROTECT(out = allocVector(INTSXP, 18));
+    PROTECT(nms = allocVector(STRSXP, 18));
+
+    unsigned long vals[18];
+#ifdef HAVE_PTHREAD
+    vals[0] = mtl_runtime_counter_read(&mtl_runtime_set_active_calls, reset);
+    vals[1] = mtl_runtime_counter_read(&mtl_runtime_set_active_on, reset);
+    vals[2] = mtl_runtime_counter_read(&mtl_runtime_alloc_fastpath_calls, reset);
+    vals[3] = mtl_runtime_counter_read(&mtl_runtime_alloc_fastpath_serial, reset);
+    vals[4] = mtl_runtime_counter_read(&mtl_runtime_alloc_fastpath_parallel, reset);
+    vals[5] = mtl_runtime_counter_read(&mtl_runtime_heap_enter_calls, reset);
+    vals[6] = mtl_runtime_counter_read(&mtl_runtime_heap_enter_skip_inactive, reset);
+    vals[7] = mtl_runtime_counter_read(&mtl_runtime_heap_enter_skip_worker, reset);
+    vals[8] = mtl_runtime_counter_read(&mtl_runtime_heap_enter_wait_exclusive, reset);
+    vals[9] = mtl_runtime_counter_read(&mtl_runtime_heap_enter_inflight_inc, reset);
+    vals[10] = mtl_runtime_counter_read(&mtl_runtime_heap_exit_calls, reset);
+    vals[11] = mtl_runtime_counter_read(&mtl_runtime_heap_exit_skip_inactive, reset);
+    vals[12] = mtl_runtime_counter_read(&mtl_runtime_heap_exit_skip_worker, reset);
+    vals[13] = mtl_runtime_counter_read(&mtl_runtime_heap_exit_inflight_dec, reset);
+    vals[14] = mtl_runtime_counter_read(&mtl_runtime_free_node_calls, reset);
+    vals[15] = mtl_runtime_counter_read(&mtl_runtime_free_node_serial, reset);
+    vals[16] = mtl_runtime_counter_read(&mtl_runtime_free_node_cas, reset);
+    vals[17] = mtl_runtime_counter_read(&mtl_runtime_free_node_cas_retry, reset);
+#else
+    for (int i = 0; i < 18; i++)
+	vals[i] = 0;
+#endif
+
+    const char *names[18] = {
+	"set_active.calls",
+	"set_active.on",
+	"alloc.fastpath.calls",
+	"alloc.fastpath.serial",
+	"alloc.fastpath.parallel",
+	"heap.enter.calls",
+	"heap.enter.skip_inactive",
+	"heap.enter.skip_worker",
+	"heap.enter.wait_exclusive",
+	"heap.enter.inflight_inc",
+	"heap.exit.calls",
+	"heap.exit.skip_inactive",
+	"heap.exit.skip_worker",
+	"heap.exit.inflight_dec",
+	"free_node.calls",
+	"free_node.serial",
+	"free_node.cas",
+	"free_node.cas_retry"
+    };
+
+    for (int i = 0; i < 18; i++) {
+	unsigned long v = vals[i];
+	if (v > INT_MAX)
+	    v = INT_MAX;
+	INTEGER(out)[i] = (int) v;
+	SET_STRING_ELT(nms, i, mkChar(names[i]));
+    }
+    setAttrib(out, R_NamesSymbol, nms);
+    UNPROTECT(2);
+    return out;
 }
 
 /* "protect" push a single argument onto R_PPStack */

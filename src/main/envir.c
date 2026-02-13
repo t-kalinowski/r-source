@@ -92,6 +92,7 @@
 #endif
 
 #define R_USE_SIGNALS 1
+#include <stdatomic.h>
 #include <Defn.h>
 #include <Internal.h>
 #include <R_ext/ObjectTable.h>
@@ -824,11 +825,17 @@ static SEXP RemoveFromList(SEXP thing, SEXP list, int *found)
     }
 }
 
+static R_INLINE int mtl_main_shared_env_mutation(SEXP rho);
+
 attribute_hidden void unbindVar(SEXP symbol, SEXP rho)
 {
     int hashcode;
     int found;
     SEXP c;
+    int gate = mtl_main_shared_env_mutation(rho);
+
+    if (gate)
+	R_mtl_shared_env_writer_begin();
 
     if (rho == R_BaseNamespace)
 	error(_("cannot unbind in the base namespace"));
@@ -862,6 +869,9 @@ attribute_hidden void unbindVar(SEXP symbol, SEXP rho)
 	     R_FlushGlobalCache(symbol);
 #endif
     }
+
+    if (gate)
+	R_mtl_shared_env_writer_end();
 }
 
 
@@ -1195,6 +1205,43 @@ slowpath:
 */
 
 static R_INLINE int mtl_worker_shared_env_access(SEXP rho);
+static atomic_ulong mtl_envstat_mutcheck_calls = 0;
+static atomic_ulong mtl_envstat_mutcheck_inactive = 0;
+static atomic_ulong mtl_envstat_mutcheck_worker = 0;
+static atomic_ulong mtl_envstat_mutcheck_nonenv = 0;
+static atomic_ulong mtl_envstat_mutcheck_shared_true = 0;
+static atomic_ulong mtl_envstat_searchpath_calls = 0;
+static atomic_ulong mtl_envstat_searchpath_true = 0;
+static atomic_ulong mtl_envstat_worker_access_true = 0;
+static int mtl_envstats_cached = -1;
+
+static R_INLINE int mtl_envstats_enabled(void)
+{
+    if (mtl_envstats_cached < 0)
+	mtl_envstats_cached = getenv("R_MTL_SHARED_STATS") ? 1 : 0;
+    return mtl_envstats_cached;
+}
+
+static R_INLINE unsigned long mtl_envstat_read(atomic_ulong *x, int reset)
+{
+    if (reset)
+	return atomic_exchange_explicit(x, 0, memory_order_relaxed);
+    return atomic_load_explicit(x, memory_order_relaxed);
+}
+
+attribute_hidden void R_mtl_envirstats_get(unsigned long *vals, int reset)
+{
+    if (vals == NULL)
+	return;
+    vals[0] = mtl_envstat_read(&mtl_envstat_mutcheck_calls, reset);
+    vals[1] = mtl_envstat_read(&mtl_envstat_mutcheck_inactive, reset);
+    vals[2] = mtl_envstat_read(&mtl_envstat_mutcheck_worker, reset);
+    vals[3] = mtl_envstat_read(&mtl_envstat_mutcheck_nonenv, reset);
+    vals[4] = mtl_envstat_read(&mtl_envstat_mutcheck_shared_true, reset);
+    vals[5] = mtl_envstat_read(&mtl_envstat_searchpath_calls, reset);
+    vals[6] = mtl_envstat_read(&mtl_envstat_searchpath_true, reset);
+    vals[7] = mtl_envstat_read(&mtl_envstat_worker_access_true, reset);
+}
 
 #ifdef USE_GLOBAL_CACHE
 /* findGlobalVar searches for a symbol value starting at R_GlobalEnv,
@@ -1202,45 +1249,46 @@ static R_INLINE int mtl_worker_shared_env_access(SEXP rho);
 static SEXP findGlobalVarLoc(SEXP symbol)
 {
     SEXP vl, rho;
+    SEXP out = R_NilValue;
     Rboolean canCache = TRUE;
-    /* The global cache is a mutable global hash table (R_GlobalCache).  A
-       worker thread must never mutate it, since that would allocate and splice
-       worker-heap nodes into a structure traced by the main GC, corrupting the
-       session once the worker heap is collected/adopted.  For now, workers
-       simply bypass the cache. */
+    int reader = 0;
+
     if (R_Interpreter != NULL && R_Interpreter->isMTLWorker) {
-	vl = R_UnboundValue;
+	/* Workers may read cache entries but must never mutate cache state. */
 	canCache = FALSE;
-    } else {
-	vl = R_GetGlobalCacheLoc(symbol);
-	if (vl != R_UnboundValue)
-	    return vl;
+	R_mtl_shared_env_reader_enter();
+	reader = 1;
     }
+
+    vl = R_GetGlobalCacheLoc(symbol);
+    if (vl != R_UnboundValue) {
+	out = vl;
+	goto done;
+    }
+
     for (rho = R_GlobalEnv; rho != R_EmptyEnv; rho = ENCLOS(rho)) {
-	int locked = mtl_worker_shared_env_access(rho);
-	if (locked)
-	    R_mtl_global_lock();
 	if (rho != R_BaseEnv) { /* we won't have R_BaseNamespace */
 	    vl = findVarLocInFrame(rho, symbol, &canCache);
 	    if (vl != R_NilValue) {
-		if (locked)
-		    R_mtl_global_unlock();
 		if(canCache)
 		    R_AddGlobalCache(symbol, vl);
-		return vl;
+		out = vl;
+		goto done;
 	    }
 	}
 	else {
-	    if (locked)
-		R_mtl_global_unlock();
 	    if (canCache && SYMVALUE(symbol) != R_UnboundValue)
 		R_AddGlobalCache(symbol, symbol);
-	    return symbol;
+	    out = symbol;
+	    goto done;
 	}
-	if (locked)
-	    R_mtl_global_unlock();
     }
-    return R_NilValue;
+    out = R_NilValue;
+
+done:
+    if (reader)
+	R_mtl_shared_env_reader_exit();
+    return out;
 }
 
 static R_INLINE SEXP findGlobalVar(SEXP symbol)
@@ -1296,7 +1344,69 @@ static R_INLINE int mtl_worker_shared_env_access(SEXP rho)
 	return 0;
     if (rho == R_EmptyEnv)
 	return 0;
-    return !R_mtl_current_heap_owns(rho);
+    int shared = !R_mtl_current_heap_owns(rho);
+    if (shared && __builtin_expect(mtl_envstats_enabled(), 0))
+	atomic_fetch_add_explicit(&mtl_envstat_worker_access_true, 1, memory_order_relaxed);
+    return shared;
+}
+
+static R_INLINE int mtl_worker_shared_env_reader_enter(SEXP rho)
+{
+    if (!mtl_worker_shared_env_access(rho))
+	return 0;
+    R_mtl_shared_env_reader_enter();
+    return 1;
+}
+
+static R_INLINE void mtl_worker_shared_env_reader_exit(int entered)
+{
+    if (entered)
+	R_mtl_shared_env_reader_exit();
+}
+
+static R_INLINE int mtl_main_shared_env_mutation(SEXP rho)
+{
+    int stats = __builtin_expect(mtl_envstats_enabled(), 0);
+    if (stats)
+	atomic_fetch_add_explicit(&mtl_envstat_mutcheck_calls, 1, memory_order_relaxed);
+    if (!R_MTL_THREADING_ACTIVE) {
+	if (stats)
+	    atomic_fetch_add_explicit(&mtl_envstat_mutcheck_inactive, 1, memory_order_relaxed);
+	return 0;
+    }
+    if (R_Interpreter != NULL && R_Interpreter->isMTLWorker) {
+	if (stats)
+	    atomic_fetch_add_explicit(&mtl_envstat_mutcheck_worker, 1, memory_order_relaxed);
+	return 0;
+    }
+    if (TYPEOF(rho) != ENVSXP) {
+	if (stats)
+	    atomic_fetch_add_explicit(&mtl_envstat_mutcheck_nonenv, 1, memory_order_relaxed);
+	return 0;
+    }
+    if (rho == R_BaseEnv || rho == R_BaseNamespace)
+	goto shared_true;
+#ifdef USE_GLOBAL_CACHE
+    if (IS_GLOBAL_FRAME(rho))
+	goto shared_true;
+#endif
+    return 0;
+shared_true:
+    if (stats)
+	atomic_fetch_add_explicit(&mtl_envstat_mutcheck_shared_true, 1, memory_order_relaxed);
+    return 1;
+}
+
+static R_INLINE int mtl_main_shared_searchpath_mutation(void)
+{
+    int stats = __builtin_expect(mtl_envstats_enabled(), 0);
+    if (stats)
+	atomic_fetch_add_explicit(&mtl_envstat_searchpath_calls, 1, memory_order_relaxed);
+    int out = (R_MTL_THREADING_ACTIVE &&
+	       (R_Interpreter == NULL || !R_Interpreter->isMTLWorker));
+    if (out && stats)
+	atomic_fetch_add_explicit(&mtl_envstat_searchpath_true, 1, memory_order_relaxed);
+    return out;
 }
 
 typedef struct {
@@ -1325,12 +1435,9 @@ attribute_hidden SEXP R_findVar(SEXP symbol, SEXP rho)
        will also handle all frames if rho is a global frame other than
        R_GlobalEnv */
     while (rho != R_GlobalEnv && rho != R_EmptyEnv) {
-	int locked = mtl_worker_shared_env_access(rho);
-	if (locked)
-	    R_mtl_global_lock();
+	int reader = mtl_worker_shared_env_reader_enter(rho);
 	vl = R_findVarInFrame(rho, symbol);
-	if (locked)
-	    R_mtl_global_unlock();
+	mtl_worker_shared_env_reader_exit(reader);
 	if (vl != R_UnboundValue) return (vl);
 	rho = ENCLOS(rho);
     }
@@ -1340,12 +1447,9 @@ attribute_hidden SEXP R_findVar(SEXP symbol, SEXP rho)
 	return R_UnboundValue;
 #else
     while (rho != R_EmptyEnv) {
-	int locked = mtl_worker_shared_env_access(rho);
-	if (locked)
-	    R_mtl_global_lock();
+	int reader = mtl_worker_shared_env_reader_enter(rho);
 	vl = R_findVarInFrame(rho, symbol);
-	if (locked)
-	    R_mtl_global_unlock();
+	mtl_worker_shared_env_reader_exit(reader);
 	if (vl != R_UnboundValue) return (vl);
 	rho = ENCLOS(rho);
     }
@@ -1373,12 +1477,9 @@ static SEXP findVarLoc(SEXP symbol, SEXP rho)
        will also handle all frames if rho is a global frame other than
        R_GlobalEnv */
     while (rho != R_GlobalEnv && rho != R_EmptyEnv) {
-	int locked = mtl_worker_shared_env_access(rho);
-	if (locked)
-	    R_mtl_global_lock();
+	int reader = mtl_worker_shared_env_reader_enter(rho);
 	vl = findVarLocInFrame(rho, symbol, NULL);
-	if (locked)
-	    R_mtl_global_unlock();
+	mtl_worker_shared_env_reader_exit(reader);
 	if (vl != R_NilValue) return vl;
 	rho = ENCLOS(rho);
     }
@@ -1682,21 +1783,15 @@ SEXP findFun3(SEXP symbol, SEXP rho, SEXP call)
 	    vl = findGlobalVar(symbol);
 #endif
 	else {
-	    int locked = mtl_worker_shared_env_access(rho);
-	    if (locked)
-		R_mtl_global_lock();
+	    int reader = mtl_worker_shared_env_reader_enter(rho);
 	    vl = R_findVarInFrame(rho, symbol);
-	    if (locked)
-		R_mtl_global_unlock();
+	    mtl_worker_shared_env_reader_exit(reader);
 	}
 #else
 	{
-	    int locked = mtl_worker_shared_env_access(rho);
-	    if (locked)
-		R_mtl_global_lock();
+	    int reader = mtl_worker_shared_env_reader_enter(rho);
 	    vl = R_findVarInFrame(rho, symbol);
-	    if (locked)
-		R_mtl_global_unlock();
+	    mtl_worker_shared_env_reader_exit(reader);
 	}
 #endif
 	if (vl != R_UnboundValue) {
@@ -1812,6 +1907,7 @@ static void defineVar_impl(SEXP symbol, SEXP value, SEXP rho)
 
 void defineVar(SEXP symbol, SEXP value, SEXP rho)
 {
+    int gate = mtl_main_shared_env_mutation(rho);
     if (value == R_UnboundValue)
 	error("attempt to bind a variable to R_UnboundValue");
     mtl_check_globalenv_assignment(rho);
@@ -1819,7 +1915,11 @@ void defineVar(SEXP symbol, SEXP value, SEXP rho)
     if (mtl_worker_shared_env_write(rho))
 	error(_("assignment to shared environments is not allowed in mtlapply() worker threads"));
 
+    if (gate)
+	R_mtl_shared_env_writer_begin();
     defineVar_impl(symbol, value, rho);
+    if (gate)
+	R_mtl_shared_env_writer_end();
 }
 
 /*----------------------------------------------------------------------
@@ -1944,12 +2044,18 @@ static SEXP setVarInFrame_impl(SEXP rho, SEXP symbol, SEXP value)
 
 static SEXP setVarInFrame(SEXP rho, SEXP symbol, SEXP value)
 {
+    int gate = mtl_main_shared_env_mutation(rho);
     mtl_check_globalenv_assignment(rho);
 
     if (mtl_worker_shared_env_write(rho))
 	error(_("assignment to shared environments is not allowed in mtlapply() worker threads"));
 
-    return setVarInFrame_impl(rho, symbol, value);
+    if (gate)
+	R_mtl_shared_env_writer_begin();
+    SEXP out = setVarInFrame_impl(rho, symbol, value);
+    if (gate)
+	R_mtl_shared_env_writer_end();
+    return out;
 }
 
 
@@ -1993,6 +2099,9 @@ void setVar(SEXP symbol, SEXP value, SEXP rho)
 
 void gsetVar(SEXP symbol, SEXP value, SEXP rho)
 {
+    int gate = mtl_main_shared_env_mutation(rho);
+    if (gate)
+	R_mtl_shared_env_writer_begin();
     if (FRAME_IS_LOCKED(rho)) {
 	if(SYMVALUE(symbol) == R_UnboundValue)
 	    error(_("cannot add binding of '%s' to the base environment"),
@@ -2002,6 +2111,8 @@ void gsetVar(SEXP symbol, SEXP value, SEXP rho)
     R_FlushGlobalCache(symbol);
 #endif
     SET_SYMBOL_BINDING_VALUE(symbol, value);
+    if (gate)
+	R_mtl_shared_env_writer_end();
 }
 
 /* get environment from a subclass if possible; else return NULL */
@@ -2093,6 +2204,10 @@ static int RemoveVariable(SEXP name, int hashcode, SEXP env)
 {
     int found;
     SEXP list;
+    int gate = mtl_main_shared_env_mutation(env);
+
+    if (gate)
+	R_mtl_shared_env_writer_begin();
 
     if (env == R_BaseNamespace)
 	error(_("cannot remove variables from base namespace"));
@@ -2108,7 +2223,10 @@ static int RemoveVariable(SEXP name, int hashcode, SEXP env)
 	table = (R_ObjectTable *) R_ExternalPtrAddr(HASHTAB(env));
 	if(table->remove == NULL)
 	    error(_("cannot remove variables from this database"));
-	return(table->remove(CHAR(PRINTNAME(name)), table));
+	found = table->remove(CHAR(PRINTNAME(name)), table);
+	if (gate)
+	    R_mtl_shared_env_writer_end();
+	return found;
     }
 
     if (IS_HASHED(env)) {
@@ -2128,6 +2246,8 @@ static int RemoveVariable(SEXP name, int hashcode, SEXP env)
 #endif
 	}
     }
+    if (gate)
+	R_mtl_shared_env_writer_end();
     return found;
 }
 
@@ -2683,6 +2803,10 @@ attribute_hidden SEXP do_attach(SEXP call, SEXP op, SEXP args, SEXP env)
     SEXP name, s, t, x;
     int pos, hsize;
     Rboolean isSpecial;
+    int gate = mtl_main_shared_searchpath_mutation();
+
+    if (gate)
+	R_mtl_shared_env_writer_begin();
 
     checkArity(op, args);
 
@@ -2781,6 +2905,8 @@ attribute_hidden SEXP do_attach(SEXP call, SEXP op, SEXP args, SEXP env)
     }
 
     UNPROTECT(1); /* s */
+    if (gate)
+	R_mtl_shared_env_writer_end();
     return s;
 }
 
@@ -2800,6 +2926,10 @@ attribute_hidden SEXP do_detach(SEXP call, SEXP op, SEXP args, SEXP env)
     SEXP s, t, x;
     int pos, n;
     Rboolean isSpecial = FALSE;
+    int gate = mtl_main_shared_searchpath_mutation();
+
+    if (gate)
+	R_mtl_shared_env_writer_begin();
 
     checkArity(op, args);
     pos = asInteger(CAR(args));
@@ -2838,6 +2968,8 @@ attribute_hidden SEXP do_detach(SEXP call, SEXP op, SEXP args, SEXP env)
     }
 #endif
     UNPROTECT(1);
+    if (gate)
+	R_mtl_shared_env_writer_end();
     return s;
 }
 
@@ -3606,6 +3738,7 @@ void R_unLockBinding(SEXP sym, SEXP env)
 
 void R_MakeActiveBinding(SEXP sym, SEXP fun, SEXP env)
 {
+    int gate = 0;
     if (TYPEOF(sym) != SYMSXP)
 	error(_("not a symbol"));
     if (! isFunction(fun))
@@ -3615,6 +3748,9 @@ void R_MakeActiveBinding(SEXP sym, SEXP fun, SEXP env)
     if (TYPEOF(env) != ENVSXP &&
 	TYPEOF((env = simple_as_environment(env))) != ENVSXP)
 	error(_("not an environment"));
+    gate = mtl_main_shared_env_mutation(env);
+    if (gate)
+	R_mtl_shared_env_writer_begin();
     if (env == R_BaseEnv || env == R_BaseNamespace) {
 	if (SYMVALUE(sym) != R_UnboundValue && ! IS_ACTIVE_BINDING(sym))
 	    error(_("symbol already has a regular binding"));
@@ -3639,6 +3775,8 @@ void R_MakeActiveBinding(SEXP sym, SEXP fun, SEXP env)
 	else
 	    SETCAR(binding, fun);
     }
+    if (gate)
+	R_mtl_shared_env_writer_end();
 }
 
 Rboolean R_BindingIsLocked(SEXP sym, SEXP env)
@@ -3799,6 +3937,7 @@ attribute_hidden SEXP do_activeBndFun(SEXP call, SEXP op, SEXP args, SEXP rho)
 attribute_hidden SEXP do_mkUnbound(SEXP call, SEXP op, SEXP args, SEXP rho)
 {
     SEXP sym;
+    int gate = mtl_main_shared_env_mutation(R_BaseEnv);
     checkArity(op, args);
     sym = CAR(args);
 
@@ -3811,10 +3950,14 @@ attribute_hidden SEXP do_mkUnbound(SEXP call, SEXP op, SEXP args, SEXP rho)
 	error(_("cannot unbind a locked binding"));
     if (R_BindingIsActive(sym, R_BaseEnv))
 	error(_("cannot unbind an active binding"));
+    if (gate)
+	R_mtl_shared_env_writer_begin();
     SET_SYMVALUE(sym, R_UnboundValue);
 #ifdef USE_GLOBAL_CACHE
     R_FlushGlobalCache(sym);
 #endif
+    if (gate)
+	R_mtl_shared_env_writer_end();
     return R_NilValue;
 }
 

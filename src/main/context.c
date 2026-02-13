@@ -247,6 +247,7 @@ NORET attribute_hidden void R_jumpctxt(RCNTXT * targetcptr, int mask, SEXP val)
        a caught error in another thread). */
     R_mtl_heap_unlock_all();
     R_mtl_global_unlock_all();
+    R_mtl_shared_env_writer_unlock_all();
 
     LONGJMP(cptr->cjmpbuf, mask);
 }
@@ -824,6 +825,7 @@ Rboolean R_ToplevelExec(void (*fun)(void *), void *data)
     if (!result) {
 	R_mtl_heap_unlock_all();
 	R_mtl_global_unlock_all();
+	R_mtl_shared_env_writer_unlock_all();
     }
 
     R_ToplevelContext = saveToplevelContext;

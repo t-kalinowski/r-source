@@ -661,6 +661,8 @@ FUNTAB R_FunTab[] =
 {"mtlparallelmax", do_mtlparallelmax, 0,     11,     0,      {PP_FUNCALL, PREC_FN,	0}},
 {"mtlpoolstats", do_mtlpoolstats, 0,	11,	1,	{PP_FUNCALL, PREC_FN,	0}},
 {"mtlrpcstats", do_mtlrpcstats, 0,	11,	1,	{PP_FUNCALL, PREC_FN,	0}},
+{"mtlsharedenvstats", do_mtlsharedenvstats, 0,	11,	1,	{PP_FUNCALL, PREC_FN,	0}},
+{"mtlruntimestats", do_mtlruntimestats, 0,	11,	1,	{PP_FUNCALL, PREC_FN,	0}},
 {"mtnotifystats", do_mtnotifystats, 0,	11,	1,	{PP_FUNCALL, PREC_FN,	0}},
 {"mtlpoolreset", do_mtlpoolreset, 0,	11,	0,	{PP_FUNCALL, PREC_FN,	0}},
 {"mtlisworker", do_mtlisworker, 0,	11,	0,	{PP_FUNCALL, PREC_FN,	0}},

@@ -114,6 +114,7 @@ static const char *mtl_rpc_reason_name_lookup(int reason)
 		    int id;
 		    struct mtl_pool_t *pool;
 		    unsigned long seen_gen;
+		    atomic_int in_shared_lookup;
 		    R_InterpreterState interp;
 		} mtl_worker_t;
 
@@ -184,6 +185,26 @@ static atomic_ulong mtl_notify_drain_eagain = 0;
 static atomic_ulong mtl_notify_drain_err = 0;
 static atomic_ulong mtl_notify_pipe_init_ok = 0;
 static atomic_ulong mtl_notify_pipe_init_fail = 0;
+static atomic_ulong mtl_shared_reader_enter_calls = 0;
+static atomic_ulong mtl_shared_reader_retry_after_set = 0;
+static atomic_ulong mtl_shared_reader_wait_loops = 0;
+static atomic_ulong mtl_shared_reader_wait_condwait = 0;
+static atomic_ulong mtl_shared_reader_exit_calls = 0;
+static atomic_ulong mtl_shared_writer_begin_calls = 0;
+static atomic_ulong mtl_shared_writer_wait_loops = 0;
+static atomic_ulong mtl_shared_writer_wait_condwait = 0;
+static atomic_ulong mtl_shared_writer_end_calls = 0;
+static atomic_ulong mtl_shared_writer_unlock_all_calls = 0;
+static atomic_ulong mtl_shared_writer_scan_calls = 0;
+static atomic_ulong mtl_shared_writer_scan_workers = 0;
+static int mtl_shared_stats_cached = -1;
+
+static R_INLINE int mtl_shared_stats_enabled(void)
+{
+    if (mtl_shared_stats_cached < 0)
+	mtl_shared_stats_cached = getenv("R_MTL_SHARED_STATS") ? 1 : 0;
+    return mtl_shared_stats_cached;
+}
 
 static int mtl_rpc_sanitize_reason(int reason)
 {
@@ -227,9 +248,15 @@ static void mtl_parallel_end(void)
 }
 static int mtl_main_thread_inited = 0;
 static pthread_t mtl_main_thread;
+static pthread_mutex_t mtl_shared_env_mu = PTHREAD_MUTEX_INITIALIZER;
+static pthread_cond_t mtl_shared_env_cv = PTHREAD_COND_INITIALIZER;
 
 static mtl_pool_t mtl_pool;
 static atomic_int mtl_pool_threads_created = 0;
+static atomic_int mtl_shared_env_mutate_pending = 0;
+static R_THREAD_LOCAL int mtl_shared_env_reader_depth = 0;
+static R_THREAD_LOCAL int mtl_shared_env_writer_depth = 0;
+static R_THREAD_LOCAL mtl_worker_t *mtl_current_worker = NULL;
 static SEXP mtl_dotOptionsSym = NULL;
 static SEXP mtl_futurePtrSym = NULL;
 static SEXP mtl_useFancyQuotesSym = NULL;
@@ -351,6 +378,135 @@ static Rboolean mtl_is_main_thread(void)
 	mtl_main_thread_inited = 1;
     }
     return pthread_equal(mtl_main_thread, pthread_self());
+}
+
+static int mtl_any_worker_in_shared_lookup(void)
+{
+    if (__builtin_expect(mtl_shared_stats_enabled(), 0)) {
+	atomic_fetch_add_explicit(&mtl_shared_writer_scan_calls, 1, memory_order_relaxed);
+	atomic_fetch_add_explicit(&mtl_shared_writer_scan_workers,
+				  (unsigned long) mtl_pool.nthreads, memory_order_relaxed);
+    }
+    for (int i = 0; i < mtl_pool.nthreads; i++) {
+	mtl_worker_t *w = mtl_pool.workers ? mtl_pool.workers[i] : NULL;
+	if (w != NULL &&
+	    atomic_load_explicit(&w->in_shared_lookup, memory_order_acquire))
+	    return 1;
+    }
+    return 0;
+}
+
+attribute_hidden void R_mtl_shared_env_reader_enter(void)
+{
+    if (!R_MTL_THREADING_ACTIVE)
+	return;
+    mtl_worker_t *w = mtl_current_worker;
+    if (w == NULL)
+	return;
+    if (mtl_shared_env_reader_depth++ > 0)
+	return;
+    if (__builtin_expect(mtl_shared_stats_enabled(), 0))
+	atomic_fetch_add_explicit(&mtl_shared_reader_enter_calls, 1, memory_order_relaxed);
+
+    for (;;) {
+	if (!atomic_load_explicit(&mtl_shared_env_mutate_pending, memory_order_acquire)) {
+	    atomic_store_explicit(&w->in_shared_lookup, 1, memory_order_release);
+	    if (!atomic_load_explicit(&mtl_shared_env_mutate_pending, memory_order_acquire))
+		break;
+	    if (__builtin_expect(mtl_shared_stats_enabled(), 0))
+		atomic_fetch_add_explicit(&mtl_shared_reader_retry_after_set, 1, memory_order_relaxed);
+	    atomic_store_explicit(&w->in_shared_lookup, 0, memory_order_release);
+	}
+
+	if (__builtin_expect(mtl_shared_stats_enabled(), 0))
+	    atomic_fetch_add_explicit(&mtl_shared_reader_wait_loops, 1, memory_order_relaxed);
+	pthread_mutex_lock(&mtl_shared_env_mu);
+	while (atomic_load_explicit(&mtl_shared_env_mutate_pending, memory_order_acquire)) {
+	    if (__builtin_expect(mtl_shared_stats_enabled(), 0))
+		atomic_fetch_add_explicit(&mtl_shared_reader_wait_condwait, 1, memory_order_relaxed);
+	    pthread_cond_wait(&mtl_shared_env_cv, &mtl_shared_env_mu);
+	}
+	pthread_mutex_unlock(&mtl_shared_env_mu);
+    }
+}
+
+attribute_hidden void R_mtl_shared_env_reader_exit(void)
+{
+    if (!R_MTL_THREADING_ACTIVE)
+	return;
+    mtl_worker_t *w = mtl_current_worker;
+    if (w == NULL)
+	return;
+    if (mtl_shared_env_reader_depth <= 0)
+	return;
+    if (--mtl_shared_env_reader_depth > 0)
+	return;
+    if (__builtin_expect(mtl_shared_stats_enabled(), 0))
+	atomic_fetch_add_explicit(&mtl_shared_reader_exit_calls, 1, memory_order_relaxed);
+
+    atomic_store_explicit(&w->in_shared_lookup, 0, memory_order_release);
+    if (atomic_load_explicit(&mtl_shared_env_mutate_pending, memory_order_acquire)) {
+	pthread_mutex_lock(&mtl_shared_env_mu);
+	pthread_cond_broadcast(&mtl_shared_env_cv);
+	pthread_mutex_unlock(&mtl_shared_env_mu);
+    }
+}
+
+attribute_hidden void R_mtl_shared_env_writer_begin(void)
+{
+    if (!R_MTL_THREADING_ACTIVE)
+	return;
+    if (!mtl_is_main_thread())
+	return;
+    if (mtl_shared_env_writer_depth++ > 0)
+	return;
+    if (__builtin_expect(mtl_shared_stats_enabled(), 0))
+	atomic_fetch_add_explicit(&mtl_shared_writer_begin_calls, 1, memory_order_relaxed);
+
+    atomic_store_explicit(&mtl_shared_env_mutate_pending, 1, memory_order_release);
+    pthread_mutex_lock(&mtl_shared_env_mu);
+    while (mtl_any_worker_in_shared_lookup()) {
+	if (__builtin_expect(mtl_shared_stats_enabled(), 0)) {
+	    atomic_fetch_add_explicit(&mtl_shared_writer_wait_loops, 1, memory_order_relaxed);
+	    atomic_fetch_add_explicit(&mtl_shared_writer_wait_condwait, 1, memory_order_relaxed);
+	}
+	pthread_cond_wait(&mtl_shared_env_cv, &mtl_shared_env_mu);
+    }
+    pthread_mutex_unlock(&mtl_shared_env_mu);
+}
+
+attribute_hidden void R_mtl_shared_env_writer_end(void)
+{
+    if (!R_MTL_THREADING_ACTIVE)
+	return;
+    if (!mtl_is_main_thread())
+	return;
+    if (mtl_shared_env_writer_depth <= 0)
+	return;
+    if (--mtl_shared_env_writer_depth > 0)
+	return;
+    if (__builtin_expect(mtl_shared_stats_enabled(), 0))
+	atomic_fetch_add_explicit(&mtl_shared_writer_end_calls, 1, memory_order_relaxed);
+
+    atomic_store_explicit(&mtl_shared_env_mutate_pending, 0, memory_order_release);
+    pthread_mutex_lock(&mtl_shared_env_mu);
+    pthread_cond_broadcast(&mtl_shared_env_cv);
+    pthread_mutex_unlock(&mtl_shared_env_mu);
+}
+
+attribute_hidden void R_mtl_shared_env_writer_unlock_all(void)
+{
+    if (!mtl_is_main_thread())
+	return;
+    if (mtl_shared_env_writer_depth <= 0)
+	return;
+    if (__builtin_expect(mtl_shared_stats_enabled(), 0))
+	atomic_fetch_add_explicit(&mtl_shared_writer_unlock_all_calls, 1, memory_order_relaxed);
+    mtl_shared_env_writer_depth = 0;
+    atomic_store_explicit(&mtl_shared_env_mutate_pending, 0, memory_order_release);
+    pthread_mutex_lock(&mtl_shared_env_mu);
+    pthread_cond_broadcast(&mtl_shared_env_cv);
+    pthread_mutex_unlock(&mtl_shared_env_mu);
 }
 
 static void mtl_notify_close_locked(void)
@@ -803,11 +959,19 @@ static void mtl_future_sweep_locked(void)
     }
 }
 
+static R_INLINE int mtl_pool_has_active_tasks_locked(void)
+{
+    /* "Active tasks" means work that can execute on the pool:
+       - an in-flight mtlapply() job, or
+       - queued/running background futures. */
+    return (mtl_pool.job_depth > 0 ||
+	    mtl_pool.future_q_head != NULL ||
+	    mtl_pool.future_running > 0);
+}
+
 static void mtl_set_threading_active_locked(void)
 {
-    if (mtl_pool.job_depth == 0 &&
-	mtl_pool.future_q_head == NULL &&
-	mtl_pool.future_running == 0)
+    if (!mtl_pool_has_active_tasks_locked())
 	R_mtl_set_threading_active(0);
     else
 	R_mtl_set_threading_active(1);
@@ -999,10 +1163,12 @@ static void mtl_future_adopt_main_exec(void *vp)
     R_mtl_invoke_on_main_reason(mtl_future_adopt_main, d, R_MTL_RPC_OTHER);
 }
 
-	static void *mtl_pool_worker_main(void *vp)
-	{
-	    mtl_worker_t *w = (mtl_worker_t *) vp;
-	    mtl_pool_t *p = w->pool;
+static void *mtl_pool_worker_main(void *vp)
+{
+    mtl_worker_t *w = (mtl_worker_t *) vp;
+    mtl_pool_t *p = w->pool;
+    mtl_current_worker = w;
+    mtl_shared_env_reader_depth = 0;
 
     R_RegisterInterpreterState(&w->interp);
 
@@ -1309,6 +1475,9 @@ static void mtl_future_adopt_main_exec(void *vp)
 
     R_InterpreterTLS = saved_interp;
     R_mtl_set_compat_interpreter(saved_compat);
+    atomic_store_explicit(&w->in_shared_lookup, 0, memory_order_release);
+    mtl_current_worker = NULL;
+    mtl_shared_env_reader_depth = 0;
 
 	    /* Worker teardown after error-unwind paths can leave transient
 	       allocator metadata inconsistent for explicit frees. Keep shutdown
@@ -1344,6 +1513,7 @@ static void mtl_pool_ensure_threads(int nthreads)
 	    error(_("cannot allocate memory"));
 	w->id = i;
 	w->pool = &mtl_pool;
+	atomic_init(&w->in_shared_lookup, 0);
 	mtl_interp_init_from_main(&w->interp);
 	mtl_pool.workers[i] = w;
 	int rc = pthread_create(&mtl_pool.threads[i], NULL, mtl_pool_worker_main, w);
@@ -1619,6 +1789,14 @@ static void mtlapply_run_cleanup(void *vp, Rboolean jump)
 	mtl_set_threading_active_locked();
 }
 #endif /* HAVE_PTHREAD */
+
+#ifndef HAVE_PTHREAD
+attribute_hidden void R_mtl_shared_env_reader_enter(void) {}
+attribute_hidden void R_mtl_shared_env_reader_exit(void) {}
+attribute_hidden void R_mtl_shared_env_writer_begin(void) {}
+attribute_hidden void R_mtl_shared_env_writer_end(void) {}
+attribute_hidden void R_mtl_shared_env_writer_unlock_all(void) {}
+#endif
 
 /* .Internal(lapply(X, FUN)) */
 
@@ -1985,6 +2163,76 @@ attribute_hidden SEXP do_mtlrpcstats(SEXP call, SEXP op, SEXP args, SEXP rho)
     k++;
     INTEGER(out)[k] = (int) total_errors;
     SET_STRING_ELT(nms, k, mkChar("errors.total"));
+    setAttrib(out, R_NamesSymbol, nms);
+    UNPROTECT(2);
+    return out;
+}
+
+/* .Internal(mtlsharedenvstats(reset))
+ *
+ * Returns named integer counters for shared-environment coordination paths,
+ * plus lightweight environment lookup/mutation classification counters. */
+attribute_hidden SEXP do_mtlsharedenvstats(SEXP call, SEXP op, SEXP args, SEXP rho)
+{
+    checkArity(op, args);
+    int reset = asLogical(CAR(args));
+    if (reset == NA_LOGICAL)
+	error(_("invalid '%s' value"), "reset");
+
+    unsigned long v[20];
+#ifdef HAVE_PTHREAD
+    v[0] = mtl_rpc_counter_read(&mtl_shared_reader_enter_calls, reset);
+    v[1] = mtl_rpc_counter_read(&mtl_shared_reader_retry_after_set, reset);
+    v[2] = mtl_rpc_counter_read(&mtl_shared_reader_wait_loops, reset);
+    v[3] = mtl_rpc_counter_read(&mtl_shared_reader_wait_condwait, reset);
+    v[4] = mtl_rpc_counter_read(&mtl_shared_reader_exit_calls, reset);
+    v[5] = mtl_rpc_counter_read(&mtl_shared_writer_begin_calls, reset);
+    v[6] = mtl_rpc_counter_read(&mtl_shared_writer_wait_loops, reset);
+    v[7] = mtl_rpc_counter_read(&mtl_shared_writer_wait_condwait, reset);
+    v[8] = mtl_rpc_counter_read(&mtl_shared_writer_end_calls, reset);
+    v[9] = mtl_rpc_counter_read(&mtl_shared_writer_unlock_all_calls, reset);
+    v[10] = mtl_rpc_counter_read(&mtl_shared_writer_scan_calls, reset);
+    v[11] = mtl_rpc_counter_read(&mtl_shared_writer_scan_workers, reset);
+#else
+    for (int i = 0; i < 12; i++)
+	v[i] = 0;
+#endif
+    unsigned long ev[R_MTL_ENVSTAT_COUNT];
+    R_mtl_envirstats_get(ev, reset);
+    for (int i = 0; i < R_MTL_ENVSTAT_COUNT; i++)
+	v[12 + i] = ev[i];
+
+    SEXP out, nms;
+    PROTECT(out = allocVector(INTSXP, 20));
+    PROTECT(nms = allocVector(STRSXP, 20));
+    const char *names[20] = {
+	"reader.enter.calls",
+	"reader.retry_after_set",
+	"reader.wait.loops",
+	"reader.wait.condwait",
+	"reader.exit.calls",
+	"writer.begin.calls",
+	"writer.wait.loops",
+	"writer.wait.condwait",
+	"writer.end.calls",
+	"writer.unlock_all.calls",
+	"writer.scan.calls",
+	"writer.scan.workers",
+	"env.mutcheck.calls",
+	"env.mutcheck.inactive",
+	"env.mutcheck.worker",
+	"env.mutcheck.nonenv",
+	"env.mutcheck.shared_true",
+	"env.searchpath.calls",
+	"env.searchpath.true",
+	"env.worker_access.true"
+    };
+    for (int i = 0; i < 20; i++) {
+	unsigned long x = v[i];
+	if (x > INT_MAX) x = INT_MAX;
+	INTEGER(out)[i] = (int) x;
+	SET_STRING_ELT(nms, i, mkChar(names[i]));
+    }
     setAttrib(out, R_NamesSymbol, nms);
     UNPROTECT(2);
     return out;

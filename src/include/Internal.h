@@ -247,6 +247,8 @@ SEXP do_mtlapply(SEXP, SEXP, SEXP, SEXP);
 SEXP do_mtlparallelmax(SEXP, SEXP, SEXP, SEXP);
 SEXP do_mtlpoolstats(SEXP, SEXP, SEXP, SEXP);
 SEXP do_mtlrpcstats(SEXP, SEXP, SEXP, SEXP);
+SEXP do_mtlsharedenvstats(SEXP, SEXP, SEXP, SEXP);
+SEXP do_mtlruntimestats(SEXP, SEXP, SEXP, SEXP);
 SEXP do_mtnotifystats(SEXP, SEXP, SEXP, SEXP);
 SEXP do_mtlpoolreset(SEXP, SEXP, SEXP, SEXP);
 SEXP do_mtlisworker(SEXP, SEXP, SEXP, SEXP);
