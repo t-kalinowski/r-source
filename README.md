@@ -64,9 +64,9 @@ Goal: no single-thread slowdown for normal serial code.
 
 | workload       | rdevel_lapply_s | mtl_lapply_s | ratio_mtl_vs_rdevel |
 |:---------------|----------------:|-------------:|--------------------:|
-| alloc_pressure |           0.109 |        0.101 |               0.927 |
-| cos_seq        |           0.495 |        0.408 |               0.824 |
-| etl_group_mean |           1.043 |        0.979 |               0.939 |
+| alloc_pressure |           2.443 |        2.339 |               0.957 |
+| cos_seq        |           3.279 |        3.072 |               0.937 |
+| etl_group_mean |           2.878 |        2.623 |               0.911 |
 
 Interpretation:
 
@@ -81,18 +81,18 @@ Efficiency is `speedup / threads`.
 
 | workload       | threads | mtlapply_s | lapply_s | speedup | efficiency |
 |:---------------|--------:|-----------:|---------:|--------:|-----------:|
-| alloc_pressure |       1 |      0.095 |    0.101 |   1.063 |      1.063 |
-| alloc_pressure |       2 |      0.114 |    0.101 |   0.886 |      0.443 |
-| alloc_pressure |       4 |      0.065 |    0.101 |   1.554 |      0.388 |
-| alloc_pressure |       8 |      0.108 |    0.101 |   0.935 |      0.117 |
-| cos_seq        |       1 |      0.413 |    0.408 |   0.988 |      0.988 |
-| cos_seq        |       2 |      0.301 |    0.408 |   1.355 |      0.678 |
-| cos_seq        |       4 |      0.177 |    0.408 |   2.305 |      0.576 |
-| cos_seq        |       8 |      0.181 |    0.408 |   2.254 |      0.282 |
-| etl_group_mean |       1 |      0.968 |    0.979 |   1.011 |      1.011 |
-| etl_group_mean |       2 |      0.601 |    0.979 |   1.629 |      0.814 |
-| etl_group_mean |       4 |      0.302 |    0.979 |   3.242 |      0.810 |
-| etl_group_mean |       8 |      0.152 |    0.979 |   6.441 |      0.805 |
+| alloc_pressure |       1 |      2.398 |    2.339 |   0.975 |      0.975 |
+| alloc_pressure |       2 |      1.314 |    2.339 |   1.780 |      0.890 |
+| alloc_pressure |       4 |      0.741 |    2.339 |   3.157 |      0.789 |
+| alloc_pressure |       8 |      0.400 |    2.339 |   5.847 |      0.731 |
+| cos_seq        |       1 |      3.092 |    3.072 |   0.994 |      0.994 |
+| cos_seq        |       2 |      1.630 |    3.072 |   1.885 |      0.942 |
+| cos_seq        |       4 |      0.898 |    3.072 |   3.421 |      0.855 |
+| cos_seq        |       8 |      0.535 |    3.072 |   5.742 |      0.718 |
+| etl_group_mean |       1 |      2.572 |    2.623 |   1.020 |      1.020 |
+| etl_group_mean |       2 |      1.290 |    2.623 |   2.033 |      1.017 |
+| etl_group_mean |       4 |      0.659 |    2.623 |   3.980 |      0.995 |
+| etl_group_mean |       8 |      0.337 |    2.623 |   7.783 |      0.973 |
 
 ![](README_files/figure-gfm/mtlapply-speedup-plot-1.png)<!-- -->
 
@@ -109,8 +109,8 @@ This comes from `tools/mtl-threadpool-perf-smoke.R` with 8 threads.
 
 | case | rows | cols | n | threads | reps | lapply_median_s | mtlapply_median_s | speedup | efficiency |
 |:---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
-| matmul_1000_n20 | 1000 | 1000 | 20 | 8 | 3 | 5.277 | 0.804 | 6.563 | 0.820 |
-| matmul_100_n20000 | 100 | 100 | 20000 | 8 | 3 | 6.388 | 0.813 | 7.857 | 0.982 |
+| matmul_1000_n20 | 1000 | 1000 | 20 | 8 | 3 | 5.102 | 0.801 | 6.370 | 0.796 |
+| matmul_100_n20000 | 100 | 100 | 20000 | 8 | 3 | 6.120 | 0.807 | 7.584 | 0.948 |
 
 At this checkpoint:
 
@@ -124,10 +124,10 @@ This is a Shiny-style request burst simulation from
 
 | mode | threads | elapsed_s | throughput_req_s | p50_s | p95_s | p99_s | speedup_vs_serial | p95_gain_vs_serial |
 |:---|---:|---:|---:|---:|---:|---:|---:|---:|
-| background | 2 | 0.273 | 351.648 | 0.148 | 0.270 | 0.272 | 2.267 | 2.175 |
-| background | 4 | 0.274 | 350.365 | 0.148 | 0.273 | 0.274 | 2.259 | 2.153 |
-| background | 8 | 0.273 | 351.648 | 0.148 | 0.271 | 0.272 | 2.267 | 2.169 |
-| serial | 1 | 0.619 | 155.089 | 0.313 | 0.588 | 0.612 | 1.000 | 1.000 |
+| background | 2 | 0.088 | 1090.909 | 0.047 | 0.086 | 0.087 | 6.273 | 6.099 |
+| background | 4 | 0.087 | 1103.448 | 0.048 | 0.087 | 0.087 | 6.345 | 6.029 |
+| background | 8 | 0.086 | 1116.279 | 0.047 | 0.086 | 0.086 | 6.419 | 6.099 |
+| serial | 1 | 0.552 | 173.913 | 0.279 | 0.524 | 0.546 | 1.000 | 1.000 |
 
 For the 8-thread row in this checkpoint:
 

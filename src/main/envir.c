@@ -1482,17 +1482,26 @@ attribute_hidden SEXP R_findVar(SEXP symbol, SEXP rho)
 	error(_("argument to '%s' is not an environment"), "findVar");
 
 #ifdef USE_GLOBAL_CACHE
+    if (!mtl_worker_reader) {
+	/* Serial fast path: avoid worker-gate checks in lookup loop. */
+	while (rho != R_GlobalEnv && rho != R_EmptyEnv) {
+	    vl = R_findVarInFrame(rho, symbol);
+	    if (vl != R_UnboundValue) return (vl);
+	    rho = ENCLOS(rho);
+	}
+	if (rho == R_GlobalEnv)
+	    return findGlobalVar(symbol);
+	else
+	    return R_UnboundValue;
+    }
+
     /* This first loop handles local frames, if there are any.  It
        will also handle all frames if rho is a global frame other than
        R_GlobalEnv */
     while (rho != R_GlobalEnv && rho != R_EmptyEnv) {
-	if (mtl_worker_reader) {
-	    int reader = mtl_worker_shared_env_reader_enter(rho);
-	    vl = R_findVarInFrame(rho, symbol);
-	    mtl_worker_shared_env_reader_exit(reader);
-	} else {
-	    vl = R_findVarInFrame(rho, symbol);
-	}
+	int reader = mtl_worker_shared_env_reader_enter(rho);
+	vl = R_findVarInFrame(rho, symbol);
+	mtl_worker_shared_env_reader_exit(reader);
 	if (vl != R_UnboundValue) return (vl);
 	rho = ENCLOS(rho);
     }
@@ -1501,14 +1510,20 @@ attribute_hidden SEXP R_findVar(SEXP symbol, SEXP rho)
     else
 	return R_UnboundValue;
 #else
-    while (rho != R_EmptyEnv) {
-	if (mtl_worker_reader) {
-	    int reader = mtl_worker_shared_env_reader_enter(rho);
+    if (!mtl_worker_reader) {
+	/* Serial fast path: avoid worker-gate checks in lookup loop. */
+	while (rho != R_EmptyEnv) {
 	    vl = R_findVarInFrame(rho, symbol);
-	    mtl_worker_shared_env_reader_exit(reader);
-	} else {
-	    vl = R_findVarInFrame(rho, symbol);
+	    if (vl != R_UnboundValue) return (vl);
+	    rho = ENCLOS(rho);
 	}
+	return R_UnboundValue;
+    }
+
+    while (rho != R_EmptyEnv) {
+	int reader = mtl_worker_shared_env_reader_enter(rho);
+	vl = R_findVarInFrame(rho, symbol);
+	mtl_worker_shared_env_reader_exit(reader);
 	if (vl != R_UnboundValue) return (vl);
 	rho = ENCLOS(rho);
     }
@@ -1536,17 +1551,26 @@ static SEXP findVarLoc(SEXP symbol, SEXP rho)
 	error(_("argument to '%s' is not an environment"), "findVarLoc");
 
 #ifdef USE_GLOBAL_CACHE
+    if (!mtl_worker_reader) {
+	/* Serial fast path: avoid worker-gate checks in lookup loop. */
+	while (rho != R_GlobalEnv && rho != R_EmptyEnv) {
+	    vl = findVarLocInFrame(rho, symbol, NULL);
+	    if (vl != R_NilValue) return vl;
+	    rho = ENCLOS(rho);
+	}
+	if (rho == R_GlobalEnv)
+	    return findGlobalVarLoc(symbol);
+	else
+	    return R_NilValue;
+    }
+
     /* This first loop handles local frames, if there are any.  It
        will also handle all frames if rho is a global frame other than
        R_GlobalEnv */
     while (rho != R_GlobalEnv && rho != R_EmptyEnv) {
-	if (mtl_worker_reader) {
-	    int reader = mtl_worker_shared_env_reader_enter(rho);
-	    vl = findVarLocInFrame(rho, symbol, NULL);
-	    mtl_worker_shared_env_reader_exit(reader);
-	} else {
-	    vl = findVarLocInFrame(rho, symbol, NULL);
-	}
+	int reader = mtl_worker_shared_env_reader_enter(rho);
+	vl = findVarLocInFrame(rho, symbol, NULL);
+	mtl_worker_shared_env_reader_exit(reader);
 	if (vl != R_NilValue) return vl;
 	rho = ENCLOS(rho);
     }
@@ -1555,8 +1579,19 @@ static SEXP findVarLoc(SEXP symbol, SEXP rho)
     else
 	return R_NilValue;
 #else
+    if (!mtl_worker_reader) {
+	while (rho != R_EmptyEnv) {
+	    vl = R_findVarInLocFrame(rho, symbol, NULL);
+	    if (vl != R_NilValue) return vl;
+	    rho = ENCLOS(rho);
+	}
+	return R_NilValue;
+    }
+
     while (rho != R_EmptyEnv) {
+	int reader = mtl_worker_shared_env_reader_enter(rho);
 	vl = R_findVarInLocFrame(rho, symbol, NULL);
+	mtl_worker_shared_env_reader_exit(reader);
 	if (vl != R_NilValue) return vl;
 	rho = ENCLOS(rho);
     }
@@ -1853,25 +1888,19 @@ SEXP findFun3(SEXP symbol, SEXP rho, SEXP call)
 #else
 	    vl = findGlobalVar(symbol);
 #endif
-	else {
-	    if (mtl_worker_reader) {
-		int reader = mtl_worker_shared_env_reader_enter(rho);
-		vl = R_findVarInFrame(rho, symbol);
-		mtl_worker_shared_env_reader_exit(reader);
-	    } else {
-		vl = R_findVarInFrame(rho, symbol);
-	    }
-	}
+	else if (mtl_worker_reader) {
+	    int reader = mtl_worker_shared_env_reader_enter(rho);
+	    vl = R_findVarInFrame(rho, symbol);
+	    mtl_worker_shared_env_reader_exit(reader);
+	} else
+	    vl = R_findVarInFrame(rho, symbol);
 #else
-	{
-	    if (mtl_worker_reader) {
-		int reader = mtl_worker_shared_env_reader_enter(rho);
-		vl = R_findVarInFrame(rho, symbol);
-		mtl_worker_shared_env_reader_exit(reader);
-	    } else {
-		vl = R_findVarInFrame(rho, symbol);
-	    }
-	}
+	if (mtl_worker_reader) {
+	    int reader = mtl_worker_shared_env_reader_enter(rho);
+	    vl = R_findVarInFrame(rho, symbol);
+	    mtl_worker_shared_env_reader_exit(reader);
+	} else
+	    vl = R_findVarInFrame(rho, symbol);
 #endif
 	if (vl != R_UnboundValue) {
 	    if (TYPEOF(vl) == PROMSXP) {

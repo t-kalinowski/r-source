@@ -1744,7 +1744,7 @@ extern R_InterpreterState R_Interpreter0;
  */
 #ifdef __MAIN__
 attribute_visible R_InterpreterState *R_InterpreterMain INI_as(&R_Interpreter0);
-attribute_visible R_THREAD_LOCAL R_InterpreterState *R_InterpreterTLS INI_as(NULL);
+attribute_visible R_THREAD_LOCAL R_InterpreterState *R_InterpreterTLS INI_as(&R_Interpreter0);
 #else
 attribute_visible extern R_InterpreterState *R_InterpreterMain;
 attribute_visible extern R_THREAD_LOCAL R_InterpreterState *R_InterpreterTLS;
@@ -1756,17 +1756,7 @@ attribute_visible R_InterpreterState *R_mtl_interpreter_tls_or_main(void);
 
 static R_INLINE R_InterpreterState *R_mtl_interpreter_ptr(void)
 {
-    /* Keep serial performance close to stock: avoid TLS access unless a
-       parallel region is active. */
-    if (__builtin_expect(!R_MTL_THREADING_ACTIVE, 1)) {
-#ifdef __MAIN__
-	/* Avoid an extra default-visibility global load on the hot serial path. */
-	return &R_Interpreter0;
-#else
-	return R_InterpreterMain;
-#endif
-    }
-    return R_mtl_interpreter_tls_or_main();
+    return R_InterpreterTLS;
 }
 
 #define R_Interpreter (R_mtl_interpreter_ptr())

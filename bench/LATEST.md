@@ -7,50 +7,50 @@ Regenerate with `tools/mtl-bench-refresh.sh` and inspect with `git diff bench/LA
 
 | workload | mtl_lapply_s | rdevel_lapply_s | ratio |
 | --- | --- | --- | --- |
-| alloc_pressure | 0.101 | 0.109 | 0.927 |
-| cos_seq | 0.408 | 0.495 | 0.824 |
-| etl_group_mean | 0.979 | 1.043 | 0.939 |
+| alloc_pressure | 2.339 | 2.443 | 0.957 |
+| cos_seq | 3.072 | 3.279 | 0.937 |
+| etl_group_mean | 2.623 | 2.878 | 0.911 |
 
 ## Serial Parity vs System R (`ratio = mtl / system`)
 
 | workload | mtl_lapply_s | system_lapply_s | ratio |
 | --- | --- | --- | --- |
-| alloc_pressure | 0.101 | 0.103 | 0.981 |
-| cos_seq | 0.408 | 0.433 | 0.942 |
-| etl_group_mean | 0.979 | 0.902 | 1.085 |
+| alloc_pressure | 2.339 | 2.158 | 1.084 |
+| cos_seq | 3.072 | 3.094 | 0.993 |
+| etl_group_mean | 2.623 | 2.412 | 1.087 |
 
 ## `mtlapply` Scaling (from `bench/results/mtl_latest.rds`)
 
 | workload | threads | lapply_s | mtlapply_s | speedup | efficiency |
 | --- | --- | --- | --- | --- | --- |
-| alloc_pressure | 1 | 0.101 | 0.095 | 1.063 | 1.063 |
-| alloc_pressure | 2 | 0.101 | 0.114 | 0.886 | 0.443 |
-| alloc_pressure | 4 | 0.101 | 0.065 | 1.554 | 0.388 |
-| alloc_pressure | 8 | 0.101 | 0.108 | 0.935 | 0.117 |
-| cos_seq | 1 | 0.408 | 0.413 | 0.988 | 0.988 |
-| cos_seq | 2 | 0.408 | 0.301 | 1.355 | 0.678 |
-| cos_seq | 4 | 0.408 | 0.177 | 2.305 | 0.576 |
-| cos_seq | 8 | 0.408 | 0.181 | 2.254 | 0.282 |
-| etl_group_mean | 1 | 0.979 | 0.968 | 1.011 | 1.011 |
-| etl_group_mean | 2 | 0.979 | 0.601 | 1.629 | 0.814 |
-| etl_group_mean | 4 | 0.979 | 0.302 | 3.242 | 0.810 |
-| etl_group_mean | 8 | 0.979 | 0.152 | 6.441 | 0.805 |
+| alloc_pressure | 1 | 2.339 | 2.398 | 0.975 | 0.975 |
+| alloc_pressure | 2 | 2.339 | 1.314 | 1.780 | 0.890 |
+| alloc_pressure | 4 | 2.339 | 0.741 | 3.157 | 0.789 |
+| alloc_pressure | 8 | 2.339 | 0.400 | 5.848 | 0.731 |
+| cos_seq | 1 | 3.072 | 3.092 | 0.994 | 0.994 |
+| cos_seq | 2 | 3.072 | 1.630 | 1.885 | 0.942 |
+| cos_seq | 4 | 3.072 | 0.898 | 3.421 | 0.855 |
+| cos_seq | 8 | 3.072 | 0.535 | 5.742 | 0.718 |
+| etl_group_mean | 1 | 2.623 | 2.572 | 1.020 | 1.020 |
+| etl_group_mean | 2 | 2.623 | 1.290 | 2.033 | 1.017 |
+| etl_group_mean | 4 | 2.623 | 0.659 | 3.980 | 0.995 |
+| etl_group_mean | 8 | 2.623 | 0.337 | 7.783 | 0.973 |
 
 ## Threadpool Matrix Benchmark
 
 | case | rows | cols | n | threads | reps | lapply_median_s | mtlapply_median_s | speedup | efficiency |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| matmul_1000_n20 | 1000 | 1000 | 20 | 8 | 3 | 5.277 | 0.804 | 6.563 | 0.820 |
-| matmul_100_n20000 | 100 | 100 | 20000 | 8 | 3 | 6.388 | 0.813 | 7.857 | 0.982 |
+| matmul_1000_n20 | 1000 | 1000 | 20 | 8 | 3 | 5.102 | 0.801 | 6.370 | 0.796 |
+| matmul_100_n20000 | 100 | 100 | 20000 | 8 | 3 | 6.120 | 0.807 | 7.584 | 0.948 |
 
 ## `background()` / `wait()` Burst Benchmark
 
 | mode | threads | elapsed_s | throughput_req_s | p50_s | p95_s | p99_s | speedup_vs_serial | p95_gain_vs_serial |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| background | 2 | 0.273 | 351.648 | 0.147 | 0.270 | 0.272 | 2.267 | 2.175 |
-| background | 4 | 0.274 | 350.365 | 0.148 | 0.273 | 0.274 | 2.259 | 2.153 |
-| background | 8 | 0.273 | 351.648 | 0.148 | 0.271 | 0.272 | 2.267 | 2.169 |
-| serial | 1 | 0.619 | 155.089 | 0.313 | 0.588 | 0.612 | 1.000 | 1.000 |
+| background | 2 | 0.088 | 1090.909 | 0.047 | 0.086 | 0.087 | 6.273 | 6.099 |
+| background | 4 | 0.087 | 1103.448 | 0.048 | 0.087 | 0.087 | 6.345 | 6.029 |
+| background | 8 | 0.086 | 1116.279 | 0.046 | 0.086 | 0.086 | 6.419 | 6.099 |
+| serial | 1 | 0.552 | 173.913 | 0.279 | 0.524 | 0.546 | 1.000 | 1.000 |
 
 ## Shiny Full Loadtest Artifact
 
