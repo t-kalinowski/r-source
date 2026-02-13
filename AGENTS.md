@@ -29,6 +29,9 @@ Key performance requirements from the outset:
   - Run minimal checks / incremental builds frequently.
   - Run the full test suite occasionally at checkpoints.
 - Starting state should be clean on `main`/`trunk`; if there are unstaged changes they can be discarded.
+- Keep `git status` meaningful:
+  - Ignore generated/local artifacts that create noisy untracked diffs.
+  - Before handoff, ensure remaining diffs are intentional source/test/doc changes.
 - Avoid “try-then-fallback” patterns: prefer one happy path; fail fast if assumptions don’t hold.
 - Avoid excessive argument checking in duck-typed R/Python:
   - A small handful of `stopifnot()` checks is OK, but no exhaustive fallback trees.
@@ -47,6 +50,9 @@ Work towards making this build of R usable for package code that calls `.Call()`
 - Rebuild incrementally with `make -j`.
 - Canonical configure entrypoint:
   - `tools/mtl-configure.sh build-mtl-shlib -- --enable-R-shlib --without-x --disable-java --without-recommended-packages ...`
+- For full upstream-style validation before toolchain experiments (e.g. gcc vs clang), use a dedicated build dir with recommended packages enabled and run:
+  - `make -C <build-dir> check-all`
+  - If `configure` reports missing recommended tarballs, fetch with `tools/fetch-recommended`.
 - On macOS, relinking often requires re-signing the `R` executable:
   - `codesign --force --sign - build-*/bin/exec/R`
 

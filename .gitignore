@@ -29,3 +29,7 @@ third_party/
 tools/shiny-threadpool-bench/
 reference-r-devel-clean/
 reference-r-devel-src/
+
+# locally fetched recommended-package tarballs (for check-all builds)
+src/library/Recommended/*.tgz
+src/library/Recommended/*.tar.gz
