@@ -57,9 +57,9 @@ run_serial <- function(ids) {
 }
 
 run_mtlapply <- function(ids, n_threads) {
-  old <- getOption("mtlapply.threads")
-  on.exit(options(mtlapply.threads = old), add = TRUE)
-  options(mtlapply.threads = as.integer(n_threads))
+  old <- getOption("threads")
+  on.exit(options(threads = old), add = TRUE)
+  options(threads = as.integer(n_threads))
 
   t0 <- proc.time()[["elapsed"]]
   out <- unlist(mtlapply(ids, request_work), use.names = FALSE)
@@ -68,9 +68,9 @@ run_mtlapply <- function(ids, n_threads) {
 }
 
 run_background <- function(ids, n_threads) {
-  old <- getOption("mtlapply.threads")
-  on.exit(options(mtlapply.threads = old), add = TRUE)
-  options(mtlapply.threads = as.integer(n_threads))
+  old <- getOption("threads")
+  on.exit(options(threads = old), add = TRUE)
+  options(threads = as.integer(n_threads))
 
   n <- length(ids)
   done <- numeric(n)

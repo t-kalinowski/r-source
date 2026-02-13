@@ -68,9 +68,9 @@ time_lapply <- function(ids, fun, n_iter) {
 }
 
 time_mtlapply <- function(ids, fun, n_threads, n_iter) {
-  old <- getOption("mtlapply.threads")
-  on.exit(options(mtlapply.threads = old), add = TRUE)
-  options(mtlapply.threads = n_threads)
+  old <- getOption("threads")
+  on.exit(options(threads = old), add = TRUE)
+  options(threads = n_threads)
   times <- numeric(n_iter)
   for (k in seq_len(n_iter)) {
     times[[k]] <- unname(system.time(invisible(mtlapply(ids, fun)))[["elapsed"]])
@@ -86,10 +86,10 @@ for (nm in names(scenarios)) {
 
   ## Warm up both paths to reduce first-run noise.
   invisible(lapply(ids[1:8], fun))
-  old <- getOption("mtlapply.threads")
-  options(mtlapply.threads = max(threads))
+  old <- getOption("threads")
+  options(threads = max(threads))
   invisible(mtlapply(ids[1:8], fun))
-  options(mtlapply.threads = old)
+  options(threads = old)
 
   t_serial <- time_lapply(ids, fun, iters)
   rows[[length(rows) + 1L]] <- data.frame(

@@ -2,6 +2,8 @@
 build-mtl/
 build-mtl-clang/
 build-mtl-shlib/
+build-mtl-flang/
+build-mtl-shlib-checkall/
 build-debug/
 build-ubsan/
 bench/results/
@@ -25,3 +27,5 @@ demo-mtl.html
 pkgs/
 third_party/
 tools/shiny-threadpool-bench/
+reference-r-devel-clean/
+reference-r-devel-src/

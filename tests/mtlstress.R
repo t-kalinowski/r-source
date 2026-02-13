@@ -37,7 +37,7 @@ for (k in seq_len(iters)) {
     ntasks <- sample.int(max_tasks, 1L)
     x <- seq_len(ntasks)
     f <- function(i) worker_fun(i, k)
-    options(mtlapply.threads = threads)
+    options(threads = threads)
 
     a <- lapply(x, f)
     b <- mtlapply(x, f)

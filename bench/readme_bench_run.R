@@ -76,9 +76,9 @@ has_mtlapply <- exists("mtlapply")
 
 with_mtl_threads <- function(n, expr)
 {
-  old <- getOption("mtlapply.threads")
-  on.exit(options(mtlapply.threads = old), add = TRUE)
-  options(mtlapply.threads = as.integer(n))
+  old <- getOption("threads")
+  on.exit(options(threads = old), add = TRUE)
+  options(threads = as.integer(n))
   force(expr)
 }
 

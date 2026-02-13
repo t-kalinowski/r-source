@@ -2370,11 +2370,11 @@ attribute_hidden SEXP do_mtbackground(SEXP call, SEXP op, SEXP args, SEXP rho)
 	error(_("'%s' must be an environment"), "env");
 
     int nthreads = 2;
-    SEXP opt = GetOption1(install("mtlapply.threads"));
+    SEXP opt = GetOption1(install("threads"));
     if (opt != R_NilValue && XLENGTH(opt) > 0)
 	nthreads = asInteger(opt);
     if (nthreads == NA_INTEGER || nthreads < 1)
-	error("invalid value in options(\"mtlapply.threads\"): must be >= 1");
+	error("invalid value in options(\"threads\"): must be >= 1");
 
     mtl_pool_init_if_needed();
     mtl_pool_ensure_threads(nthreads);
@@ -2439,11 +2439,11 @@ attribute_hidden SEXP do_mtthen(SEXP call, SEXP op, SEXP args, SEXP rho)
     mtl_future_t *parent = mtl_future_from_sexp(parent_fut);
 
     int nthreads = 2;
-    SEXP opt = GetOption1(install("mtlapply.threads"));
+    SEXP opt = GetOption1(install("threads"));
     if (opt != R_NilValue && XLENGTH(opt) > 0)
 	nthreads = asInteger(opt);
     if (nthreads == NA_INTEGER || nthreads < 1)
-	error("invalid value in options(\"mtlapply.threads\"): must be >= 1");
+	error("invalid value in options(\"threads\"): must be >= 1");
 
     mtl_pool_init_if_needed();
     mtl_pool_ensure_threads(nthreads);

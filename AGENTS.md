@@ -4,7 +4,7 @@
 Add support for running R code in parallel on multiple OS threads inside one R process, conceptually as subinterpreters (per-thread interpreter state), exposed initially as a very simple interface:
 
 - `mtlapply(X, FUN, ...)` modelled after `lapply()` / `mclapply()`
-- thread-pool size is controlled via `options(mtlapply.threads = n)`
+- thread-pool size is controlled via `options(threads = n)`
 - Evaluate `FUN` across multiple threads/subinterpreters
 - Transfer results back to the main thread (goal: move/transfer, not serialize/copy)
 

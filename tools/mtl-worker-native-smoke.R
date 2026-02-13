@@ -28,9 +28,9 @@ if (!exists("mtlapply")) {
   quit(status = 0L)
 }
 
-old_threads <- getOption("mtlapply.threads")
-on.exit(options(mtlapply.threads = old_threads), add = TRUE)
-options(mtlapply.threads = threads)
+old_threads <- getOption("threads")
+on.exit(options(threads = old_threads), add = TRUE)
+options(threads = threads)
 
 f <- function(i) {
   payload <- paste0("payload-", i)

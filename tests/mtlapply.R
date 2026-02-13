@@ -7,17 +7,17 @@ stopifnot(exists("mtlapply"))
 
 mtlapply_with_threads <- function(n, X, FUN, ...)
 {
-  old <- getOption("mtlapply.threads")
-  on.exit(options(mtlapply.threads = old), add = TRUE)
-  options(mtlapply.threads = as.integer(n))
+  old <- getOption("threads")
+  on.exit(options(threads = old), add = TRUE)
+  options(threads = as.integer(n))
   mtlapply(X, FUN, ...)
 }
 
 with_mtl_threads <- function(n, expr)
 {
-  old <- getOption("mtlapply.threads")
-  on.exit(options(mtlapply.threads = old), add = TRUE)
-  options(mtlapply.threads = as.integer(n))
+  old <- getOption("threads")
+  on.exit(options(threads = old), add = TRUE)
+  options(threads = as.integer(n))
   force(expr)
 }
 
@@ -29,7 +29,7 @@ assert_uncaught_traceback <- function(expr, msg_pattern, call_pattern)
 
   lines <- c(
     "options(error = quote({traceback(2); q('no', status = 86L)}))",
-    "options(mtlapply.threads = 2L)",
+    "options(threads = 2L)",
     paste(deparse(exprq), collapse = "\n")
   )
   writeLines(lines, tf, useBytes = TRUE)
@@ -165,12 +165,6 @@ stopifnot(identical(as.integer(unlist(digits_vals, use.names = FALSE)), c(8L, 9L
 stopifnot(identical(getOption("digits"), digits0))
 
 # Worker threads must not change thread-count options.
-err_opt_mtl <- try(mtlapply_with_threads(2L, 1:3, function(i) {
-  options(mtlapply.threads = 8L)
-  i
-}), silent = TRUE)
-stopifnot(inherits(err_opt_mtl, "try-error"))
-
 err_opt_threads <- try(mtlapply_with_threads(2L, 1:3, function(i) {
   options(threads = 8L)
   i
@@ -249,7 +243,7 @@ assert_worker_stream_counts <- function(expr_lines, expected_letters, expected_e
   tf <- tempfile("mtl-stream-", fileext = ".R")
   on.exit(unlink(tf), add = TRUE)
   writeLines(c(
-    "options(mtlapply.threads = 8L)",
+    "options(threads = 8L)",
     expr_lines
   ), tf, useBytes = TRUE)
 

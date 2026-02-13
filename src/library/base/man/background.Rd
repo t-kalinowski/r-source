@@ -38,7 +38,7 @@ were pending or running at cancellation time.
 }
 \details{
 This interface is experimental. The worker pool is shared with
-\code{mtlapply()} and controlled by \code{options(mtlapply.threads = n)}.
+\code{mtlapply()} and controlled by \code{options(threads = n)}.
 For large \code{mtlapply()} inputs, chunking is controlled by
 \code{options(mtlapply.chunk_size = n)}.
 
@@ -48,9 +48,9 @@ not supported). This avoids races with subsequent main-thread mutation of the
 original frame while workers are running, while avoiding full-frame copies.
 }
 \examples{
-old <- getOption("mtlapply.threads")
-options(mtlapply.threads = 2L)
-on.exit(options(mtlapply.threads = old))
+old <- getOption("threads")
+options(threads = 2L)
+on.exit(options(threads = old))
 
 f1 <- background({ sum(seq_len(1000L)) })
 f2 <- background({ sum(seq_len(2000L)) })

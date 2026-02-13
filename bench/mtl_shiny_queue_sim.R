@@ -55,9 +55,9 @@ drain_batch <- function(queue, n_take, worker, mode, th) {
   if (mode == "serial") {
     invisible(lapply(seeds, worker))
   } else {
-    old <- getOption("mtlapply.threads")
-    on.exit(options(mtlapply.threads = old), add = TRUE)
-    options(mtlapply.threads = th)
+    old <- getOption("threads")
+    on.exit(options(threads = old), add = TRUE)
+    options(threads = th)
     invisible(mtlapply(seeds, worker))
   }
   done <- proc.time()[["elapsed"]]

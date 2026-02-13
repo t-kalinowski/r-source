@@ -35,9 +35,9 @@ for (nm in thread_cap_vars) {
 run_case <- function(name, rows, cols, n, threads, reps) {
   A <- matrix(runif(rows * cols), rows, cols)
   B <- matrix(runif(rows * cols), rows, cols)
-  old_threads <- getOption("mtlapply.threads")
-  on.exit(options(mtlapply.threads = old_threads), add = TRUE)
-  options(mtlapply.threads = as.integer(threads))
+  old_threads <- getOption("threads")
+  on.exit(options(threads = old_threads), add = TRUE)
+  options(threads = as.integer(threads))
 
   l_times <- numeric(reps)
   m_times <- numeric(reps)

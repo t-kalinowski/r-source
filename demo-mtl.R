@@ -6,7 +6,7 @@ suppressPackageStartupMessages({
 
 stopifnot(exists("mtlapply"), exists("background"), exists("wait"))
 
-old <- options(mtlapply.threads = 8L)
+old <- options(threads = 8L)
 on.exit(options(old), add = TRUE)
 
 cat("\n=== Demo 1: mtlapply scaling (matrix multiply workload) ===\n")
@@ -18,10 +18,10 @@ task <- function(i) A %*% B + i
 
 res_apply <- bench::mark(
   lapply = lapply(X, task),
-  mtlapply_1 = { options(mtlapply.threads = 1L); mtlapply(X, task) },
-  mtlapply_2 = { options(mtlapply.threads = 2L); mtlapply(X, task) },
-  mtlapply_4 = { options(mtlapply.threads = 4L); mtlapply(X, task) },
-  mtlapply_8 = { options(mtlapply.threads = 8L); mtlapply(X, task) },
+  mtlapply_1 = { options(threads = 1L); mtlapply(X, task) },
+  mtlapply_2 = { options(threads = 2L); mtlapply(X, task) },
+  mtlapply_4 = { options(threads = 4L); mtlapply(X, task) },
+  mtlapply_8 = { options(threads = 8L); mtlapply(X, task) },
   iterations = 5,
   check = FALSE
 )
@@ -44,7 +44,7 @@ jobs <- sample(80000:180000, 16, replace = TRUE)
 
 run_serial <- function() lapply(jobs, work)
 run_parallel <- function() {
-  options(mtlapply.threads = 8L)
+  options(threads = 8L)
   futs <- lapply(jobs, function(n) background(work(n)))
   pending <- Map(function(id, fut) list(id = id, fut = fut), seq_along(futs), futs)
   out <- vector("list", length(futs))

@@ -2,9 +2,9 @@
 
 stopifnot(exists("background"), exists("then"), exists("wait"), exists("cancel"))
 
-old_threads <- getOption("mtlapply.threads")
-on.exit(options(mtlapply.threads = old_threads), add = TRUE)
-options(mtlapply.threads = 4L)
+old_threads <- getOption("threads")
+on.exit(options(threads = old_threads), add = TRUE)
+options(threads = 4L)
 
 ## Busy-loop helper to exercise worker CPU (not sleep/wait).
 burn_cpu <- function(iterations = 1e6L) {

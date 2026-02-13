@@ -16,13 +16,13 @@ Current user-facing APIs:
 Thread-pool size is controlled globally with:
 
 ``` r
-options(mtlapply.threads = 8L)
+options(threads = 8L)
 ```
 
 ## Quick Start
 
 ``` r
-options(mtlapply.threads = 8L)
+options(threads = 8L)
 
 # 1) mtlapply
 A <- matrix(runif(1000 * 1000), 1000, 1000)
@@ -175,8 +175,7 @@ git diff -- bench/LATEST.md README.md bench/results/
 state.
 
 - Writes to `globalenv()` from worker threads are rejected.
-- Worker writes to `options(mtlapply.threads = ...)` or
-  `options(threads = ...)` are rejected.
+- Worker writes to `options(threads = ...)` are rejected.
 - Worker `options()` changes are job-local and do not propagate to the
   main thread.
 - Some operations with shared process-wide state may serialize under an

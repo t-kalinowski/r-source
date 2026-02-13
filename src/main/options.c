@@ -175,7 +175,7 @@ static Rboolean worker_disallows_option_set(SEXP tag)
     if (TYPEOF(tag) != SYMSXP)
 	return FALSE;
     const char *nm = CHAR(PRINTNAME(tag));
-    return (strcmp(nm, "threads") == 0 || strcmp(nm, "mtlapply.threads") == 0);
+    return strcmp(nm, "threads") == 0;
 }
 
 static SEXP FindTaggedItem(SEXP lst, SEXP tag)

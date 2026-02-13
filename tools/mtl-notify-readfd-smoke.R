@@ -22,7 +22,7 @@ if (!exists("background", mode = "function") ||
 notify_stats <- function(reset = FALSE) .Internal(mtnotifystats(as.logical(reset)))
 has_notify_stats <- !inherits(try(notify_stats(FALSE), silent = TRUE), "try-error")
 
-options(mtlapply.threads = max(2L, as.integer(getOption("mtlapply.threads", 2L))))
+options(threads = max(2L, as.integer(getOption("threads", 2L))))
 if (has_notify_stats) invisible(notify_stats(TRUE))
 
 run_once <- function(i, deadline) {

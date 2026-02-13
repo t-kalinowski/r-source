@@ -100,9 +100,9 @@ do_work <- function(i) {
 ## Warm up compile/loading paths once on the main thread.
 invisible(do_work(1L))
 
-old_threads <- getOption("mtlapply.threads")
-on.exit(options(mtlapply.threads = old_threads), add = TRUE)
-options(mtlapply.threads = as.integer(threads))
+old_threads <- getOption("threads")
+on.exit(options(threads = old_threads), add = TRUE)
+options(threads = as.integer(threads))
 
 serial <- lapply(seq_len(tasks), do_work)
 threaded <- mtlapply(seq_len(tasks), do_work)

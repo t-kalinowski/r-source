@@ -29,7 +29,7 @@ mtlapply(X, FUN, \dots)
   (as in \code{\link[parallel]{mclapply}} on Unix-alikes), and the worker
   threads evaluate \code{FUN} concurrently.
 
-  The worker-pool size is controlled by \code{options(mtlapply.threads = n)}
+  The worker-pool size is controlled by \code{options(threads = n)}
   and defaults to \code{2L}.
 
   Large inputs are evaluated in chunks. The chunk size is controlled by
@@ -47,8 +47,8 @@ mtlapply(X, FUN, \dots)
 
   Worker \code{options()} writes are job-local: each worker starts from a
   snapshot of main-thread options, and changes do not propagate back to
-  the main thread. Setting \code{options(threads = ...)} or
-  \code{options(mtlapply.threads = ...)} from a worker thread is not
+  the main thread. Setting \code{options(threads = ...)} from a worker
+  thread is not
   supported and errors.
 
   Some operations that rely on shared process-wide state may run under a
@@ -72,8 +72,8 @@ mtlapply(X, FUN, \dots)
 }
 \examples{
 x <- as.list(1:5)
-old <- getOption("mtlapply.threads")
-options(mtlapply.threads = 2L)
-on.exit(options(mtlapply.threads = old))
+old <- getOption("threads")
+options(threads = 2L)
+on.exit(options(threads = old))
 mtlapply(x, function(z) z * 2)
 }

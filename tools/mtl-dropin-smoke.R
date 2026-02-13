@@ -34,9 +34,9 @@ stopifnot(identical(as.integer(out$s), c(3L, 7L)))
 cat("dplyr ok\n")
 
 if (exists("mtlapply", mode = "function")) {
-  old_threads <- getOption("mtlapply.threads")
-  on.exit(options(mtlapply.threads = old_threads), add = TRUE)
-  options(mtlapply.threads = threads)
+  old_threads <- getOption("threads")
+  on.exit(options(threads = old_threads), add = TRUE)
+  options(threads = threads)
   got <- mtlapply(1:16, function(i) {
     i * 9L
   })
