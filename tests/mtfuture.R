@@ -66,6 +66,14 @@ got_mul <- wait(f_mul)
 stopifnot(isTRUE(attr(got_mul, "ok")))
 stopifnot(identical(got_mul$value, 45L))
 
+## then() should also work when attached after parent is already resolved.
+f_done <- background(2L)
+stopifnot(identical(wait(f_done)$value, 2L))
+f_late <- then(f_done, function(x) x + 9L)
+got_late <- wait(f_late)
+stopifnot(isTRUE(attr(got_late, "ok")))
+stopifnot(identical(got_late$value, 11L))
+
 ## then() should propagate parent errors/cancellation without poisoning workers.
 f_parent_err <- background(stop("boom in parent"))
 f_child_err <- then(f_parent_err, function(x) x + 1L)
