@@ -82,7 +82,14 @@ run_background <- function(ids, n_threads) {
 
   while (length(active)) {
     got <- wait(active)
-    idx <- attr(got, "index")
+    idx_attr <- attr(got, "index")
+    if (!length(idx_attr)) {
+      stop("background wait returned no index", call. = FALSE)
+    }
+    idx <- as.integer(idx_attr[[1L]])
+    if (!is.finite(idx) || idx < 1L || idx > length(active_ids)) {
+      stop("background wait returned invalid index", call. = FALSE)
+    }
     req_id <- active_ids[[idx]]
     if (!isTRUE(attr(got, "ok"))) {
       stop("background request failed", call. = FALSE)
