@@ -134,4 +134,36 @@ got_ok2 <- wait(f_ok2)
 stopifnot(isTRUE(attr(got_ok2, "ok")))
 stopifnot(identical(got_ok2$value, sum(seq_len(100L))))
 
+## background() should capture caller-frame values at submission time.
+x_bg <- 1L
+f_bg_cap <- background(x_bg)
+x_bg <- 99L
+got_bg_cap <- wait(f_bg_cap)
+stopifnot(isTRUE(attr(got_bg_cap, "ok")))
+stopifnot(identical(got_bg_cap$value, 1L))
+
+## then() should capture continuation closure state at submission time.
+x_then <- 2L
+f_then_cap <- then(background(1L), function(v) v + x_then)
+x_then <- 100L
+got_then_cap <- wait(f_then_cap)
+stopifnot(isTRUE(attr(got_then_cap, "ok")))
+stopifnot(identical(got_then_cap$value, 3L))
+
+## for-loop submissions should remain stable (no shared-frame races).
+for (rep in 1:20) {
+    futs_loop <- vector("list", 200L)
+    for (i in seq_len(200L))
+        futs_loop[[i]] <- background(i)
+    pending_loop <- futs_loop
+    vals_loop <- integer(0)
+    while (length(pending_loop)) {
+        got <- wait(pending_loop)
+        stopifnot(isTRUE(attr(got, "ok")))
+        vals_loop <- c(vals_loop, as.integer(got$value))
+        pending_loop <- pending_loop[-attr(got, "index")]
+    }
+    stopifnot(identical(sort(vals_loop), seq_len(200L)))
+}
+
 cat("mtfuture ok\n")

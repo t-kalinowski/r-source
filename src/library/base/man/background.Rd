@@ -41,6 +41,11 @@ This interface is experimental. The worker pool is shared with
 \code{mtlapply()} and controlled by \code{options(mtlapply.threads = n)}.
 For large \code{mtlapply()} inputs, chunking is controlled by
 \code{options(mtlapply.chunk_size = n)}.
+
+For \code{background()}, symbols referenced by \code{expr} are captured from
+\code{env} at submission time into a snapshot environment (active bindings are
+not supported). This avoids races with subsequent main-thread mutation of the
+original frame while workers are running, while avoiding full-frame copies.
 }
 \examples{
 old <- getOption("mtlapply.threads")
