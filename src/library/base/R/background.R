@@ -28,6 +28,16 @@ background <- function(expr, env = parent.frame())
     )
 }
 
+.mt_notify_fd <- function()
+{
+    as.integer(.Internal(mtnotifyfd()))
+}
+
+.mt_notify_drain <- function()
+{
+    invisible(.Internal(mtnotifydrain()))
+}
+
 wait <- function(futures, timeout = Inf)
 {
     timeout <- as.double(timeout)[1L]

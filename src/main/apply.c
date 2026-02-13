@@ -33,6 +33,8 @@
 # include <limits.h>
 # include <errno.h>
 # include <time.h>
+# include <unistd.h>
+# include <fcntl.h>
 #endif
 
 static SEXP checkArgIsSymbol(SEXP x) {
@@ -150,6 +152,8 @@ static const char *mtl_rpc_reason_name_lookup(int reason)
 	    mtl_future_t *future_q_tail;
 	    mtl_future_t *future_all;
 	    int future_running;
+	    int notify_fd_read;
+	    int notify_fd_write;
 	} mtl_pool_t;
 
 static int mtl_trace_cached = -1;
@@ -164,6 +168,16 @@ static atomic_int mtl_parallel_active = 0;
 static atomic_int mtl_parallel_max = 0;
 static atomic_ulong mtl_rpc_calls[R_MTL_RPC_REASON_COUNT];
 static atomic_ulong mtl_rpc_errors[R_MTL_RPC_REASON_COUNT];
+static atomic_ulong mtl_notify_signal_calls = 0;
+static atomic_ulong mtl_notify_signal_write_ok = 0;
+static atomic_ulong mtl_notify_signal_write_eagain = 0;
+static atomic_ulong mtl_notify_signal_write_err = 0;
+static atomic_ulong mtl_notify_drain_calls = 0;
+static atomic_ulong mtl_notify_drain_bytes = 0;
+static atomic_ulong mtl_notify_drain_eagain = 0;
+static atomic_ulong mtl_notify_drain_err = 0;
+static atomic_ulong mtl_notify_pipe_init_ok = 0;
+static atomic_ulong mtl_notify_pipe_init_fail = 0;
 
 static int mtl_rpc_sanitize_reason(int reason)
 {
@@ -333,14 +347,120 @@ static Rboolean mtl_is_main_thread(void)
     return pthread_equal(mtl_main_thread, pthread_self());
 }
 
+static void mtl_notify_close_locked(void)
+{
+    if (mtl_pool.notify_fd_read >= 0) {
+	close(mtl_pool.notify_fd_read);
+	mtl_pool.notify_fd_read = -1;
+    }
+    if (mtl_pool.notify_fd_write >= 0) {
+	close(mtl_pool.notify_fd_write);
+	mtl_pool.notify_fd_write = -1;
+    }
+}
+
+static int mtl_set_fd_nonblocking_cloexec(int fd)
+{
+    int fl = fcntl(fd, F_GETFL, 0);
+    if (fl < 0)
+	return -1;
+    if (fcntl(fd, F_SETFL, fl | O_NONBLOCK) < 0)
+	return -1;
+
+    int fdfl = fcntl(fd, F_GETFD, 0);
+    if (fdfl < 0)
+	return -1;
+    if (fcntl(fd, F_SETFD, fdfl | FD_CLOEXEC) < 0)
+	return -1;
+    return 0;
+}
+
+static void mtl_notify_init_locked(void)
+{
+    if (mtl_pool.notify_fd_read >= 0 && mtl_pool.notify_fd_write >= 0)
+	return;
+
+    int pfd[2] = { -1, -1 };
+    if (pipe(pfd) != 0) {
+	atomic_fetch_add_explicit(&mtl_notify_pipe_init_fail, 1, memory_order_relaxed);
+	return;
+    }
+
+    if (mtl_set_fd_nonblocking_cloexec(pfd[0]) != 0 ||
+	mtl_set_fd_nonblocking_cloexec(pfd[1]) != 0) {
+	close(pfd[0]);
+	close(pfd[1]);
+	atomic_fetch_add_explicit(&mtl_notify_pipe_init_fail, 1, memory_order_relaxed);
+	return;
+    }
+
+    mtl_pool.notify_fd_read = pfd[0];
+    mtl_pool.notify_fd_write = pfd[1];
+    atomic_fetch_add_explicit(&mtl_notify_pipe_init_ok, 1, memory_order_relaxed);
+}
+
+static void mtl_notify_signal_locked(void)
+{
+    atomic_fetch_add_explicit(&mtl_notify_signal_calls, 1, memory_order_relaxed);
+    if (mtl_pool.notify_fd_write < 0)
+	return;
+
+    unsigned char b = 1;
+    ssize_t n = write(mtl_pool.notify_fd_write, &b, 1);
+    if (n == 1) {
+	atomic_fetch_add_explicit(&mtl_notify_signal_write_ok, 1, memory_order_relaxed);
+	return;
+    }
+    if (n < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) {
+	atomic_fetch_add_explicit(&mtl_notify_signal_write_eagain, 1, memory_order_relaxed);
+	return;
+    }
+    atomic_fetch_add_explicit(&mtl_notify_signal_write_err, 1, memory_order_relaxed);
+}
+
+static int mtl_notify_drain_fd(int fd)
+{
+    atomic_fetch_add_explicit(&mtl_notify_drain_calls, 1, memory_order_relaxed);
+    if (fd < 0)
+	return 0;
+
+    int total = 0;
+    unsigned char buf[512];
+    for (;;) {
+	ssize_t n = read(fd, buf, sizeof(buf));
+	if (n > 0) {
+	    if (n > INT_MAX - total)
+		return INT_MAX;
+	    total += (int) n;
+	    continue;
+	}
+	if (n == 0)
+	    break;
+	if (errno == EINTR)
+	    continue;
+	if (errno == EAGAIN || errno == EWOULDBLOCK) {
+	    atomic_fetch_add_explicit(&mtl_notify_drain_eagain, 1, memory_order_relaxed);
+	    break;
+	}
+	atomic_fetch_add_explicit(&mtl_notify_drain_err, 1, memory_order_relaxed);
+	break;
+    }
+    if (total > 0)
+	atomic_fetch_add_explicit(&mtl_notify_drain_bytes, (unsigned long) total, memory_order_relaxed);
+    return total;
+}
+
 		static void mtl_pool_init_if_needed(void)
 		{
 		    if (mtl_pool.inited)
 			return;
 
 		    memset(&mtl_pool, 0, sizeof(mtl_pool));
+		    mtl_pool.notify_fd_read = -1;
+		    mtl_pool.notify_fd_write = -1;
 		    pthread_mutex_init(&mtl_pool.mu, NULL);
 		    pthread_cond_init(&mtl_pool.cv, NULL);
+		    mtl_notify_init_locked();
 		    mtl_dotOptionsSym = install(".Options");
 		    mtl_futurePtrSym = install("ptr");
 		    mtl_useFancyQuotesSym = install("useFancyQuotes");
@@ -655,6 +775,7 @@ static void mtl_future_finalizer(SEXP ext)
 	mtl_future_queue_remove_locked(f);
 	f->status = MTL_FUTURE_CANCELLED;
 	f->cancel_requested = 1;
+	mtl_notify_signal_locked();
     }
     mtl_set_threading_active_locked();
     pthread_cond_broadcast(&mtl_pool.cv);
@@ -726,14 +847,15 @@ static int mtl_timeout_to_deadline(double timeout, struct timespec *out)
 		free(r);
 		error("R_mtl_invoke_on_main: no active threaded job");
 	    }
-		    if (mtl_pool.rpc_tail)
-			mtl_pool.rpc_tail->next = r;
-		    else
-			mtl_pool.rpc_head = r;
-		    mtl_pool.rpc_tail = r;
-		    atomic_fetch_add_explicit(&mtl_rpc_calls[reason], 1, memory_order_relaxed);
-		    pthread_cond_broadcast(&mtl_pool.cv);
-		    pthread_mutex_unlock(&mtl_pool.mu);
+	    if (mtl_pool.rpc_tail)
+		mtl_pool.rpc_tail->next = r;
+	    else
+		mtl_pool.rpc_head = r;
+	    mtl_pool.rpc_tail = r;
+	    atomic_fetch_add_explicit(&mtl_rpc_calls[reason], 1, memory_order_relaxed);
+	    mtl_notify_signal_locked();
+	    pthread_cond_broadcast(&mtl_pool.cv);
+	    pthread_mutex_unlock(&mtl_pool.mu);
 
 	    pthread_mutex_lock(&r->mu);
 	    while (!r->done)
@@ -1101,6 +1223,7 @@ static void mtl_future_adopt_main_exec(void *vp)
 			future->status = MTL_FUTURE_FULFILLED;
 			future->value = out;
 		    }
+		    mtl_notify_signal_locked();
 		    if (p->future_running > 0)
 			p->future_running--;
 		    mtl_set_threading_active_locked();
@@ -1169,6 +1292,10 @@ attribute_hidden void R_mtlpool_shutdown(void)
 
     for (int i = 0; i < mtl_pool.nthreads; i++)
 	pthread_join(mtl_pool.threads[i], NULL);
+
+    pthread_mutex_lock(&mtl_pool.mu);
+    mtl_notify_close_locked();
+    pthread_mutex_unlock(&mtl_pool.mu);
 
     for (int i = 0; i < mtl_pool.nthreads; i++)
 	free(mtl_pool.workers[i]);
@@ -1788,6 +1915,59 @@ attribute_hidden SEXP do_mtlrpcstats(SEXP call, SEXP op, SEXP args, SEXP rho)
     return out;
 }
 
+/* .Internal(mtnotifystats(reset))
+ *
+ * Returns named integer counters for notify fd signaling/draining. */
+attribute_hidden SEXP do_mtnotifystats(SEXP call, SEXP op, SEXP args, SEXP rho)
+{
+    checkArity(op, args);
+    int reset = asLogical(CAR(args));
+    if (reset == NA_LOGICAL)
+	error(_("invalid '%s' value"), "reset");
+
+    SEXP out, nms;
+    PROTECT(out = allocVector(INTSXP, 10));
+    PROTECT(nms = allocVector(STRSXP, 10));
+
+    unsigned long vals[10];
+#ifdef HAVE_PTHREAD
+    vals[0] = mtl_rpc_counter_read(&mtl_notify_signal_calls, reset);
+    vals[1] = mtl_rpc_counter_read(&mtl_notify_signal_write_ok, reset);
+    vals[2] = mtl_rpc_counter_read(&mtl_notify_signal_write_eagain, reset);
+    vals[3] = mtl_rpc_counter_read(&mtl_notify_signal_write_err, reset);
+    vals[4] = mtl_rpc_counter_read(&mtl_notify_drain_calls, reset);
+    vals[5] = mtl_rpc_counter_read(&mtl_notify_drain_bytes, reset);
+    vals[6] = mtl_rpc_counter_read(&mtl_notify_drain_eagain, reset);
+    vals[7] = mtl_rpc_counter_read(&mtl_notify_drain_err, reset);
+    vals[8] = mtl_rpc_counter_read(&mtl_notify_pipe_init_ok, reset);
+    vals[9] = mtl_rpc_counter_read(&mtl_notify_pipe_init_fail, reset);
+#else
+    for (int i = 0; i < 10; i++)
+	vals[i] = 0;
+#endif
+
+    const char *names[10] = {
+	"signal.calls",
+	"signal.write_ok",
+	"signal.write_eagain",
+	"signal.write_err",
+	"drain.calls",
+	"drain.bytes",
+	"drain.eagain",
+	"drain.err",
+	"pipe.init_ok",
+	"pipe.init_fail"
+    };
+    for (int i = 0; i < 10; i++) {
+	if (vals[i] > INT_MAX) vals[i] = INT_MAX;
+	INTEGER(out)[i] = (int) vals[i];
+	SET_STRING_ELT(nms, i, mkChar(names[i]));
+    }
+    setAttrib(out, R_NamesSymbol, nms);
+    UNPROTECT(2);
+    return out;
+}
+
 /* .Internal(mtlpoolreset())
  *
  * Force a teardown of the worker pool so the next mtlapply() call starts
@@ -1991,6 +2171,59 @@ attribute_hidden SEXP do_mtwait(SEXP call, SEXP op, SEXP args, SEXP rho)
 #endif
 }
 
+/* .Internal(mtnotifyfd()) */
+attribute_hidden SEXP do_mtnotifyfd(SEXP call, SEXP op, SEXP args, SEXP rho)
+{
+    checkArity(op, args);
+#ifndef HAVE_PTHREAD
+    return ScalarInteger(-1);
+#else
+    mtl_pool_init_if_needed();
+    int fd = -1;
+    pthread_mutex_lock(&mtl_pool.mu);
+    if (mtl_pool.notify_fd_read < 0 || mtl_pool.notify_fd_write < 0)
+	mtl_notify_init_locked();
+    fd = mtl_pool.notify_fd_read;
+    pthread_mutex_unlock(&mtl_pool.mu);
+    return ScalarInteger(fd);
+#endif
+}
+
+/* .Internal(mtnotifydrain()) */
+attribute_hidden SEXP do_mtnotifydrain(SEXP call, SEXP op, SEXP args, SEXP rho)
+{
+    checkArity(op, args);
+#ifndef HAVE_PTHREAD
+    return ScalarInteger(0);
+#else
+    int fd = -1;
+    pthread_mutex_lock(&mtl_pool.mu);
+    if (mtl_pool.inited)
+	fd = mtl_pool.notify_fd_read;
+    pthread_mutex_unlock(&mtl_pool.mu);
+    return ScalarInteger(mtl_notify_drain_fd(fd));
+#endif
+}
+
+/* .Internal(mtnotifysignal(N)) -- testing/debug aid */
+attribute_hidden SEXP do_mtnotifysignal(SEXP call, SEXP op, SEXP args, SEXP rho)
+{
+    checkArity(op, args);
+#ifndef HAVE_PTHREAD
+    return ScalarInteger(0);
+#else
+    int n = asInteger(CAR(args));
+    if (n == NA_INTEGER || n < 0)
+	error(_("invalid '%s' value"), "n");
+    mtl_pool_init_if_needed();
+    pthread_mutex_lock(&mtl_pool.mu);
+    for (int i = 0; i < n; i++)
+	mtl_notify_signal_locked();
+    pthread_mutex_unlock(&mtl_pool.mu);
+    return ScalarInteger(n);
+#endif
+}
+
 /* .Internal(mtcancel(FUTURE)) */
 attribute_hidden SEXP do_mtcancel(SEXP call, SEXP op, SEXP args, SEXP rho)
 {
@@ -2006,6 +2239,7 @@ attribute_hidden SEXP do_mtcancel(SEXP call, SEXP op, SEXP args, SEXP rho)
 	mtl_future_queue_remove_locked(f);
 	f->status = MTL_FUTURE_CANCELLED;
 	f->cancel_requested = 1;
+	mtl_notify_signal_locked();
 	did = 1;
     } else if (f->status == MTL_FUTURE_RUNNING) {
 	f->cancel_requested = 1;

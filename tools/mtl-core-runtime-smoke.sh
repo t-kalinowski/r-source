@@ -4,6 +4,7 @@
 # - repeated default startup with stats/utils load
 # - mtlapply regression suite
 # - background()/wait()/cancel() regression suite
+# - notify read-fd wake regression suite
 #
 # Usage:
 #   tools/mtl-core-runtime-smoke.sh [build_dir] [startup_reps]
@@ -43,6 +44,7 @@ done
 
 "${r_bin}" --vanilla -q -f "${repo_root}/tests/mtlapply.R"
 "${r_bin}" --vanilla -q -f "${repo_root}/tests/mtfuture.R"
+"${r_bin}" --vanilla -q -f "${repo_root}/tools/mtl-notify-readfd-smoke.R" --args 10 0.3
 
 echo
 echo "core runtime smoke ok"
