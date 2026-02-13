@@ -1212,7 +1212,14 @@ static atomic_ulong mtl_envstat_mutcheck_nonenv = 0;
 static atomic_ulong mtl_envstat_mutcheck_shared_true = 0;
 static atomic_ulong mtl_envstat_searchpath_calls = 0;
 static atomic_ulong mtl_envstat_searchpath_true = 0;
-static atomic_ulong mtl_envstat_worker_access_true = 0;
+static atomic_ulong mtl_envstat_worker_access_calls = 0;
+static atomic_ulong mtl_envstat_worker_access_inactive = 0;
+static atomic_ulong mtl_envstat_worker_access_no_interp = 0;
+static atomic_ulong mtl_envstat_worker_access_nonworker = 0;
+static atomic_ulong mtl_envstat_worker_access_nonenv = 0;
+static atomic_ulong mtl_envstat_worker_access_emptyenv = 0;
+static atomic_ulong mtl_envstat_worker_access_private_heap = 0;
+static atomic_ulong mtl_envstat_worker_access_shared_true = 0;
 static int mtl_envstats_cached = -1;
 
 static R_INLINE int mtl_envstats_enabled(void)
@@ -1240,7 +1247,14 @@ attribute_hidden void R_mtl_envirstats_get(unsigned long *vals, int reset)
     vals[4] = mtl_envstat_read(&mtl_envstat_mutcheck_shared_true, reset);
     vals[5] = mtl_envstat_read(&mtl_envstat_searchpath_calls, reset);
     vals[6] = mtl_envstat_read(&mtl_envstat_searchpath_true, reset);
-    vals[7] = mtl_envstat_read(&mtl_envstat_worker_access_true, reset);
+    vals[7] = mtl_envstat_read(&mtl_envstat_worker_access_calls, reset);
+    vals[8] = mtl_envstat_read(&mtl_envstat_worker_access_inactive, reset);
+    vals[9] = mtl_envstat_read(&mtl_envstat_worker_access_no_interp, reset);
+    vals[10] = mtl_envstat_read(&mtl_envstat_worker_access_nonworker, reset);
+    vals[11] = mtl_envstat_read(&mtl_envstat_worker_access_nonenv, reset);
+    vals[12] = mtl_envstat_read(&mtl_envstat_worker_access_emptyenv, reset);
+    vals[13] = mtl_envstat_read(&mtl_envstat_worker_access_private_heap, reset);
+    vals[14] = mtl_envstat_read(&mtl_envstat_worker_access_shared_true, reset);
 }
 
 #ifdef USE_GLOBAL_CACHE
@@ -1338,15 +1352,48 @@ static R_INLINE int mtl_worker_shared_env_write(SEXP rho)
 
 static R_INLINE int mtl_worker_shared_env_access(SEXP rho)
 {
-    if (R_Interpreter == NULL || !R_Interpreter->isMTLWorker)
+    int stats = __builtin_expect(mtl_envstats_enabled(), 0);
+    if (stats)
+	atomic_fetch_add_explicit(&mtl_envstat_worker_access_calls, 1, memory_order_relaxed);
+    if (!R_MTL_THREADING_ACTIVE) {
+	if (stats)
+	    atomic_fetch_add_explicit(&mtl_envstat_worker_access_inactive, 1,
+				      memory_order_relaxed);
 	return 0;
-    if (TYPEOF(rho) != ENVSXP)
+    }
+    if (R_Interpreter == NULL) {
+	if (stats)
+	    atomic_fetch_add_explicit(&mtl_envstat_worker_access_no_interp, 1,
+				      memory_order_relaxed);
 	return 0;
-    if (rho == R_EmptyEnv)
+    }
+    if (!R_Interpreter->isMTLWorker) {
+	if (stats)
+	    atomic_fetch_add_explicit(&mtl_envstat_worker_access_nonworker, 1,
+				      memory_order_relaxed);
 	return 0;
+    }
+    if (TYPEOF(rho) != ENVSXP) {
+	if (stats)
+	    atomic_fetch_add_explicit(&mtl_envstat_worker_access_nonenv, 1,
+				      memory_order_relaxed);
+	return 0;
+    }
+    if (rho == R_EmptyEnv) {
+	if (stats)
+	    atomic_fetch_add_explicit(&mtl_envstat_worker_access_emptyenv, 1,
+				      memory_order_relaxed);
+	return 0;
+    }
     int shared = !R_mtl_current_heap_owns(rho);
-    if (shared && __builtin_expect(mtl_envstats_enabled(), 0))
-	atomic_fetch_add_explicit(&mtl_envstat_worker_access_true, 1, memory_order_relaxed);
+    if (stats) {
+	if (shared)
+	    atomic_fetch_add_explicit(&mtl_envstat_worker_access_shared_true, 1,
+				      memory_order_relaxed);
+	else
+	    atomic_fetch_add_explicit(&mtl_envstat_worker_access_private_heap, 1,
+				      memory_order_relaxed);
+    }
     return shared;
 }
 
@@ -1423,6 +1470,10 @@ static SEXP mtl_eval_promise_on_main(void *vp)
 attribute_hidden SEXP R_findVar(SEXP symbol, SEXP rho)
 {
     SEXP vl;
+    const int mtl_worker_reader =
+	(R_MTL_THREADING_ACTIVE &&
+	 R_Interpreter != NULL &&
+	 R_Interpreter->isMTLWorker);
 
     if (TYPEOF(rho) == NILSXP)
 	error(_("use of NULL environment is defunct"));
@@ -1435,9 +1486,13 @@ attribute_hidden SEXP R_findVar(SEXP symbol, SEXP rho)
        will also handle all frames if rho is a global frame other than
        R_GlobalEnv */
     while (rho != R_GlobalEnv && rho != R_EmptyEnv) {
-	int reader = mtl_worker_shared_env_reader_enter(rho);
-	vl = R_findVarInFrame(rho, symbol);
-	mtl_worker_shared_env_reader_exit(reader);
+	if (mtl_worker_reader) {
+	    int reader = mtl_worker_shared_env_reader_enter(rho);
+	    vl = R_findVarInFrame(rho, symbol);
+	    mtl_worker_shared_env_reader_exit(reader);
+	} else {
+	    vl = R_findVarInFrame(rho, symbol);
+	}
 	if (vl != R_UnboundValue) return (vl);
 	rho = ENCLOS(rho);
     }
@@ -1447,9 +1502,13 @@ attribute_hidden SEXP R_findVar(SEXP symbol, SEXP rho)
 	return R_UnboundValue;
 #else
     while (rho != R_EmptyEnv) {
-	int reader = mtl_worker_shared_env_reader_enter(rho);
-	vl = R_findVarInFrame(rho, symbol);
-	mtl_worker_shared_env_reader_exit(reader);
+	if (mtl_worker_reader) {
+	    int reader = mtl_worker_shared_env_reader_enter(rho);
+	    vl = R_findVarInFrame(rho, symbol);
+	    mtl_worker_shared_env_reader_exit(reader);
+	} else {
+	    vl = R_findVarInFrame(rho, symbol);
+	}
 	if (vl != R_UnboundValue) return (vl);
 	rho = ENCLOS(rho);
     }
@@ -1465,6 +1524,10 @@ SEXP findVar(SEXP symbol, SEXP rho)
 static SEXP findVarLoc(SEXP symbol, SEXP rho)
 {
     SEXP vl;
+    const int mtl_worker_reader =
+	(R_MTL_THREADING_ACTIVE &&
+	 R_Interpreter != NULL &&
+	 R_Interpreter->isMTLWorker);
 
     if (TYPEOF(rho) == NILSXP)
 	error(_("use of NULL environment is defunct"));
@@ -1477,9 +1540,13 @@ static SEXP findVarLoc(SEXP symbol, SEXP rho)
        will also handle all frames if rho is a global frame other than
        R_GlobalEnv */
     while (rho != R_GlobalEnv && rho != R_EmptyEnv) {
-	int reader = mtl_worker_shared_env_reader_enter(rho);
-	vl = findVarLocInFrame(rho, symbol, NULL);
-	mtl_worker_shared_env_reader_exit(reader);
+	if (mtl_worker_reader) {
+	    int reader = mtl_worker_shared_env_reader_enter(rho);
+	    vl = findVarLocInFrame(rho, symbol, NULL);
+	    mtl_worker_shared_env_reader_exit(reader);
+	} else {
+	    vl = findVarLocInFrame(rho, symbol, NULL);
+	}
 	if (vl != R_NilValue) return vl;
 	rho = ENCLOS(rho);
     }
@@ -1762,6 +1829,10 @@ attribute_hidden
 SEXP findFun3(SEXP symbol, SEXP rho, SEXP call)
 {
     SEXP vl;
+    const int mtl_worker_reader =
+	(R_MTL_THREADING_ACTIVE &&
+	 R_Interpreter != NULL &&
+	 R_Interpreter->isMTLWorker);
 
     /* If the symbol is marked as special, skip to the first
        environment that might contain such a symbol. */
@@ -1783,15 +1854,23 @@ SEXP findFun3(SEXP symbol, SEXP rho, SEXP call)
 	    vl = findGlobalVar(symbol);
 #endif
 	else {
-	    int reader = mtl_worker_shared_env_reader_enter(rho);
-	    vl = R_findVarInFrame(rho, symbol);
-	    mtl_worker_shared_env_reader_exit(reader);
+	    if (mtl_worker_reader) {
+		int reader = mtl_worker_shared_env_reader_enter(rho);
+		vl = R_findVarInFrame(rho, symbol);
+		mtl_worker_shared_env_reader_exit(reader);
+	    } else {
+		vl = R_findVarInFrame(rho, symbol);
+	    }
 	}
 #else
 	{
-	    int reader = mtl_worker_shared_env_reader_enter(rho);
-	    vl = R_findVarInFrame(rho, symbol);
-	    mtl_worker_shared_env_reader_exit(reader);
+	    if (mtl_worker_reader) {
+		int reader = mtl_worker_shared_env_reader_enter(rho);
+		vl = R_findVarInFrame(rho, symbol);
+		mtl_worker_shared_env_reader_exit(reader);
+	    } else {
+		vl = R_findVarInFrame(rho, symbol);
+	    }
 	}
 #endif
 	if (vl != R_UnboundValue) {
@@ -1800,7 +1879,9 @@ SEXP findFun3(SEXP symbol, SEXP rho, SEXP call)
 		    vl = PRVALUE(vl);
 		else {
 		    PROTECT(vl);
-		    if (mtl_worker_shared_env_access(rho) && R_InError == 0) {
+		    if (mtl_worker_reader &&
+			mtl_worker_shared_env_access(rho) &&
+			R_InError == 0) {
 			mtl_eval_promise_data_t d = { .promise = vl, .env = rho };
 			vl = R_mtl_invoke_on_main_reason(mtl_eval_promise_on_main, &d,
 							 R_MTL_RPC_OTHER);

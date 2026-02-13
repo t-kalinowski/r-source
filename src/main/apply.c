@@ -2179,7 +2179,8 @@ attribute_hidden SEXP do_mtlsharedenvstats(SEXP call, SEXP op, SEXP args, SEXP r
     if (reset == NA_LOGICAL)
 	error(_("invalid '%s' value"), "reset");
 
-    unsigned long v[20];
+    enum { MTL_SHARED_STATS_FIXED = 12, MTL_SHARED_STATS_TOTAL = MTL_SHARED_STATS_FIXED + R_MTL_ENVSTAT_COUNT };
+    unsigned long v[MTL_SHARED_STATS_TOTAL];
 #ifdef HAVE_PTHREAD
     v[0] = mtl_rpc_counter_read(&mtl_shared_reader_enter_calls, reset);
     v[1] = mtl_rpc_counter_read(&mtl_shared_reader_retry_after_set, reset);
@@ -2200,12 +2201,12 @@ attribute_hidden SEXP do_mtlsharedenvstats(SEXP call, SEXP op, SEXP args, SEXP r
     unsigned long ev[R_MTL_ENVSTAT_COUNT];
     R_mtl_envirstats_get(ev, reset);
     for (int i = 0; i < R_MTL_ENVSTAT_COUNT; i++)
-	v[12 + i] = ev[i];
+	v[MTL_SHARED_STATS_FIXED + i] = ev[i];
 
     SEXP out, nms;
-    PROTECT(out = allocVector(INTSXP, 20));
-    PROTECT(nms = allocVector(STRSXP, 20));
-    const char *names[20] = {
+    PROTECT(out = allocVector(INTSXP, MTL_SHARED_STATS_TOTAL));
+    PROTECT(nms = allocVector(STRSXP, MTL_SHARED_STATS_TOTAL));
+    const char *names[MTL_SHARED_STATS_TOTAL] = {
 	"reader.enter.calls",
 	"reader.retry_after_set",
 	"reader.wait.loops",
@@ -2225,9 +2226,16 @@ attribute_hidden SEXP do_mtlsharedenvstats(SEXP call, SEXP op, SEXP args, SEXP r
 	"env.mutcheck.shared_true",
 	"env.searchpath.calls",
 	"env.searchpath.true",
-	"env.worker_access.true"
+	"env.worker_access.calls",
+	"env.worker_access.inactive",
+	"env.worker_access.no_interp",
+	"env.worker_access.nonworker",
+	"env.worker_access.nonenv",
+	"env.worker_access.emptyenv",
+	"env.worker_access.private_heap",
+	"env.worker_access.shared_true"
     };
-    for (int i = 0; i < 20; i++) {
+    for (int i = 0; i < MTL_SHARED_STATS_TOTAL; i++) {
 	unsigned long x = v[i];
 	if (x > INT_MAX) x = INT_MAX;
 	INTEGER(out)[i] = (int) x;

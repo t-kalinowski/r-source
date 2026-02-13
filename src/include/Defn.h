@@ -1716,7 +1716,7 @@ attribute_hidden void R_mtl_shared_env_reader_exit(void);
 attribute_hidden void R_mtl_shared_env_writer_begin(void);
 attribute_hidden void R_mtl_shared_env_writer_end(void);
 attribute_hidden void R_mtl_shared_env_writer_unlock_all(void);
-#define R_MTL_ENVSTAT_COUNT 8
+#define R_MTL_ENVSTAT_COUNT 15
 attribute_hidden void R_mtl_envirstats_get(unsigned long *vals, int reset);
 
 /* Thread-local storage (TLS) support for internal multi-threading work. */

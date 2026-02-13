@@ -1,6 +1,6 @@
 # Serial Runtime Diagnose
 
-Generated: 2026-02-13 12:27:29 EST
+Generated: 2026-02-13 12:32:17 EST
 
 ## Build Info
 
@@ -15,9 +15,9 @@ Generated: 2026-02-13 12:27:29 EST
 
 | workload | ref_median_s | mtl_median_s | ratio_mtl_vs_ref | pct_diff |
 | --- | --- | --- | --- | --- |
-| alloc_small | 0.619 | 0.824 | 1.331 | 33.118 |
-| lookup_only | 0.410 | 0.442 | 1.078 | 7.805 |
-| no_alloc_loop | 0.361 | 0.472 | 1.307 | 30.748 |
-| readme_alloc_pressure | 2.012 | 2.474 | 1.230 | 22.962 |
-| readme_etl_group_mean | 1.670 | 2.149 | 1.287 | 28.683 |
+| alloc_small | 0.619 | 0.834 | 1.347 | 34.733 |
+| lookup_only | 0.410 | 0.458 | 1.117 | 11.707 |
+| no_alloc_loop | 0.361 | 0.481 | 1.332 | 33.241 |
+| readme_alloc_pressure | 2.012 | 2.559 | 1.272 | 27.187 |
+| readme_etl_group_mean | 1.670 | 2.091 | 1.252 | 25.210 |
 

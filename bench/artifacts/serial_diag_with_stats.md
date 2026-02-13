@@ -1,6 +1,6 @@
 # Serial Runtime Diagnose
 
-Generated: 2026-02-13 12:27:29 EST
+Generated: 2026-02-13 12:32:41 EST
 
 ## Build Info
 
@@ -15,18 +15,18 @@ Generated: 2026-02-13 12:27:29 EST
 
 | workload | ref_median_s | mtl_median_s | ratio_mtl_vs_ref | pct_diff |
 | --- | --- | --- | --- | --- |
-| alloc_small | 0.619 | 0.825 | 1.333 | 33.279 |
-| lookup_only | 0.410 | 0.437 | 1.066 | 6.585 |
-| no_alloc_loop | 0.361 | 0.471 | 1.305 | 30.471 |
-| readme_alloc_pressure | 2.012 | 2.450 | 1.218 | 21.769 |
-| readme_etl_group_mean | 1.670 | 2.141 | 1.282 | 28.204 |
+| alloc_small | 0.619 | 0.838 | 1.354 | 35.380 |
+| lookup_only | 0.410 | 0.461 | 1.124 | 12.439 |
+| no_alloc_loop | 0.361 | 0.482 | 1.335 | 33.518 |
+| readme_alloc_pressure | 2.012 | 2.522 | 1.253 | 25.348 |
+| readme_etl_group_mean | 1.670 | 2.148 | 1.286 | 28.623 |
 
 ## MTL Runtime Counter Means (Per Run)
 
 | counter | mean_per_run |
 | --- | --- |
-| runtime.alloc.fastpath.calls | 7691221.286 |
-| runtime.alloc.fastpath.serial | 7691221.286 |
+| runtime.alloc.fastpath.calls | 7691228.286 |
+| runtime.alloc.fastpath.serial | 7691228.286 |
 
 ## MTL Shared-Env Counter Means (Per Run)
 
