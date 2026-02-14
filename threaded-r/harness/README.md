@@ -28,6 +28,8 @@ From `threaded-r/`:
 ```sh
 make init-layout
 make bootstrap
+make docs-check
+make doc-garden
 make smoke
 make partial
 make full
@@ -42,3 +44,7 @@ make abi
 - clones/syncs upstream `r-source/`,
 - creates pinned `r-source-ref/` worktree,
 - configures and builds `builds/mtl` + `builds/ref`.
+
+`make docs-check` is a mechanical knowledge-base guardrail. It verifies required
+agent-facing docs exist, `AGENTS.md` stays concise, and plan docs include
+status + decision-log sections.

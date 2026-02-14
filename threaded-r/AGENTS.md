@@ -45,6 +45,7 @@ Run from `threaded-r/`:
 
 - `make init-layout`
 - `make bootstrap`
+- `make docs-check`
 - `make smoke`
 - `make partial`
 - `make full`
@@ -66,6 +67,7 @@ Primary binaries (override as needed):
 - Keep this file short and map-like. It is a table of contents, not the encyclopedia.
 - The repository is the system of record for decisions, plans, and constraints.
 - Use progressive disclosure: load one or two scoped docs for the task, not everything.
+- Agents are encouraged to proactively update agent-facing artifacts (`AGENTS.md`, `agents/*.md`, `docs/*`, `plans/*`, harness docs, benchmark docs) whenever workflow, constraints, invariants, or validation procedures change.
 - Prefer one happy-path implementation; fail fast on violated assumptions.
 - Keep feature deltas small and reversible.
 - Every runtime change must pass correctness + perf gates before merge.

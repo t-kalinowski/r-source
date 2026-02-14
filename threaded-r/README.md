@@ -32,6 +32,8 @@ From `threaded-r/`:
 ```sh
 make init-layout
 make bootstrap
+make docs-check
+make doc-garden
 make smoke
 make partial
 make full
@@ -44,6 +46,7 @@ Bootstrap notes:
 - `make bootstrap` clones upstream R into `r-source/`, creates a pinned reference worktree (`r-source-ref/`), configures `builds/mtl` and `builds/ref`, and builds both.
 - default profile is `quick` (`--without-recommended-packages`); set `TR_BOOTSTRAP_PROFILE=full` for a fuller build.
 - override upstream source with `TR_BOOTSTRAP_SOURCE=/path/to/local/r-source` to avoid network.
+- `make docs-check` enforces core agent-facing knowledge-base structure mechanically.
 
 What these enforce:
 

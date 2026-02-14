@@ -14,14 +14,19 @@ threaded-r/
 ├── agents/
 ├── docs/
 │   ├── AGENT_FIRST_PATTERNS.md
+│   ├── CROSSCHECK_AGENT_FIRST.md
 │   ├── CURRENT_IMPLEMENTATION_DESIGN.md
 │   ├── INVARIANTS_CHECKLIST.md
 │   ├── KNOWLEDGE_BASE_LAYOUT.md
+│   ├── QUALITY_SCORE.md
 │   ├── THREADING_PRODUCT_DIRECTION.md
 │   ├── design-docs/
+│   │   ├── index.md
+│   │   └── core-beliefs.md
 │   ├── exec-plans/
 │   │   ├── active/
-│   │   └── completed/
+│   │   ├── completed/
+│   │   └── tech-debt-tracker.md
 │   ├── generated/
 │   └── references/
 ├── plans/
@@ -58,6 +63,7 @@ harness/
 - `docs/design-docs/`: durable architecture/design decisions.
 - `docs/exec-plans/active/`: in-flight execution plans.
 - `docs/exec-plans/completed/`: completed plans with outcomes.
+- `docs/exec-plans/tech-debt-tracker.md`: known debt with owner/exit criteria.
 - `docs/generated/`: generated docs (schemas, inventories, reports).
 - `docs/references/`: external reference notes distilled for in-repo use.
 - `plans/`: roadmap-level sequencing and phase checklists.

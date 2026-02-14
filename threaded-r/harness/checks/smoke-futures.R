@@ -16,8 +16,8 @@ cpu_work <- function(n = 300000L) {
 
 f1 <- background(cpu_work(250000L))
 f2 <- background(cpu_work(300000L))
-done1 <- wait(list(f1, f2), timeout = 30)
-done2 <- wait(list(f1, f2), timeout = 30)
+done1 <- wait(f1, timeout = 30)
+done2 <- wait(f2, timeout = 30)
 stopifnot(inherits(done1, "mt_future"), inherits(done2, "mt_future"))
 stopifnot(isTRUE(attr(done1, "ok")), isTRUE(attr(done2, "ok")))
 stopifnot(is.integer(done1$value), is.integer(done2$value))
