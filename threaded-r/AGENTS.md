@@ -36,10 +36,17 @@ Load these only when needed:
 - `agents/threadpool-and-futures.md`
 - `agents/package-abi.md`
 - `agents/bench-and-validation.md`
+- `docs/AGENT_FIRST_PATTERNS.md`
+- `docs/KNOWLEDGE_BASE_LAYOUT.md`
 
 ## Global rules
 
+- Keep this file short and map-like. It is a table of contents, not the encyclopedia.
+- The repository is the system of record for decisions, plans, and constraints.
+- Use progressive disclosure: load one or two scoped docs for the task, not everything.
 - Prefer one happy-path implementation; fail fast on violated assumptions.
 - Keep feature deltas small and reversible.
 - Every runtime change must pass correctness + perf gates before merge.
 - Do not accept threaded wins that regress serial baseline beyond thresholds.
+- Encode recurring review feedback into docs, linters, or tests so quality compounds.
+- Treat plans as first-class artifacts in `docs/exec-plans/` with active/completed state.

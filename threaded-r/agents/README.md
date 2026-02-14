@@ -16,3 +16,8 @@ Scope map:
 - `threadpool-and-futures.md`: queue model + user API.
 - `package-abi.md`: package/native compatibility constraints.
 - `bench-and-validation.md`: benchmark and regression gates.
+
+Agent-first operating docs:
+
+- `../docs/AGENT_FIRST_PATTERNS.md`
+- `../docs/KNOWLEDGE_BASE_LAYOUT.md`

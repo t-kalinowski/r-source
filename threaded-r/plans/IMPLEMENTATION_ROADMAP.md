@@ -1,5 +1,19 @@
 # Implementation Roadmap (Clean Rebuild)
 
+## Phase -1: Harness + Knowledge System
+
+- [ ] Keep `AGENTS.md` short and map-like; move detailed guidance into scoped docs.
+- [ ] Establish `docs/exec-plans/active` and `docs/exec-plans/completed` workflow.
+- [ ] Add lightweight doc-structure validation (required files, links, stale-plan checks).
+- [ ] Add recurring doc-gardening task to prune stale constraints and broken references.
+- [ ] Define architecture/perf invariants as machine-checkable scripts where possible.
+
+Exit criteria:
+
+- Repository knowledge is discoverable via progressive disclosure.
+- Non-trivial work is tracked in versioned execution plans.
+- At least one automated docs/invariants check exists and is run regularly.
+
 ## Phase 0: Seed + Guardrails
 
 - [ ] Fork fresh upstream `R-devel` baseline.
@@ -89,3 +103,4 @@ Exit criteria:
 - [ ] Serial parity benchmark gate.
 - [ ] Threaded scaling benchmark gate.
 - [ ] Dashboard artifact refreshed.
+- [ ] Relevant plan/docs updated (design doc, exec plan, or invariants checklist).

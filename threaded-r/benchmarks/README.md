@@ -9,6 +9,7 @@ Design rules:
   - `benchmarks/results/current.csv` (latest run)
   - `benchmarks/baselines/serial_baseline.csv` (serial baseline contract)
 - No hidden reference `.rds` artifacts are required by the report.
+- Benchmark artifacts are part of repository knowledge and should be diffed in PRs.
 
 ## Run
 
@@ -33,3 +34,4 @@ Useful knobs:
 - threaded scaling scenarios,
 - nested/queue scenarios,
 - package/native smoke-oriented scenarios.
+- workloads should be long enough to reduce measurement noise.
