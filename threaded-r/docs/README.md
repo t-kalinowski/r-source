@@ -19,3 +19,8 @@ Working sets:
 - `exec-plans/`
 - `generated/`
 - `references/`
+
+Operational docs:
+
+- `../harness/README.md`
+- `../benchmarks/README.md`

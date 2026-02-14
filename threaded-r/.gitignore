@@ -1,0 +1,27 @@
+# Local build trees
+builds/mtl/
+builds/ref/
+builds/mtl-clang/
+
+# Local strict library
+site-library-strict/
+
+# Generated harness artifacts
+artifacts/bench/latest/*
+artifacts/bench/history/*
+artifacts/checks/latest/*
+artifacts/checks/history/*
+
+# Keep directory placeholders
+!builds/.gitkeep
+!builds/mtl/.gitkeep
+!builds/ref/.gitkeep
+!builds/mtl-clang/.gitkeep
+!artifacts/.gitkeep
+!artifacts/bench/.gitkeep
+!artifacts/bench/latest/.gitkeep
+!artifacts/bench/history/.gitkeep
+!artifacts/checks/.gitkeep
+!artifacts/checks/latest/.gitkeep
+!artifacts/checks/history/.gitkeep
+!r-source/.gitkeep

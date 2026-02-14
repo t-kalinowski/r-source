@@ -7,6 +7,10 @@ Goal: keep repository knowledge structured, discoverable, and mechanically maint
 ```text
 threaded-r/
 ├── AGENTS.md
+├── r-source/
+├── builds/
+├── artifacts/
+├── harness/
 ├── agents/
 ├── docs/
 │   ├── AGENT_FIRST_PATTERNS.md
@@ -25,6 +29,28 @@ threaded-r/
 └── tests/
 ```
 
+Operational sub-layout:
+
+```text
+builds/
+├── mtl/
+├── ref/
+└── mtl-clang/
+
+artifacts/
+├── bench/
+│   ├── latest/
+│   └── history/
+└── checks/
+    ├── latest/
+    └── history/
+
+harness/
+├── scripts/
+├── checks/
+└── abi/
+```
+
 ## Content ownership
 
 - `AGENTS.md`: short map and global rules only.
@@ -35,6 +61,8 @@ threaded-r/
 - `docs/generated/`: generated docs (schemas, inventories, reports).
 - `docs/references/`: external reference notes distilled for in-repo use.
 - `plans/`: roadmap-level sequencing and phase checklists.
+- `harness/`: staged validation ladder and runtime guardrails.
+- `artifacts/`: generated outputs (benchmark CSVs, rendered reports, stage status files).
 
 ## Update rules
 

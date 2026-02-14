@@ -39,6 +39,27 @@ Load these only when needed:
 - `docs/AGENT_FIRST_PATTERNS.md`
 - `docs/KNOWLEDGE_BASE_LAYOUT.md`
 
+## Harness quickstart
+
+Run from `threaded-r/`:
+
+- `make init-layout`
+- `make smoke`
+- `make partial`
+- `make full`
+- `make release`
+
+Mode semantics:
+
+- `TR_MODE=strict`: no unintentional package/library leakage.
+- `TR_MODE=dropin`: realistic compatibility path with user/system libraries.
+
+Primary binaries (override as needed):
+
+- `TR_MTL_R_BIN` (threaded build under test)
+- `TR_REF_R_BIN` (reference upstream build)
+- `TR_SYSTEM_R_BIN` (system/dev R for baseline comparisons)
+
 ## Global rules
 
 - Keep this file short and map-like. It is a table of contents, not the encyclopedia.

@@ -2,18 +2,52 @@
 
 This directory is the seed for a clean re-implementation of threaded R support.
 
-Goal: start from a fresh upstream `R-devel` fork and re-apply only the proven ideas from this exploration, in a disciplined, incremental sequence with correctness/performance gates at each step.
+Goal: start from a fresh upstream `R-devel` fork and re-apply only proven ideas from this exploration with strict validation gates.
 
-Contents:
+## Top-level structure
 
-- `AGENTS.md`: minimal always-loaded source map + working rules.
-- `agents/`: scoped deep-dive notes for specific runtime areas.
-- `docs/AGENT_FIRST_PATTERNS.md`: distilled harness-engineering patterns adapted to this project.
-- `docs/KNOWLEDGE_BASE_LAYOUT.md`: knowledge-store structure and update workflow.
-- `docs/README.md`: docs index for progressive disclosure.
-- `docs/THREADING_PRODUCT_DIRECTION.md`: distilled design goals, invariants, constraints, API shape.
-- `docs/CURRENT_IMPLEMENTATION_DESIGN.md`: source-verified architecture of the current implementation (structs, APIs, mode switch, guardrails).
-- `docs/exec-plans/`: first-class execution plans (`active/`, `completed/`) and debt tracker.
-- `plans/IMPLEMENTATION_ROADMAP.md`: phased implementation plan with checklists and gates.
-- `benchmarks/`: benchmark harness scaffold + dashboard (`Rmd`) + baseline CSV contract.
-- `tests/TEST_MATRIX.md`: correctness/perf validation matrix to enforce at each checkpoint.
+- `r-source/`: clean upstream R checkout to patch incrementally.
+- `builds/`: local build trees (`mtl`, `ref`, `mtl-clang`) for fast compare loops.
+- `artifacts/`: generated validation/benchmark artifacts (latest + history).
+- `harness/`: staged validation entrypoints and guardrail checks.
+- `benchmarks/`: reproducible benchmark scripts + dashboard render inputs.
+- `docs/`, `agents/`, `plans/`, `tests/`: knowledge system, execution plans, and test matrix.
+
+## Standard artifact pattern
+
+- Bench artifacts:
+  - `artifacts/bench/latest/`: most recent benchmark run outputs.
+  - `artifacts/bench/history/`: timestamped benchmark snapshots.
+- Check artifacts:
+  - `artifacts/checks/latest/`: latest stage status files.
+  - `artifacts/checks/history/`: timestamped stage status history.
+- Data interchange format:
+  - CSV for benchmark results and baselines.
+  - `.status` key-value files for check stage outcomes.
+
+## Standard staged checks
+
+From `threaded-r/`:
+
+```sh
+make init-layout
+make smoke
+make partial
+make full
+make release
+make abi
+```
+
+What these enforce:
+
+- smoke: fast correctness + strict-path leakage checks.
+- partial: smoke + threaded tests + package ABI smoke.
+- full: partial + benchmark refresh + optional long `check-all`.
+- release: strict full path + drop-in smoke path.
+
+## Key guardrails
+
+- strict mode disallows accidental system library leakage.
+- drop-in mode validates compatibility with real user/system package paths.
+- ABI smoke checks package namespace loading for compiled packages.
+- benchmark thresholds protect serial parity and threaded efficiency.
