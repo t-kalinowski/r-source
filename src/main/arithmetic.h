@@ -74,11 +74,29 @@ static R_INLINE __attribute__((always_inline)) int R_mtl_can_reuse_object(SEXP s
 static R_INLINE SEXP R_allocOrReuseVector(SEXP s1, SEXP s2,
 					  SEXPTYPE type , R_xlen_t n)
 {
-    int can_reuse_s1 = R_mtl_can_reuse_object(s1);
-    int can_reuse_s2 = R_mtl_can_reuse_object(s2);
-
     R_xlen_t n1 = XLENGTH(s1);
     R_xlen_t n2 = XLENGTH(s2);
+
+    if (__builtin_expect(!R_MTL_THREADING_ACTIVE, 1)) {
+	/* Keep the serial path byte-for-byte close to upstream behavior. */
+	if (n == n2) {
+	    if (TYPEOF(s2) == type && NO_REFERENCES(s2)) {
+		if (ATTRIB(s2) != R_NilValue)
+		    setAttrib(s2, R_NamesSymbol, R_NilValue);
+		return s2;
+	    }
+	    else if (n == n1 && TYPEOF(s1) == type && NO_REFERENCES(s1)
+		     && ATTRIB(s2) == R_NilValue)
+		return s1;
+	}
+	else if (n == n1 && TYPEOF(s1) == type && NO_REFERENCES(s1))
+	    return s1;
+
+	return allocVector(type, n);
+    }
+
+    int can_reuse_s1 = R_mtl_can_reuse_object(s1);
+    int can_reuse_s2 = R_mtl_can_reuse_object(s2);
 
     /* Try to use space for 2nd arg if both same length, so 1st argument's
        attributes will then take precedence when copied. */

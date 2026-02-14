@@ -22,6 +22,10 @@ tests/Pkgs/**/src/*.so
 .tmp-mtl-perf/
 bench/figures/
 demo-mtl.html
+bench/artifacts/loop_microdiag_*.csv
+bench/artifacts/serial_min_diag_*.rds
+bench/artifacts/serial_diag_*_latest.csv
+bench/artifacts/serial_diag_*_latest.rds
 
 # local vendored/scratch trees
 pkgs/

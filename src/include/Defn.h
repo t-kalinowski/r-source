@@ -1522,6 +1522,14 @@ FUNTAB	R_FunTab[];	    /* Built in functions */
 # endif
 #endif
 
+#if (defined(__GNUC__) || defined(__clang__)) && !defined(_WIN32)
+# define R_TLSMODEL_INITEXEC __attribute__((tls_model("initial-exec")))
+# define R_TLSMODEL_LOCALEXEC __attribute__((tls_model("local-exec")))
+#else
+# define R_TLSMODEL_INITEXEC
+# define R_TLSMODEL_LOCALEXEC
+#endif
+
 #ifdef __MAIN__
 # define INI_as(v) = v
 #define extern0 attribute_hidden
@@ -1664,7 +1672,7 @@ attribute_hidden SEXP R_mtl_shallow_duplicate_pairlist(SEXP lst);
    visibility global can inhibit optimization and cost extra indirections.
    Use a hidden mirror for code compiled into the main executable. */
 attribute_visible extern int R_mtl_threading_active;
-#ifdef __MAIN__
+#if defined(R_MTL_CORE)
 attribute_hidden extern int R_mtl_threading_active_hidden;
 #define R_MTL_THREADING_ACTIVE (R_mtl_threading_active_hidden)
 #else
@@ -1744,22 +1752,44 @@ extern R_InterpreterState R_Interpreter0;
  */
 #ifdef __MAIN__
 attribute_visible R_InterpreterState *R_InterpreterMain INI_as(&R_Interpreter0);
+attribute_hidden R_InterpreterState *R_InterpreterMain_hidden INI_as(&R_Interpreter0);
 attribute_visible R_THREAD_LOCAL R_InterpreterState *R_InterpreterTLS INI_as(&R_Interpreter0);
+attribute_hidden R_THREAD_LOCAL R_InterpreterState *R_InterpreterTLS_hidden R_TLSMODEL_LOCALEXEC INI_as(&R_Interpreter0);
 #else
 attribute_visible extern R_InterpreterState *R_InterpreterMain;
 attribute_visible extern R_THREAD_LOCAL R_InterpreterState *R_InterpreterTLS;
+# if defined(R_MTL_CORE)
+attribute_hidden extern R_InterpreterState *R_InterpreterMain_hidden;
+attribute_hidden extern R_THREAD_LOCAL R_InterpreterState *R_InterpreterTLS_hidden;
+# endif
 #endif
 
 /* Slow path that may reference TLS (macOS TLV), kept out-of-line so the
    serial fast path can compile without pulling in TLV access sequences. */
 attribute_visible R_InterpreterState *R_mtl_interpreter_tls_or_main(void);
 
-static R_INLINE R_InterpreterState *R_mtl_interpreter_ptr(void)
+static R_INLINE __attribute__((always_inline, pure)) R_InterpreterState *R_mtl_interpreter_ptr(void)
 {
+#if defined(R_MTL_CORE)
+    return R_InterpreterTLS_hidden;
+#else
     return R_InterpreterTLS;
+#endif
 }
 
-#define R_Interpreter (R_mtl_interpreter_ptr())
+static R_INLINE __attribute__((always_inline)) void R_mtl_interpreter_set(R_InterpreterState *st)
+{
+#if defined(R_MTL_CORE)
+    R_InterpreterTLS_hidden = st;
+#endif
+    R_InterpreterTLS = st;
+}
+
+#if defined(R_MTL_CORE)
+#define R_Interpreter (R_InterpreterTLS_hidden)
+#else
+#define R_Interpreter (R_InterpreterTLS)
+#endif
 
 #define R_CurrentExpr   (R_Interpreter->currentExpr)
 #define R_ReturnedValue (R_Interpreter->returnedValue)

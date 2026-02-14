@@ -1,0 +1,60 @@
+---
+title: "threaded-r benchmark dashboard"
+output: html_document
+params:
+  results_csv: "benchmarks/results/current.csv"
+  baseline_csv: "benchmarks/baselines/serial_baseline.csv"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+results <- read.csv(params$results_csv, stringsAsFactors = FALSE)
+baseline <- read.csv(params$baseline_csv, stringsAsFactors = FALSE)
+```
+
+## Raw results
+
+```{r}
+print(results)
+```
+
+## Serial parity vs baseline
+
+```{r}
+serial_current <- subset(results, mode %in% c("lapply", "lapply-serial-proxy"))
+if (nrow(serial_current) && nrow(baseline)) {
+  b <- baseline[, c("case", "baseline_serial_elapsed_s")]
+  c <- aggregate(elapsed_s ~ case, serial_current, median)
+  names(c)[2] <- "current_serial_elapsed_s"
+  cmp <- merge(c, b, by = "case", all = FALSE)
+  cmp$ratio_current_vs_baseline <- cmp$current_serial_elapsed_s / cmp$baseline_serial_elapsed_s
+  cmp$pct_diff <- (cmp$ratio_current_vs_baseline - 1) * 100
+  print(cmp)
+} else {
+  cat("No comparable serial rows found.\n")
+}
+```
+
+## Threaded scaling
+
+```{r}
+thr <- subset(results, mode == "mtlapply")
+if (nrow(thr)) {
+  base <- subset(results, mode == "lapply", c("case", "elapsed_s"))
+  names(base)[2] <- "serial_elapsed_s"
+  sp <- merge(thr, base, by = "case", all.x = TRUE)
+  sp$speedup <- sp$serial_elapsed_s / sp$elapsed_s
+  sp$efficiency <- sp$speedup / sp$threads
+  print(sp[, c("case", "threads", "elapsed_s", "serial_elapsed_s", "speedup", "efficiency")])
+
+  oldpar <- par(no.readonly = TRUE)
+  on.exit(par(oldpar), add = TRUE)
+  for (case in unique(sp$case)) {
+    sub <- sp[sp$case == case, ]
+    plot(sub$threads, sub$speedup, type = "b", main = paste("Speedup:", case),
+         xlab = "threads", ylab = "speedup")
+  }
+} else {
+  cat("No threaded rows found.\n")
+}
+```

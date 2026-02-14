@@ -1,0 +1,9 @@
+"timestamp_utc","case","mode","threads","elapsed_s"
+"2026-02-14 17:21:19 UTC","cos_seq","lapply-serial-proxy",1,0.003
+"2026-02-14 17:21:19 UTC","cos_seq","mtlapply",1,0.076
+"2026-02-14 17:21:19 UTC","cos_seq","mtlapply",2,0.026
+"2026-02-14 17:21:19 UTC","alloc_pressure","lapply-serial-proxy",1,0.002
+"2026-02-14 17:21:19 UTC","alloc_pressure","mtlapply",1,0.029
+"2026-02-14 17:21:19 UTC","alloc_pressure","mtlapply",2,0.013
+"2026-02-14 17:21:19 UTC","cos_seq","lapply",1,0.045
+"2026-02-14 17:21:19 UTC","alloc_pressure","lapply",1,0.0249999999999999

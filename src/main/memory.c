@@ -5495,6 +5495,12 @@ NORET void R_signal_unprotect_error(void)
 SEXP protect(SEXP s)
 {
     R_CHECK_THREAD;
+    if (__builtin_expect(!R_MTL_THREADING_ACTIVE, 1)) {
+	if (R_Interpreter0.ppStackTop >= R_PPStackSize)
+	    R_signal_protect_error();
+	R_Interpreter0.ppStack[R_Interpreter0.ppStackTop++] = CHK(s);
+	return s;
+    }
     if (R_PPStackTop >= R_PPStackSize)
 	R_signal_protect_error();
     R_PPStack[R_PPStackTop++] = CHK(s);
@@ -5507,6 +5513,13 @@ SEXP protect(SEXP s)
 void unprotect(int l)
 {
     R_CHECK_THREAD;
+    if (__builtin_expect(!R_MTL_THREADING_ACTIVE, 1)) {
+	if (R_Interpreter0.ppStackTop >= l)
+	    R_Interpreter0.ppStackTop -= l;
+	else
+	    R_signal_unprotect_error();
+	return;
+    }
     if (R_PPStackTop >=  l)
 	R_PPStackTop -= l;
     else R_signal_unprotect_error();
@@ -5518,6 +5531,17 @@ void unprotect(int l)
 void unprotect_ptr(SEXP s)
 {
     R_CHECK_THREAD;
+    if (__builtin_expect(!R_MTL_THREADING_ACTIVE, 1)) {
+	int i = R_Interpreter0.ppStackTop;
+	do {
+	    if (i == 0)
+		error(_("unprotect_ptr: pointer not found"));
+	} while (R_Interpreter0.ppStack[--i] != s);
+	while (++i < R_Interpreter0.ppStackTop)
+	    R_Interpreter0.ppStack[i - 1] = R_Interpreter0.ppStack[i];
+	R_Interpreter0.ppStackTop--;
+	return;
+    }
     int i = R_PPStackTop;
 
     /* go look for  s  in  R_PPStack */
@@ -5540,6 +5564,14 @@ void unprotect_ptr(SEXP s)
 attribute_hidden int Rf_isProtected(SEXP s)
 {
     R_CHECK_THREAD;
+    if (__builtin_expect(!R_MTL_THREADING_ACTIVE, 1)) {
+	int i = R_Interpreter0.ppStackTop;
+	do {
+	    if (i == 0)
+		return i;
+	} while (R_Interpreter0.ppStack[--i] != s);
+	return i;
+    }
     int i = R_PPStackTop;
 
     /* go look for  s  in  R_PPStack */
@@ -5557,6 +5589,12 @@ attribute_hidden int Rf_isProtected(SEXP s)
 void R_ProtectWithIndex(SEXP s, PROTECT_INDEX *pi)
 {
     protect(s);
+#ifdef HAVE_PTHREAD
+    if (__builtin_expect(!R_MTL_THREADING_ACTIVE, 1)) {
+	*pi = R_Interpreter0.ppStackTop - 1;
+	return;
+    }
+#endif
     *pi = R_PPStackTop - 1;
 }
 #endif
@@ -5573,6 +5611,14 @@ NORET void R_signal_reprotect_error(PROTECT_INDEX i)
 void R_Reprotect(SEXP s, PROTECT_INDEX i)
 {
     R_CHECK_THREAD;
+#ifdef HAVE_PTHREAD
+    if (__builtin_expect(!R_MTL_THREADING_ACTIVE, 1)) {
+	if (i >= R_Interpreter0.ppStackTop || i < 0)
+	    R_signal_reprotect_error(i);
+	R_Interpreter0.ppStack[i] = s;
+	return;
+    }
+#endif
     if (i >= R_PPStackTop || i < 0)
 	R_signal_reprotect_error(i);
     R_PPStack[i] = s;

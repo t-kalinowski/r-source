@@ -3,6 +3,7 @@
 # Performance regression smoke:
 # - runs benchmark artifacts for baseline R and MTL R
 # - checks serial lapply parity against a threshold
+# - checks minimal serial-kernel parity against a threshold
 # - checks threadpool speedup on fixed matmul workloads
 #
 # Usage:
@@ -34,6 +35,8 @@ mkdir -p "${tmp_dir}"
 
 base_out="${tmp_dir}/baseline.rds"
 mtl_out="${tmp_dir}/mtl.rds"
+base_min_out="${tmp_dir}/baseline_serial_minimal.rds"
+mtl_min_out="${tmp_dir}/mtl_serial_minimal.rds"
 
 cd "${repo_root}"
 
@@ -48,6 +51,18 @@ README_ITERS="${README_ITERS:-5}" README_THREADS="${README_THREADS:-1,2,4,8}" \
 echo "checking regression threshold: ${serial_max_ratio}"
 "${mtl_r}" --vanilla -q -f tools/mtl-perf-regression-check.R --args \
   "${mtl_out}" "${base_out}" "${serial_max_ratio}"
+
+echo "running baseline minimal serial kernels: ${baseline_r}"
+SERIAL_MIN_ITERS="${SERIAL_MIN_ITERS:-5}" \
+  "${baseline_r}" --vanilla -q -f bench/serial_minimal_bench.R --args "${base_min_out}" baseline
+
+echo "running mtl minimal serial kernels: ${mtl_r}"
+SERIAL_MIN_ITERS="${SERIAL_MIN_ITERS:-5}" \
+  "${mtl_r}" --vanilla -q -f bench/serial_minimal_bench.R --args "${mtl_min_out}" mtl
+
+echo "checking minimal serial-kernel threshold: ${serial_max_ratio}"
+"${mtl_r}" --vanilla -q -f tools/mtl-serial-minimal-check.R --args \
+  "${mtl_min_out}" "${base_min_out}" "${serial_max_ratio}"
 
 echo "checking threadpool speedup smoke: threads=${speedup_threads} reps=${speedup_reps} min_eff=${speedup_min_eff}"
 "${repo_root}/tools/mtl-threadpool-perf-smoke.sh" "${build_dir}" "${speedup_threads}" "${speedup_reps}" "${speedup_min_eff}"

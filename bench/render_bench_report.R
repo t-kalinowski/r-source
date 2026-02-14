@@ -61,6 +61,8 @@ rdevel_path <- require_file("bench/results/rdevel_latest.rds")
 mtl_path <- require_file("bench/results/mtl_latest.rds")
 threadpool_path <- require_file("bench/results/threadpool_perf_checkpoint.csv")
 bg_path <- require_file("bench/results/mtl_shiny_background_smoke_checkpoint.csv")
+serial_min_ref_path <- require_file("bench/results/serial_minimal_rdevel_latest.rds")
+serial_min_mtl_path <- require_file("bench/results/serial_minimal_mtl_latest.rds")
 shiny_full_path <- "bench/results/shiny_scale300_w8_full.csv"
 
 system_res <- read_results(system_path)
@@ -68,6 +70,8 @@ rdevel_res <- read_results(rdevel_path)
 mtl_res <- read_results(mtl_path)
 threadpool_res <- read.csv(threadpool_path, stringsAsFactors = FALSE)
 bg_res <- read.csv(bg_path, stringsAsFactors = FALSE)
+serial_min_ref <- read_results(serial_min_ref_path)
+serial_min_mtl <- read_results(serial_min_mtl_path)
 shiny_full <- if (file.exists(shiny_full_path)) {
   read.csv(shiny_full_path, stringsAsFactors = FALSE)
 } else {
@@ -86,6 +90,15 @@ lapply_table <- function(lhs, rhs, lhs_name, rhs_name) {
 
 parity_rdevel <- lapply_table(mtl_res, rdevel_res, "mtl_lapply_s", "rdevel_lapply_s")
 parity_system <- lapply_table(mtl_res, system_res, "mtl_lapply_s", "system_lapply_s")
+
+serial_min <- merge(
+  serial_min_mtl[, c("kernel", "median_seconds"), drop = FALSE],
+  serial_min_ref[, c("kernel", "median_seconds"), drop = FALSE],
+  by = "kernel", all = FALSE, sort = TRUE
+)
+names(serial_min)[2:3] <- c("mtl_s", "rdevel_s")
+serial_min$ratio <- serial_min$mtl_s / serial_min$rdevel_s
+serial_min$pct_diff <- (serial_min$ratio - 1) * 100
 
 ml <- subset(mtl_res, method == "lapply", c("workload", "median_seconds"))
 names(ml)[2] <- "lapply_s"
@@ -109,6 +122,10 @@ lines <- c(
   "## Serial Parity vs System R (`ratio = mtl / system`)",
   "",
   md_table(parity_system, digits = 3L),
+  "",
+  "## Minimal Serial Kernels vs R-devel (`ratio = mtl / rdevel`)",
+  "",
+  md_table(serial_min, digits = 3L),
   "",
   "## `mtlapply` Scaling (from `bench/results/mtl_latest.rds`)",
   "",

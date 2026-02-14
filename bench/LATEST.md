@@ -7,34 +7,44 @@ Regenerate with `tools/mtl-bench-refresh.sh` and inspect with `git diff bench/LA
 
 | workload | mtl_lapply_s | rdevel_lapply_s | ratio |
 | --- | --- | --- | --- |
-| alloc_pressure | 2.339 | 2.443 | 0.957 |
-| cos_seq | 3.072 | 3.279 | 0.937 |
-| etl_group_mean | 2.623 | 2.878 | 0.911 |
+| alloc_pressure | 2.593 | 2.443 | 1.061 |
+| cos_seq | 3.267 | 3.279 | 0.996 |
+| etl_group_mean | 2.689 | 2.878 | 0.934 |
 
 ## Serial Parity vs System R (`ratio = mtl / system`)
 
 | workload | mtl_lapply_s | system_lapply_s | ratio |
 | --- | --- | --- | --- |
-| alloc_pressure | 2.339 | 2.158 | 1.084 |
-| cos_seq | 3.072 | 3.094 | 0.993 |
-| etl_group_mean | 2.623 | 2.412 | 1.087 |
+| alloc_pressure | 2.593 | 2.158 | 1.202 |
+| cos_seq | 3.267 | 3.094 | 1.056 |
+| etl_group_mean | 2.689 | 2.412 | 1.115 |
+
+## Minimal Serial Kernels vs R-devel (`ratio = mtl / rdevel`)
+
+| kernel | mtl_s | rdevel_s | ratio | pct_diff |
+| --- | --- | --- | --- | --- |
+| alloc_small_sum_x_6e5 | 0.854 | 0.684 | 1.249 | 24.854 |
+| empty_for_8e7 | 0.356 | 0.336 | 1.060 | 5.952 |
+| scalar_add_4e7 | 0.380 | 0.372 | 1.022 | 2.151 |
+| vector_alloc_64_x_2e6 | 0.521 | 0.426 | 1.223 | 22.300 |
+| vector_list_build_x_6e5 | 0.502 | 0.329 | 1.526 | 52.584 |
 
 ## `mtlapply` Scaling (from `bench/results/mtl_latest.rds`)
 
 | workload | threads | lapply_s | mtlapply_s | speedup | efficiency |
 | --- | --- | --- | --- | --- | --- |
-| alloc_pressure | 1 | 2.339 | 2.398 | 0.975 | 0.975 |
-| alloc_pressure | 2 | 2.339 | 1.314 | 1.780 | 0.890 |
-| alloc_pressure | 4 | 2.339 | 0.741 | 3.157 | 0.789 |
-| alloc_pressure | 8 | 2.339 | 0.400 | 5.848 | 0.731 |
-| cos_seq | 1 | 3.072 | 3.092 | 0.994 | 0.994 |
-| cos_seq | 2 | 3.072 | 1.630 | 1.885 | 0.942 |
-| cos_seq | 4 | 3.072 | 0.898 | 3.421 | 0.855 |
-| cos_seq | 8 | 3.072 | 0.535 | 5.742 | 0.718 |
-| etl_group_mean | 1 | 2.623 | 2.572 | 1.020 | 1.020 |
-| etl_group_mean | 2 | 2.623 | 1.290 | 2.033 | 1.017 |
-| etl_group_mean | 4 | 2.623 | 0.659 | 3.980 | 0.995 |
-| etl_group_mean | 8 | 2.623 | 0.337 | 7.783 | 0.973 |
+| alloc_pressure | 1 | 2.593 | 2.585 | 1.003 | 1.003 |
+| alloc_pressure | 2 | 2.593 | 1.422 | 1.823 | 0.912 |
+| alloc_pressure | 4 | 2.593 | 0.755 | 3.434 | 0.859 |
+| alloc_pressure | 8 | 2.593 | 0.401 | 6.466 | 0.808 |
+| cos_seq | 1 | 3.267 | 3.249 | 1.006 | 1.006 |
+| cos_seq | 2 | 3.267 | 1.745 | 1.872 | 0.936 |
+| cos_seq | 4 | 3.267 | 0.930 | 3.513 | 0.878 |
+| cos_seq | 8 | 3.267 | 0.546 | 5.984 | 0.748 |
+| etl_group_mean | 1 | 2.689 | 2.647 | 1.016 | 1.016 |
+| etl_group_mean | 2 | 2.689 | 1.316 | 2.043 | 1.022 |
+| etl_group_mean | 4 | 2.689 | 0.663 | 4.056 | 1.014 |
+| etl_group_mean | 8 | 2.689 | 0.336 | 8.003 | 1.000 |
 
 ## Threadpool Matrix Benchmark
 

@@ -37,6 +37,16 @@ echo "==> r-devel benchmark artifact"
 echo "==> mtl benchmark artifact"
 "${mtl_r}" --vanilla -q -f bench/readme_bench_run.R --args bench/results/mtl_latest.rds
 
+echo "==> r-devel minimal serial kernels"
+SERIAL_MIN_ITERS="${SERIAL_MIN_ITERS:-5}" \
+  "${rdevel_r}" --vanilla -q -f bench/serial_minimal_bench.R --args \
+  bench/results/serial_minimal_rdevel_latest.rds rdevel
+
+echo "==> mtl minimal serial kernels"
+SERIAL_MIN_ITERS="${SERIAL_MIN_ITERS:-5}" \
+  "${mtl_r}" --vanilla -q -f bench/serial_minimal_bench.R --args \
+  bench/results/serial_minimal_mtl_latest.rds mtl
+
 echo "==> threadpool benchmark artifact"
 "${mtl_r}" --vanilla -q -f tools/mtl-threadpool-perf-smoke.R --args \
   8 3 0.45 bench/results/threadpool_perf_checkpoint.csv

@@ -1173,7 +1173,7 @@ static void *mtl_pool_worker_main(void *vp)
     R_RegisterInterpreterState(&w->interp);
 
     R_InterpreterState *saved_interp = R_InterpreterTLS;
-    R_InterpreterTLS = &w->interp;
+    R_mtl_interpreter_set(&w->interp);
     R_InterpreterState *saved_compat = R_mtl_set_compat_interpreter(&w->interp);
 
 #ifdef R_USE_SIGNALS
@@ -1473,7 +1473,7 @@ static void *mtl_pool_worker_main(void *vp)
 		}
 	    }
 
-    R_InterpreterTLS = saved_interp;
+    R_mtl_interpreter_set(saved_interp);
     R_mtl_set_compat_interpreter(saved_compat);
     atomic_store_explicit(&w->in_shared_lookup, 0, memory_order_release);
     mtl_current_worker = NULL;

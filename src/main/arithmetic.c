@@ -375,6 +375,8 @@ static R_INLINE double R_integer_divide(int x, int y)
 
 static R_INLINE SEXP ScalarValue1(SEXP x)
 {
+    if (__builtin_expect(!R_MTL_THREADING_ACTIVE, 1))
+	return NO_REFERENCES(x) ? x : allocVector(TYPEOF(x), 1);
     if (NO_REFERENCES(x) && R_mtl_can_reuse_object(x))
 	return x;
     else
@@ -383,6 +385,14 @@ static R_INLINE SEXP ScalarValue1(SEXP x)
 
 static R_INLINE SEXP ScalarValue2(SEXP x, SEXP y)
 {
+    if (__builtin_expect(!R_MTL_THREADING_ACTIVE, 1)) {
+	if (NO_REFERENCES(x))
+	    return x;
+	else if (NO_REFERENCES(y))
+	    return y;
+	else
+	    return allocVector(TYPEOF(x), 1);
+    }
     if (NO_REFERENCES(x) && R_mtl_can_reuse_object(x))
 	return x;
     else if (NO_REFERENCES(y) && R_mtl_can_reuse_object(y))
@@ -774,7 +784,8 @@ static SEXP integer_unary(ARITHOP_TYPE code, SEXP s1, SEXP call)
     case PLUSOP:
 	return s1;
     case MINUSOP:
-	ans = (NO_REFERENCES(s1) && R_mtl_can_reuse_object(s1)) ? s1 : duplicate(s1);
+	ans = (__builtin_expect(!R_MTL_THREADING_ACTIVE, 1) && NO_REFERENCES(s1)) ||
+	    (NO_REFERENCES(s1) && R_mtl_can_reuse_object(s1)) ? s1 : duplicate(s1);
 	int *pa = INTEGER(ans);
 	const int *px = INTEGER_RO(s1);
 	n = XLENGTH(s1);
@@ -798,7 +809,8 @@ static SEXP real_unary(ARITHOP_TYPE code, SEXP s1, SEXP lcall)
     switch (code) {
     case PLUSOP: return s1;
     case MINUSOP:
-	ans = (NO_REFERENCES(s1) && R_mtl_can_reuse_object(s1)) ? s1 : duplicate(s1);
+	ans = (__builtin_expect(!R_MTL_THREADING_ACTIVE, 1) && NO_REFERENCES(s1)) ||
+	    (NO_REFERENCES(s1) && R_mtl_can_reuse_object(s1)) ? s1 : duplicate(s1);
 	double *pa = REAL(ans);
 	const double *px = REAL_RO(s1);
 	n = XLENGTH(s1);

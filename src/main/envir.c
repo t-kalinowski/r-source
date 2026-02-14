@@ -2017,9 +2017,13 @@ static void defineVar_impl(SEXP symbol, SEXP value, SEXP rho)
 
 void defineVar(SEXP symbol, SEXP value, SEXP rho)
 {
-    int gate = mtl_main_shared_env_mutation(rho);
     if (value == R_UnboundValue)
 	error("attempt to bind a variable to R_UnboundValue");
+    if (__builtin_expect(!R_MTL_THREADING_ACTIVE, 1)) {
+	defineVar_impl(symbol, value, rho);
+	return;
+    }
+    int gate = mtl_main_shared_env_mutation(rho);
     mtl_check_globalenv_assignment(rho);
 
     if (mtl_worker_shared_env_write(rho))
@@ -2154,6 +2158,9 @@ static SEXP setVarInFrame_impl(SEXP rho, SEXP symbol, SEXP value)
 
 static SEXP setVarInFrame(SEXP rho, SEXP symbol, SEXP value)
 {
+    if (__builtin_expect(!R_MTL_THREADING_ACTIVE, 1))
+	return setVarInFrame_impl(rho, symbol, value);
+
     int gate = mtl_main_shared_env_mutation(rho);
     mtl_check_globalenv_assignment(rho);
 
