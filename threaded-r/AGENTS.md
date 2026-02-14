@@ -44,6 +44,7 @@ Load these only when needed:
 Run from `threaded-r/`:
 
 - `make init-layout`
+- `make bootstrap`
 - `make smoke`
 - `make partial`
 - `make full`

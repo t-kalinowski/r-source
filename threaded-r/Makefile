@@ -1,10 +1,11 @@
 SHELL := /bin/bash
 
-.PHONY: help init-layout smoke partial full release bench-quick bench-full abi
+.PHONY: help init-layout bootstrap smoke partial full release bench-quick bench-full abi
 
 help:
 	@echo "Targets:"
 	@echo "  make init-layout   # create standard repo layout dirs"
+	@echo "  make bootstrap     # clone upstream and configure/build ref + mtl builds"
 	@echo "  make smoke         # fast correctness + isolation checks"
 	@echo "  make partial       # smoke + partial checks"
 	@echo "  make full          # partial + full checks + full benchmark"
@@ -15,6 +16,9 @@ help:
 
 init-layout:
 	@bash harness/scripts/layout-init.sh
+
+bootstrap:
+	@bash harness/scripts/bootstrap.sh
 
 smoke:
 	@bash harness/scripts/check-smoke.sh

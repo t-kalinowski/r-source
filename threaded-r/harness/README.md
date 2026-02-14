@@ -27,6 +27,7 @@ From `threaded-r/`:
 
 ```sh
 make init-layout
+make bootstrap
 make smoke
 make partial
 make full
@@ -35,3 +36,9 @@ make bench-quick
 make bench-full
 make abi
 ```
+
+`make bootstrap` provisions the local source/build baseline:
+
+- clones/syncs upstream `r-source/`,
+- creates pinned `r-source-ref/` worktree,
+- configures and builds `builds/mtl` + `builds/ref`.

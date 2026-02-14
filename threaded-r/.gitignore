@@ -2,6 +2,8 @@
 builds/mtl/
 builds/ref/
 builds/mtl-clang/
+r-source-ref/
+r-source/*
 
 # Local strict library
 site-library-strict/
