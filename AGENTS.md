@@ -89,12 +89,17 @@ Work towards making this build of R usable for package code that calls `.Call()`
 - After interpreting results, summarize the conclusion in `notes/INVESTIGATIONS.md` so later iterations have continuity.
 
 ### Process Management During Benchmarking
-- Prefer running long or kill-prone commands via the MCP console:
-  - Spawn work with `system2()` inside the console session.
-  - If something wedges or spawns children, use `manage_session(\"restart\")` to cleanly kill the session and its children, then continue.
-- For direct shell runs outside MCP console, wrap risky/experimental repros in
-  `gtimeout` (macOS coreutils) so hangs self-terminate:
-  - `/opt/homebrew/bin/gtimeout 30 build-mtl-shlib/bin/R --vanilla -q -f <script.R>`
+- Policy: do not request elevated permissions solely to kill/reap a stuck process.
+- Preferred control ladder (in order):
+  1. Bounded execution first for risky runs:
+     - `/opt/homebrew/bin/gtimeout 30 build-mtl-shlib/bin/R --vanilla -q -f <script.R>`
+  2. For unified shell sessions, prefer interactive control:
+     - launch with `tty=true`, interrupt with Ctrl-C (`write_stdin("\u0003")`),
+       poll with empty `write_stdin("")`, then exit cleanly (`exit\n` or Ctrl-D `\u0004`).
+  3. For child-heavy jobs, run through MCP console and use session restart for cleanup:
+     - `manage_session("restart")` kills the session process tree without OS-level `kill`.
+- Only request escalation for termination when the user explicitly asks for a direct OS-level kill
+  or when cleanup must touch paths/processes outside normal sandbox controls.
 
 ## Default Validation Ladder (Run in This Order)
 Use this as the standard iteration checklist after runtime changes.

@@ -38,6 +38,7 @@ Load these only when needed:
 - `agents/bench-and-validation.md`
 - `docs/AGENT_FIRST_PATTERNS.md`
 - `docs/KNOWLEDGE_BASE_LAYOUT.md`
+- `docs/SUBINTERPRETER_API.md`
 
 ## Harness quickstart
 
@@ -68,6 +69,7 @@ Primary binaries (override as needed):
 - The repository is the system of record for decisions, plans, and constraints.
 - Use progressive disclosure: load one or two scoped docs for the task, not everything.
 - Agents are encouraged to proactively update agent-facing artifacts (`AGENTS.md`, `agents/*.md`, `docs/*`, `plans/*`, harness docs, benchmark docs) whenever workflow, constraints, invariants, or validation procedures change.
+- Do not request elevated permissions just to stop runaway processes. Use bounded runs (`gtimeout`), TTY interrupts (`Ctrl-C` via `write_stdin("\u0003")`), and MCP-console session restart for process-tree cleanup; escalate only for explicit user-requested OS-level kill actions.
 - Prefer one happy-path implementation; fail fast on violated assumptions.
 - Keep feature deltas small and reversible.
 - Every runtime change must pass correctness + perf gates before merge.
